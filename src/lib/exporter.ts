@@ -4,48 +4,47 @@ import path from "node:path";
 import { PSTFile, type PSTFolder, type PSTMessage } from "pst-extractor";
 import { db } from "./db";
 
-/**
- * Extracts and cleans the body of the email.
- * Fallbacks to HTML body if plain text is missing, and strips HTML tags.
- */
-function extractBodyText(email: PSTMessage): string {
-  const emailWithHtml = email as unknown as { bodyHTML?: string };
-  let text = email.body || emailWithHtml.bodyHTML || "";
+// Helper to calculate basic token estimates (roughly 1 token per 4 chars for English)
+function estimateTokens(text: string): number {
+  if (!text) return 0;
+  return Math.ceil(text.length / 4);
+}
 
-  // If it looks like HTML, strip the tags to keep it clean for the LLM
-  if (text.includes("<") && text.includes(">")) {
-    text = text
-      .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ") // Remove CSS
-      .replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ") // Remove JS
-      .replace(/<[^>]+>/g, " "); // Remove HTML tags
+// Utility to safely identify top-level virtual directories like "Search Folders"
+function isSystemOrSearchFolder(folderName: string | undefined): boolean {
+  if (!folderName) return false;
+  const normalized = folderName.toLowerCase().trim();
+  return [
+    "search folders",
+    "finder",
+    "common views",
+    "deferred action",
+    "spam search folder",
+  ].some((sysName) => normalized.includes(sysName));
+}
+
+// Utility to clean up Microsoft Exchange Internal Legacy DNs in headers
+function cleanExchangeDN(raw: string | null | undefined): string {
+  // Return descriptive empty status if no recipient is present
+  if (!raw || raw.trim() === "") return "No Recipient";
+
+  // Only clean if it's an actual legacy Exchange DN pattern
+  if (raw.includes("/O=EXCHANGELABS") || raw.includes("/CN=")) {
+    const parts = raw.split("-");
+    if (parts.length > 1) {
+      return parts[parts.length - 1].toLowerCase();
+    }
+    return "Exchange Internal User";
   }
 
-  // Always remove HTML entities (like &nbsp;, &#8203;), even if tags weren't detected
-  text = text.replace(/&[a-zA-Z0-9#]+;/g, " ");
-
-  return text;
+  // Return standard email/name as-is
+  return raw;
 }
 
-/**
- * Cleans up email body text to save LLM tokens.
- * Removes multiple spaces and reduces continuous line breaks.
- */
-function optimizeTokens(text: string): string {
-  if (!text) return "";
-  return text
-    .replace(/\r\n/g, "\n") // Normalize line breaks
-    .replace(/ {2,}/g, " ") // Remove double spaces
-    .replace(/(?:\n\s*){3,}/g, "\n\n") // Collapse 3+ line breaks into 2
-    .trim();
-}
-
-/**
- * Step 1: Extract unique emails from the PST to a structured local directory
- * mimicking the staging area system folder structure.
- */
 export async function extractUniqueEmails(
   fileId: string,
-  outputBaseDir: string = "/Users/rafaelaguiar/Projects/extracted_emails",
+  outputBaseDir: string = process.env.EXTRACTED_PATH ||
+    "/Users/rgomes/Projects/extracted_emails",
 ) {
   const row = db
     .prepare("SELECT filepath FROM processed_files WHERE id = ?")
@@ -55,16 +54,14 @@ export async function extractUniqueEmails(
     throw new Error(`File target missing for extraction: ${fileId}`);
   }
 
-  // Auto-migrate the database to include the new estimated_tokens column if it doesn't exist
   try {
-    db.prepare(
+    db.exec(
       "ALTER TABLE processed_files ADD COLUMN estimated_tokens INTEGER DEFAULT 0",
-    ).run();
-  } catch (_error) {
-    // Column likely already exists, safe to ignore
+    );
+  } catch {
+    // Column already exists, safe to ignore
   }
 
-  // Update status so the UI knows we are extracting, and reset token count
   db.prepare(
     "UPDATE processed_files SET status = 'extracting', estimated_tokens = 0 WHERE id = ?",
   ).run(fileId);
@@ -72,7 +69,7 @@ export async function extractUniqueEmails(
   (async () => {
     try {
       const stagingPath =
-        process.env.STAGING_PATH || "/Users/rafaelaguiar/Projects/staging-area";
+        process.env.STAGING_PATH || "/Users/rgomes/Projects/staging-area";
       let relativeSystemPath = path.relative(stagingPath, row.filepath);
 
       if (
@@ -82,104 +79,275 @@ export async function extractUniqueEmails(
         relativeSystemPath = fileId;
       }
 
-      const cleanRelativePath = relativeSystemPath.replace(/\.pst$/i, "");
-      const exportRoot = path.join(outputBaseDir, cleanRelativePath);
+      let cleanRelativePath = path.dirname(relativeSystemPath);
+      if (cleanRelativePath === "." || cleanRelativePath === "") {
+        cleanRelativePath = path.parse(relativeSystemPath).name;
+      }
+      const targetFolder = path.join(outputBaseDir, cleanRelativePath);
 
-      if (!fs.existsSync(exportRoot)) {
-        fs.mkdirSync(exportRoot, { recursive: true });
+      if (!fs.existsSync(targetFolder)) {
+        fs.mkdirSync(targetFolder, { recursive: true });
       }
 
-      const uniqueHashes = new Set(
-        db
-          .prepare(
-            "SELECT email_hash FROM emails WHERE file_id = ? AND is_duplicate = 0",
-          )
-          .all(fileId)
-          .map((r: unknown) => (r as { email_hash: string }).email_hash),
-      );
+      // Fetch the mapping of raw PST identifiers to the Content-Aware Hashes generated by analyzer.ts
+      const uniqueEmails = db
+        .prepare(
+          "SELECT email_hash, message_id, sent_date FROM emails WHERE file_id = ? AND is_duplicate = 0",
+        )
+        .all(fileId) as {
+        email_hash: string;
+        message_id: string;
+        sent_date: string;
+      }[];
+
+      // Track which hashes we still need to extract to prevent duplicate extraction of identical content
+      const targetHashes = new Set(uniqueEmails.map((e) => e.email_hash));
+
+      // Map the raw PST identifiers back to the DB's true hash
+      const emailMap = new Map<string, string>();
+      for (const r of uniqueEmails) {
+        const key =
+          r.message_id && r.message_id.length > 5 ? r.message_id : r.sent_date;
+        emailMap.set(key, r.email_hash);
+      }
 
       const pstFile = new PSTFile(row.filepath);
       const rootFolder = pstFile.getRootFolder();
 
-      let totalTokensEstimate = 0;
-      let processedSinceLastUpdate = 0;
+      let totalTokens = 0;
 
-      async function traverseAndExtract(folder: PSTFolder) {
+      async function processEmailNode(
+        emailObj: PSTMessage,
+        providedHash: string | null,
+        parentHash: string | null = null,
+      ) {
+        const messageId = emailObj.internetMessageId?.trim() || "";
+        const sentDate = emailObj.clientSubmitTime
+          ? emailObj.clientSubmitTime.toISOString()
+          : "no-date";
+        const subject = emailObj.subject?.trim() || "no-subject";
+
+        let emailHash = providedHash;
+        if (!emailHash) {
+          // Fallback for nested attachments that were not pre-calculated by analyzer.ts
+          const normSubject = subject.toLowerCase().replace(/[^a-z0-9]/g, "");
+          const normBody = (emailObj.body || "")
+            .toLowerCase()
+            .replace(/[^a-z0-9]/g, "")
+            .substring(0, 500);
+          emailHash = crypto
+            .createHash("sha256")
+            .update(`${normSubject}_${normBody}`)
+            .digest("hex");
+        }
+
+        if (parentHash !== null) {
+          try {
+            db.prepare(`
+              INSERT INTO emails (id, file_id, message_id, sent_date, email_hash, is_duplicate, parent_email_hash, is_attachment)
+              VALUES (?, ?, ?, ?, ?, 0, ?, 1)
+              ON CONFLICT(email_hash) DO NOTHING
+            `).run(
+              crypto.randomUUID(),
+              fileId,
+              messageId,
+              sentDate,
+              emailHash,
+              parentHash,
+            );
+          } catch {
+            // Safe to ignore constraint violations for nested attachments
+          }
+        }
+
+        const emlPath = path.join(targetFolder, `${emailHash}.eml`);
+        const jsonPath = path.join(targetFolder, `${emailHash}.json`);
+
+        if (!fs.existsSync(emlPath)) {
+          const plainText = emailObj.body || "";
+          const htmlText = emailObj.bodyHTML || "";
+          const fallbackText =
+            plainText || htmlText.replace(/<[^>]*>?/gm, "") || "";
+
+          // --- Structural Email Separation (Thread Truncation) ---
+          const threadBlocks = fallbackText.split(
+            /(?:\r?\n)(?=From:\s|_{10,}|-----Original Message-----)/i,
+          );
+
+          let aiBodyText = fallbackText;
+          if (threadBlocks.length > 2) {
+            aiBodyText = threadBlocks.slice(0, 2).join("\n");
+          }
+
+          const senderRaw =
+            emailObj.senderName || emailObj.senderEmailAddress || "";
+          const emailPayload = {
+            emailHash: emailHash,
+            parentHash: parentHash,
+            from: cleanExchangeDN(senderRaw),
+            to: cleanExchangeDN(emailObj.displayTo),
+            subject: subject,
+            date: sentDate,
+            attachments: emailObj.hasAttachments,
+            body: aiBodyText.substring(0, 15000),
+          };
+
+          fs.writeFileSync(jsonPath, JSON.stringify(emailPayload, null, 2));
+
+          const boundaryMix = `----=_MixedBoundary_${crypto.randomBytes(8).toString("hex")}`;
+          const boundaryAlt = `----=_AltBoundary_${crypto.randomBytes(8).toString("hex")}`;
+
+          let emlContent = `Message-ID: <${messageId}>\r\n`;
+          emlContent += `Date: ${sentDate}\r\n`;
+          emlContent += `From: ${emailPayload.from}\r\n`;
+          emlContent += `To: ${emailPayload.to}\r\n`;
+          emlContent += `Subject: ${subject}\r\n`;
+          emlContent += `MIME-Version: 1.0\r\n`;
+
+          if (emailObj.hasAttachments) {
+            emlContent += `Content-Type: multipart/mixed; boundary="${boundaryMix}"\r\n\r\n`;
+            emlContent += `--${boundaryMix}\r\n`;
+          }
+
+          if (htmlText) {
+            emlContent += `Content-Type: multipart/alternative; boundary="${boundaryAlt}"\r\n\r\n`;
+
+            if (plainText) {
+              emlContent += `--${boundaryAlt}\r\n`;
+              emlContent += `Content-Type: text/plain; charset=utf-8\r\n\r\n`;
+              emlContent += `${plainText}\r\n\r\n`;
+            }
+
+            emlContent += `--${boundaryAlt}\r\n`;
+            emlContent += `Content-Type: text/html; charset=utf-8\r\n\r\n`;
+            emlContent += `${htmlText}\r\n\r\n`;
+
+            emlContent += `--${boundaryAlt}--\r\n\r\n`;
+          } else {
+            emlContent += `Content-Type: text/plain; charset=utf-8\r\n\r\n`;
+            emlContent += `${plainText}\r\n\r\n`;
+          }
+
+          if (emailObj.hasAttachments) {
+            const padAtt = Math.max(
+              3,
+              emailObj.numberOfAttachments.toString().length,
+            );
+
+            for (let i = 0; i < emailObj.numberOfAttachments; i++) {
+              const attachment = emailObj.getAttachment(i);
+              const attachmentName =
+                attachment.longFilename ||
+                attachment.filename ||
+                `attachment_${i}.dat`;
+              const mimeType = attachment.mimeTag || "application/octet-stream";
+              const contentId =
+                attachment.contentId ||
+                (attachment as { attachContentId?: string }).attachContentId ||
+                "";
+
+              const seqStr = String(i + 1).padStart(padAtt, "0");
+              const attachmentBaseName = `${emailHash}_Attachment_${seqStr}`;
+
+              if (attachment.embeddedPSTMessage) {
+                await processEmailNode(
+                  attachment.embeddedPSTMessage,
+                  null,
+                  emailHash,
+                );
+              } else if (attachment.fileInputStream && attachment.size > 0) {
+                const attachmentBuffer = Buffer.alloc(attachment.size);
+                attachment.fileInputStream.read(attachmentBuffer);
+
+                const ext = path.extname(attachmentName).toLowerCase();
+                const isImage = [
+                  ".png",
+                  ".jpg",
+                  ".jpeg",
+                  ".gif",
+                  ".svg",
+                  ".bmp",
+                  ".tiff",
+                ].includes(ext);
+
+                if (!isImage) {
+                  const safeFileName = `${attachmentBaseName}${ext}`;
+                  const physicalAttachmentPath = path.join(
+                    targetFolder,
+                    safeFileName,
+                  );
+                  fs.writeFileSync(physicalAttachmentPath, attachmentBuffer);
+                }
+
+                emlContent += `--${boundaryMix}\r\n`;
+                emlContent += `Content-Type: ${mimeType}; name="${attachmentName}"\r\n`;
+
+                if (contentId) {
+                  emlContent += `Content-ID: <${contentId.replace(/[<>]/g, "")}>\r\n`;
+                  emlContent += `Content-Disposition: inline; filename="${attachmentName}"\r\n`;
+                } else {
+                  emlContent += `Content-Disposition: attachment; filename="${attachmentName}"\r\n`;
+                }
+
+                emlContent += `Content-Transfer-Encoding: base64\r\n\r\n`;
+                emlContent += `${attachmentBuffer.toString("base64")}\r\n\r\n`;
+              }
+            }
+            emlContent += `--${boundaryMix}--\r\n`;
+          }
+
+          fs.writeFileSync(emlPath, emlContent);
+          totalTokens += estimateTokens(aiBodyText);
+        }
+      }
+
+      async function extractFolder(folder: PSTFolder, isRoot = false) {
+        const folderName = folder.displayName;
+        if (!isRoot && isSystemOrSearchFolder(folderName)) {
+          return;
+        }
+
         if (folder.contentCount > 0) {
-          let email: PSTMessage | null = folder.getNextChild();
+          let email = folder.getNextChild();
 
           while (email !== null) {
             const messageId = email.internetMessageId?.trim() || "";
             const sentDate = email.clientSubmitTime
               ? email.clientSubmitTime.toISOString()
-              : "";
-            const subject = email.subject?.trim() || "";
-            const rawBody = extractBodyText(email);
+              : "no-date";
 
-            let emailHash = "";
-            if (messageId && messageId.length > 5) {
-              emailHash = crypto
-                .createHash("sha256")
-                .update(messageId)
-                .digest("hex");
-            } else {
-              emailHash = crypto
-                .createHash("sha256")
-                .update(
-                  `${subject || "no-subject"}_${sentDate || "no-date"}_${rawBody.substring(0, 500)}`,
-                )
-                .digest("hex");
+            const key =
+              messageId && messageId.length > 5 ? messageId : sentDate;
+            const assignedHash = emailMap.get(key);
+
+            if (assignedHash && targetHashes.has(assignedHash)) {
+              await processEmailNode(email, assignedHash, null);
+              targetHashes.delete(assignedHash);
             }
 
-            if (uniqueHashes.has(emailHash)) {
-              const emailData: Record<string, string | boolean> = {};
-
-              const sender = email.senderName || email.senderEmailAddress;
-              if (sender) emailData.from = sender.trim();
-              if (email.displayTo) emailData.to = email.displayTo.trim();
-              if (subject) emailData.subject = subject;
-              if (sentDate) emailData.date = sentDate;
-              if (email.hasAttachments) emailData.attachments = true;
-
-              const cleanBody = optimizeTokens(rawBody);
-              if (cleanBody) emailData.body = cleanBody;
-
-              const jsonString = JSON.stringify(emailData);
-              const outPath = path.join(exportRoot, `${emailHash}.json`);
-              fs.writeFileSync(outPath, jsonString);
-
-              // Rule of thumb: 1 token ≈ 4 characters in English text
-              const tokensInThisEmail = Math.ceil(jsonString.length / 4);
-              totalTokensEstimate += tokensInThisEmail;
-              processedSinceLastUpdate++;
-
-              // Update the UI with token count every 50 emails
-              if (processedSinceLastUpdate >= 50) {
-                db.prepare(
-                  "UPDATE processed_files SET estimated_tokens = ? WHERE id = ?",
-                ).run(totalTokensEstimate, fileId);
-                processedSinceLastUpdate = 0;
-              }
-
-              await new Promise((res) => setTimeout(res, 0));
-            }
             email = folder.getNextChild();
           }
         }
 
         if (folder.hasSubfolders) {
-          for (const sub of folder.getSubFolders()) {
-            await traverseAndExtract(sub);
+          try {
+            for (const sub of folder.getSubFolders()) {
+              await extractFolder(sub);
+            }
+          } catch (err) {
+            console.warn(
+              `[Extraction Warning] Skipping corrupted subfolder index list in: ${folderName}`,
+              err,
+            );
           }
         }
       }
 
-      await traverseAndExtract(rootFolder);
+      await extractFolder(rootFolder, true);
 
-      // Final update with complete token count
       db.prepare(
         "UPDATE processed_files SET status = 'completed', estimated_tokens = ? WHERE id = ?",
-      ).run(totalTokensEstimate, fileId);
+      ).run(totalTokens, fileId);
     } catch (error) {
       console.error(`Extraction failed on file ${fileId}:`, error);
       db.prepare(

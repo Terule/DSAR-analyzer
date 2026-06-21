@@ -25,7 +25,7 @@ async function getAllPstFiles(
 
 export async function syncStagingArea(
   directoryPath: string = process.env.STAGING_PATH ||
-    "/Users/rafaelaguiar/Projects/staging-area",
+    "/Users/rgomes/Projects/staging-area",
 ) {
   if (!fs.existsSync(directoryPath)) return;
 
