@@ -120,8 +120,18 @@ Format exactly like this: {"decision": "keep" | "discard", "reason": "Brief just
 
     if (estimatedTokens > MAX_TOKENS_PER_BATCH) {
       console.log(
-        `[AI Engine] Warning: Email ${hash} exceeds max tokens on its own (${estimatedTokens} tokens). Skipping...`,
+        `[AI Engine] Warning: Email ${hash} exceeds max tokens on its own (${estimatedTokens} tokens). Discarding...`,
       );
+
+      // 🚨 CRITICAL FIX: Ensure skipped oversized files are marked as discarded so they don't infinite-loop!
+      db.prepare(
+        "UPDATE emails SET ai_decision = 'discard', ai_reason = 'System Discard: Exceeded max batch token limit' WHERE email_hash = ? AND file_id = ?",
+      ).run(hash, fileId);
+
+      db.prepare(
+        "UPDATE processed_files SET ai_discarded_count = ai_discarded_count + 1 WHERE id = ?",
+      ).run(fileId);
+
       continue;
     }
 

@@ -1,14 +1,26 @@
 import fs from "node:fs";
 import path from "node:path";
 import OpenAI from "openai";
+import { generateBatchFile } from "./ai";
 import { db } from "./db";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export async function pollBatchStatus(fileId: string) {
   const row = db
-    .prepare("SELECT filepath, batch_id FROM processed_files WHERE id = ?")
-    .get(fileId) as { filepath: string; batch_id: string } | undefined;
+    .prepare(
+      "SELECT filepath, batch_id, subject_name, subject_email, subject_aliases FROM processed_files WHERE id = ?",
+    )
+    .get(fileId) as
+    | {
+        filepath: string;
+        batch_id: string;
+        subject_name?: string;
+        subject_email?: string;
+        subject_aliases?: string;
+      }
+    | undefined;
+
   if (!row || !row.batch_id) return;
 
   const stagingPath =
@@ -141,11 +153,32 @@ export async function pollBatchStatus(fileId: string) {
 
     if (remaining.c > 0) {
       console.log(
-        `[Batch Worker] Chunk complete. ${remaining.c} items remaining. Re-queueing next chunk...`,
+        `[Batch Worker] Chunk complete. ${remaining.c} items remaining. Generating next chunk immediately...`,
       );
+      // Keep UI smoothly in "processing" state
       db.prepare(
-        "UPDATE processed_files SET ai_status = 'pending', batch_id = NULL WHERE id = ?",
+        "UPDATE processed_files SET ai_status = 'processing', batch_id = NULL WHERE id = ?",
       ).run(fileId);
+
+      // 🔥 FIRE THE NEXT CHUNK INSTANTLY 🔥
+      generateBatchFile(fileId, {
+        name: row.subject_name || "",
+        email: row.subject_email || "",
+        aliases: row.subject_aliases
+          ? row.subject_aliases
+              .split(",")
+              .map((a) => a.trim())
+              .filter(Boolean)
+          : [],
+      }).catch((err) => {
+        console.error(
+          `[Batch Worker] Fatal error generating next chunk for ${fileId}:`,
+          err,
+        );
+        db.prepare(
+          "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
+        ).run(fileId);
+      });
     } else {
       console.log(
         `[Batch Worker] All AI chunks completed successfully for file ${fileId}.`,

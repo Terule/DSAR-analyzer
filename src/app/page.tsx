@@ -188,13 +188,39 @@ export default function Dashboard() {
   const handleSyncBatch = useCallback(
     async (caseName: string, filesToSync: string[]) => {
       setSyncingCases((prev) => ({ ...prev, [caseName]: true }));
+      let stillProcessing = false;
+      let wasReverted = false;
+
       try {
         for (const fileId of filesToSync) {
-          await fetch("/api/batch-poll", {
+          const res = await fetch("/api/batch-poll", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ fileId }),
           });
+
+          if (res.ok) {
+            const data = await res.json();
+            if (
+              data.status === "in_progress" ||
+              data.status === "validating" ||
+              data.status === "finalizing"
+            ) {
+              stillProcessing = true;
+            } else if (data.status === "reverted") {
+              wasReverted = true;
+            }
+          }
+        }
+
+        if (wasReverted) {
+          alert(
+            "Detected an orphaned/stuck batch! The file has been auto-healed and reverted to 'pending'. The AI Engine will automatically generate a new chunk shortly.",
+          );
+        } else if (stillProcessing) {
+          alert(
+            "OpenAI is still processing the batches (Status: In Progress). This can take up to 24 hours depending on their server load. The dashboard will update automatically when finished.",
+          );
         }
       } catch (error) {
         console.error(error);
@@ -214,7 +240,7 @@ export default function Dashboard() {
 
       setResettingCases((prev) => ({ ...prev, [caseName]: true }));
       try {
-        const res = await fetch("/api/reset-case", {
+        const res = await fetch("/api/wipe", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ caseName, fileIds }),
@@ -1048,7 +1074,7 @@ export default function Dashboard() {
                       type="text"
                       value={stdSubjectName}
                       onChange={(e) => setStdSubjectName(e.target.value)}
-                      placeholder="e.g., Michael Burke"
+                      placeholder="e.g., Rafael Gomes"
                       className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
                     />
                   </div>
@@ -1066,7 +1092,7 @@ export default function Dashboard() {
                     type="text"
                     value={stdSubjectAliases}
                     onChange={(e) => setStdSubjectAliases(e.target.value)}
-                    placeholder="e.g., Mike B, MBurke"
+                    placeholder="e.g., Rafael G., RGomes"
                     className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
                   />
                 </div>
