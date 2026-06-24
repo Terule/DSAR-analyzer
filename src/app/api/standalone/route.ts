@@ -2,9 +2,12 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import { PDFParse } from "pdf-parse";
 import puppeteer from "puppeteer";
-import { processDocxToPdf, processExcelToPdf } from "@/lib/converter";
+import {
+  extractPdfText,
+  processDocxToPdf,
+  processExcelToPdf,
+} from "@/lib/converter";
 
 export const dynamic = "force-dynamic";
 
@@ -219,40 +222,34 @@ export async function POST(request: Request) {
         // --- HANDLER 4: Raw PDFs ---
         else if (ext === ".pdf") {
           try {
-            const parser = new PDFParse({ data: buffer });
-            try {
-              const pdfData = await parser.getText();
-              const rawText = pdfData.text.toLowerCase();
+            const rawText = (await extractPdfText(buffer)).toLowerCase();
 
-              if (exclusions.some((ex) => rawText.includes(ex))) {
+            if (exclusions.some((ex) => rawText.includes(ex))) {
+              console.log(
+                `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
+              );
+            } else if (!criteria.some((c) => rawText.includes(c))) {
+              console.log(
+                `[Standalone Filter] Discarded PDF ${file}: Data subject not mentioned.`,
+              );
+            } else {
+              // ADD SEMANTIC HASH CHECK HERE
+              const textHash = crypto
+                .createHash("sha256")
+                .update(rawText)
+                .digest("hex");
+              if (processedHashes.has(textHash)) {
                 console.log(
-                  `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
+                  `[Standalone Filter] Discarded Duplicate PDF ${file} (Content Match).`,
                 );
-              } else if (!criteria.some((c) => rawText.includes(c))) {
-                console.log(
-                  `[Standalone Filter] Discarded PDF ${file}: Data subject not mentioned.`,
-                );
-              } else {
-                // ADD SEMANTIC HASH CHECK HERE
-                const textHash = crypto
-                  .createHash("sha256")
-                  .update(rawText)
-                  .digest("hex");
-                if (processedHashes.has(textHash)) {
-                  console.log(
-                    `[Standalone Filter] Discarded Duplicate PDF ${file} (Content Match).`,
-                  );
-                  duplicatesCount++;
-                  skippedCount++;
-                  continue;
-                }
-                processedHashes.add(textHash);
-
-                fs.copyFileSync(filePath, pdfOutputPath);
-                success = true;
+                duplicatesCount++;
+                skippedCount++;
+                continue;
               }
-            } finally {
-              await parser.destroy();
+              processedHashes.add(textHash);
+
+              fs.copyFileSync(filePath, pdfOutputPath);
+              success = true;
             }
           } catch (_e) {
             console.warn(
@@ -277,7 +274,7 @@ export async function POST(request: Request) {
           processedCount++;
           if (isMessage) messageCounter++;
           else documentCounter++;
-          console.log(`[Standalone Engine] ✅ Exported: ${seqName}.pdf`);
+          console.log(`[Standalone Engine] Exported: ${seqName}.pdf`);
         } else {
           skippedCount++;
         }
