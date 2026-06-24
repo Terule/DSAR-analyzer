@@ -26,20 +26,19 @@ export async function POST(request: Request) {
       );
     }
 
-    // Trava imediatamente no banco para a UI atualizar
     db.prepare(
       "UPDATE processed_files SET status = 'scanning_metadata' WHERE id = ?",
     ).run(fileId);
 
-    // Roda em background
+    // Timeout de 100ms destrava o botão instantaneamente
     setTimeout(() => {
-      scanFileMetadata(fileId).catch((err) => {
+      scanFileMetadata(fileId).catch((err: unknown) => {
         console.error(`Metadata background worker crashed for ${fileId}:`, err);
         db.prepare(
           "UPDATE processed_files SET status = 'failed' WHERE id = ?",
         ).run(fileId);
       });
-    }, 0);
+    }, 100);
 
     return NextResponse.json({ success: true }, { status: 202 });
   } catch (error) {

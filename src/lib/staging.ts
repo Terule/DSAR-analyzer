@@ -15,7 +15,7 @@ async function getAllPstFiles(
 
     if (entry.isDirectory()) {
       arrayOfFiles = await getAllPstFiles(fullPath, arrayOfFiles);
-    } else if (entry.name.endsWith(".pst")) {
+    } else if (entry.name.toLowerCase().endsWith(".pst")) {
       arrayOfFiles.push(fullPath);
     }
   }
@@ -27,27 +27,30 @@ export async function syncStagingArea(
   directoryPath: string = process.env.STAGING_PATH ||
     "/Users/rgomes/Projects/staging-area",
 ) {
-  if (!fs.existsSync(directoryPath)) return;
+  console.log(`[Scanner] Attempting to scan directory: ${directoryPath}`);
 
-  // 1. Reset the entire database: Wipes all tracked emails and processed files.
-  // This guarantees that replaced, renamed, or modified files are scanned completely fresh.
-  const resetTransaction = db.transaction(() => {
-    db.prepare("DELETE FROM emails").run();
-    db.prepare("DELETE FROM processed_files").run();
-  });
-  resetTransaction();
+  if (!fs.existsSync(directoryPath)) {
+    console.error(`[Scanner Error] Directory does not exist: ${directoryPath}`);
+    return;
+  }
+
+  // 1. NO MORE GLOBAL WIPES!
+  // We removed the DELETE FROM emails and processed_files transactions here.
+  // The scanner is now 100% non-destructive.
 
   // 2. Get all current files asynchronously without freezing the server
   const currentFilePaths = await getAllPstFiles(directoryPath);
 
-  // 3. Prepare fresh inserts
+  // 3. Prepare fresh inserts using INSERT OR IGNORE
+  // If the file hash already exists in the database, SQLite will simply ignore it and move on!
   const insertStmt = db.prepare(`
-    INSERT INTO processed_files (id, filename, filepath, file_size_bytes, status)
+    INSERT OR IGNORE INTO processed_files (id, filename, filepath, file_size_bytes, status)
     VALUES (?, ?, ?, ?, 'pending')
   `);
 
   // Wrapped in a transaction to execute disk operations instantly
   const insertTransaction = db.transaction(() => {
+    let newFilesAdded = 0;
     for (const fullPath of currentFilePaths) {
       const stats = fs.statSync(fullPath);
       const filename = path.basename(fullPath);
@@ -57,8 +60,12 @@ export async function syncStagingArea(
         .digest("hex")
         .substring(0, 12);
 
-      insertStmt.run(fileId, filename, fullPath, stats.size);
+      const result = insertStmt.run(fileId, filename, fullPath, stats.size);
+      if (result.changes > 0) newFilesAdded++;
     }
+    console.log(
+      `[Scanner] Sync complete. Added ${newFilesAdded} new files. Ignored existing files.`,
+    );
   });
   insertTransaction(); // Execute transaction
 }

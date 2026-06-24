@@ -3,7 +3,3 @@
 :root {
   color-scheme: dark;
 }
-
-body {
-  @apply bg-slate-900 text-slate-100 antialiased min-h-screen flex flex-col;
-}

@@ -85,6 +85,9 @@ export async function pollBatchStatus(fileId: string) {
     })();
 
     if (keptHashes.length > 0) {
+      // ---------------------------------------------------------
+      // STEP 5: Add selected emails to the "export" folder
+      // ---------------------------------------------------------
       const exportDir = path.join(targetFolder, "export");
       if (!fs.existsSync(exportDir)) {
         fs.mkdirSync(exportDir, { recursive: true });
@@ -104,6 +107,8 @@ export async function pollBatchStatus(fileId: string) {
       }[];
 
       approvedEmails.sort((a, b) => a.sent_date.localeCompare(b.sent_date));
+
+      // STEP 7: Change the file name to match the naming convention
       const padLength = Math.max(4, approvedEmails.length.toString().length);
 
       for (let i = 0; i < approvedEmails.length; i++) {
@@ -114,25 +119,9 @@ export async function pollBatchStatus(fileId: string) {
         const destEmlPath = path.join(exportDir, `${newSeqName}.eml`);
 
         if (fs.existsSync(sourceEmlPath)) {
+          // We strictly copy only the .eml file.
+          // It safely contains all attachments inside its payload for Step 6.
           fs.copyFileSync(sourceEmlPath, destEmlPath);
-
-          // Sequentially relocate attachments matching original sequential indices
-          const allExtractedFiles = fs.readdirSync(targetFolder);
-          for (const extFile of allExtractedFiles) {
-            // Relocate standard non-image attachments matching original hash-based formats
-            if (extFile.startsWith(`${item.email_hash}_Attachment`)) {
-              const attachmentSuffix = extFile.substring(
-                `${item.email_hash}_Attachment`.length,
-              );
-              const safeFileName = `${newSeqName} Attachment${attachmentSuffix}`;
-
-              const srcAtt = path.join(targetFolder, extFile);
-              const dstAtt = path.join(exportDir, safeFileName);
-              if (!fs.existsSync(dstAtt)) {
-                fs.copyFileSync(srcAtt, dstAtt);
-              }
-            }
-          }
         }
       }
     }

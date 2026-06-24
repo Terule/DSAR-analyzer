@@ -13,12 +13,15 @@
     "@types/mailparser": "^3.4.6",
     "lucide-react": "^1.21.0",
     "mailparser": "^3.9.10",
+    "mammoth": "^1.12.0",
     "next": "16.2.7",
     "openai": "^6.44.0",
+    "pdf-parse": "^2.4.5",
     "pst-extractor": "^1.12.0",
     "puppeteer": "^25.1.0",
     "react": "19.2.4",
     "react-dom": "19.2.4",
+    "string-similarity": "^4.0.4",
     "xlsx": "^0.18.5"
   },
   "devDependencies": {
@@ -26,6 +29,7 @@
     "@tailwindcss/postcss": "^4",
     "@types/bun": "^1.3.14",
     "@types/node": "^20",
+    "@types/pdf-parse": "^1.1.5",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "babel-plugin-react-compiler": "1.0.0",
@@ -37,6 +41,7 @@
     "unrs-resolver"
   ],
   "trustedDependencies": [
+    "puppeteer",
     "sharp",
     "unrs-resolver"
   ]

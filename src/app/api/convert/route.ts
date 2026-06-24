@@ -50,23 +50,13 @@ export async function POST(request: Request) {
 
     console.log(`Received request to start PDF conversion for file: ${fileId}`);
 
-    // Trigger background worker
-    // We don't await this, allowing the API to return immediately while the heavy lifting happens in the background.
-    convertToPdfBatch(fileId).catch((err) => {
-      console.error(
-        `Background PDF worker failed to start for ${fileId}:`,
-        err,
-      );
-      // Mark as failed in DB if the immediate launch fails
-      db.prepare(
-        "UPDATE processed_files SET pdf_status = 'failed' WHERE id = ?",
-      ).run(fileId);
-    });
+    // MUST AWAIT THIS: Otherwise Next.js will kill the Puppeteer process silently!
+    await convertToPdfBatch(fileId);
 
-    // Return 202 Accepted indicating the job has started
+    // Return 200 OK indicating the job has finished safely
     return NextResponse.json(
-      { success: true, message: "PDF conversion background job started." },
-      { status: 202 },
+      { success: true, message: "PDF conversion completed successfully." },
+      { status: 200 },
     );
   } catch (error) {
     console.error("API route /api/convert encountered an error:", error);

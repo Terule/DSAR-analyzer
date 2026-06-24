@@ -1,5 +1,7 @@
 import crypto from "node:crypto";
-import { PSTFile, type PSTFolder } from "pst-extractor";
+import fs from "node:fs";
+import path from "node:path";
+import { PSTFile, type PSTFolder, type PSTMessage } from "pst-extractor";
 import { db } from "./db";
 
 interface AnalysisMetrics {
@@ -9,29 +11,18 @@ interface AnalysisMetrics {
   totalAttachments: number;
 }
 
-/**
- * Safely fetches the subfolders of a PST folder.
- * Uses a zero-touch pre-filtering check to prevent executing native C++ panics.
- */
 function safeGetSubFolders(folder: PSTFolder): PSTFolder[] {
   try {
     const sub = folder.getSubFolders();
     return sub && Array.isArray(sub) ? sub : [];
-  } catch (err) {
-    console.warn(
-      `[PST BTree Warning] Bypassed corrupted child folders for "${folder.displayName || "Unknown Folder"}":`,
-      err,
-    );
+  } catch (err: unknown) {
+    console.warn(`[PST BTree Warning] Bypassed corrupted child folders:`, err);
     return [];
   }
 }
 
-/**
- * Checks if a folder is a virtual system/search folder that should be bypassed.
- * These folders contain zero unique emails and are highly prone to index corruption.
- */
 function isSystemOrSearchFolder(folderName: string): boolean {
-  if (!folderName) return false; // Allow empty names (like the root folder) to proceed unless checked explicitly
+  if (!folderName) return false;
   const name = folderName.toLowerCase();
   return (
     name.includes("spam search folder") ||
@@ -45,17 +36,34 @@ function isSystemOrSearchFolder(folderName: string): boolean {
   );
 }
 
-/**
- * Recursively traverses the folder tree to calculate gross email counts.
- * Uses super-fast header-level lookups instead of parsing every individual message.
- */
+// Smarter Fallback Generator (Ignored 'To' field and first 20 body chars)
+function generateFallbackHash(
+  senderRaw: string,
+  subjectRaw: string,
+  bodyRaw: string,
+): string {
+  const sender = senderRaw.toLowerCase().replace(/[^a-z0-9]/g, "");
+  const subject = subjectRaw
+    .toLowerCase()
+    .replace(/^(re|fw|fwd|wg|aw)\s*:\s*/g, "")
+    .replace(/[^a-z0-9]/g, "");
+  const body = bodyRaw
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "")
+    .substring(20, 120);
+
+  return crypto
+    .createHash("sha256")
+    .update(`${sender}_${subject}_${body}`)
+    .digest("hex");
+}
+
 export async function scanFileMetadata(fileId: string): Promise<void> {
   const row = db
     .prepare("SELECT filepath FROM processed_files WHERE id = ?")
     .get(fileId) as { filepath: string } | undefined;
-  if (!row) {
+  if (!row)
     throw new Error(`File record not found in database for ID: ${fileId}`);
-  }
 
   let totalEmails = 0;
 
@@ -65,35 +73,23 @@ export async function scanFileMetadata(fileId: string): Promise<void> {
 
     async function traverse(folder: PSTFolder, isRoot = false) {
       const displayName = folder.displayName || "";
+      if (!isRoot && isSystemOrSearchFolder(displayName)) return;
 
-      // 🚨 CRITICAL FIX: Skip virtual directories, but NEVER skip the top-level Root container
-      if (!isRoot && isSystemOrSearchFolder(displayName)) {
-        return;
-      }
-
-      // Read total email count instantly from the directory header (O(1))
       totalEmails += folder.contentCount;
-
       const subFolders = safeGetSubFolders(folder);
       if (subFolders.length > 0) {
-        for (const sub of subFolders) {
-          await traverse(sub, false);
-        }
+        for (const sub of subFolders) await traverse(sub, false);
       }
     }
 
-    // Begin traversing by declaring the first node as the Root folder
     await traverse(rootFolder, true);
 
-    // Save metadata with total_attachments initially set to 0 (will populate during deduplication)
     db.prepare(`
       UPDATE processed_files 
-      SET total_emails = ?,
-          total_attachments = 0,
-          status = 'pending_analysis'
+      SET total_emails = ?, total_attachments = 0, status = 'pending_analysis'
       WHERE id = ?
     `).run(totalEmails, fileId);
-  } catch (error) {
+  } catch (error: unknown) {
     console.error(`Metadata scanning failed on file ${fileId}:`, error);
     db.prepare("UPDATE processed_files SET status = 'failed' WHERE id = ?").run(
       fileId,
@@ -102,120 +98,103 @@ export async function scanFileMetadata(fileId: string): Promise<void> {
   }
 }
 
-/**
- * Recursively parses email folders, filters duplicates using Content-Aware signatures,
- * and tracks the actual number of attachments on the fly.
- */
-async function processEmailFolder(
-  folder: PSTFolder,
-  fileId: string,
-  metrics: AnalysisMetrics,
-  isRoot = false,
-): Promise<void> {
-  const displayName = folder.displayName || "";
+// Recursive EML builder to embed attachments natively
+function buildRawEml(
+  emailObj: PSTMessage,
+  messageId: string,
+  sentDate: string,
+  subject: string,
+): string {
+  const boundaryMix = `----=_MixedBoundary_${crypto.randomBytes(8).toString("hex")}`;
+  const boundaryAlt = `----=_AltBoundary_${crypto.randomBytes(8).toString("hex")}`;
 
-  // 🚨 Lock Guard: Bypass virtual search folders, but never skip the root container
-  if (!isRoot && isSystemOrSearchFolder(displayName)) {
-    return;
+  const plainText = emailObj.body || "";
+  const htmlText = emailObj.bodyHTML || "";
+  const senderRaw =
+    emailObj.senderName || emailObj.senderEmailAddress || "Unknown";
+  const toRaw = emailObj.displayTo || "Unknown";
+
+  let emlContent = `Message-ID: <${messageId}>\r\nDate: ${sentDate}\r\nFrom: ${senderRaw}\r\nTo: ${toRaw}\r\nSubject: ${subject}\r\nMIME-Version: 1.0\r\n`;
+
+  if (emailObj.hasAttachments) {
+    emlContent += `Content-Type: multipart/mixed; boundary="${boundaryMix}"\r\n\r\n--${boundaryMix}\r\n`;
   }
 
-  if (folder.contentCount > 0) {
-    const checkStmt = db.prepare(
-      "SELECT id FROM emails WHERE email_hash = ? LIMIT 1",
-    );
-    const insertStmt = db.prepare(`
-      INSERT INTO emails (id, file_id, message_id, sent_date, email_hash, is_duplicate)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `);
+  if (htmlText) {
+    emlContent += `Content-Type: multipart/alternative; boundary="${boundaryAlt}"\r\n\r\n`;
+    if (plainText) {
+      emlContent += `--${boundaryAlt}\r\nContent-Type: text/plain; charset=utf-8\r\n\r\n${plainText}\r\n\r\n`;
+    }
+    emlContent += `--${boundaryAlt}\r\nContent-Type: text/html; charset=utf-8\r\n\r\n${htmlText}\r\n\r\n--${boundaryAlt}--\r\n\r\n`;
+  } else {
+    emlContent += `Content-Type: text/plain; charset=utf-8\r\n\r\n${plainText}\r\n\r\n`;
+  }
 
-    try {
-      let email = folder.getNextChild();
+  if (emailObj.hasAttachments) {
+    for (let i = 0; i < emailObj.numberOfAttachments; i++) {
+      const attachment = emailObj.getAttachment(i);
+      const attachmentName =
+        attachment.longFilename || attachment.filename || `attachment_${i}.dat`;
+      const mimeType = attachment.mimeTag || "application/octet-stream";
 
-      while (email !== null) {
-        try {
-          const messageId = email.internetMessageId?.trim() || "";
-          const sentDate = email.clientSubmitTime
-            ? email.clientSubmitTime.toISOString()
-            : "no-date";
-          const subject = email.subject?.trim() || "no-subject";
-
-          const rawBody = email.body || "";
-          const normalizedBody = rawBody
-            .replace(/\s+/g, " ")
-            .trim()
-            .substring(0, 1000)
-            .toLowerCase();
-          const normalizedSubject = subject
-            .replace(/\s+/g, " ")
-            .trim()
-            .toLowerCase();
-
-          // Content-Aware Signature hash
-          const emailHash = crypto
-            .createHash("sha256")
-            .update(`${normalizedSubject}_${normalizedBody}`)
-            .digest("hex");
-
-          const existingRecord = checkStmt.get(emailHash);
-          const isDuplicate = existingRecord ? 1 : 0;
-
-          if (isDuplicate === 1) {
-            metrics.duplicateCount++;
-          } else {
-            metrics.uniqueCount++;
-            if (email.hasAttachments) {
-              metrics.totalAttachments += email.numberOfAttachments;
-            }
-          }
-          metrics.totalProcessed++;
-
-          insertStmt.run(
-            crypto.randomUUID(),
-            fileId,
-            messageId,
-            sentDate,
-            emailHash,
-            isDuplicate,
-          );
-        } catch (emailErr) {
-          console.warn(
-            `[PST Warning] Skipping damaged message record during duplication analysis:`,
-            emailErr,
-          );
-        }
-
-        email = folder.getNextChild();
+      if (attachment.embeddedPSTMessage) {
+        const embeddedEml = buildRawEml(
+          attachment.embeddedPSTMessage,
+          crypto.randomUUID(),
+          "no-date",
+          "Attached Message",
+        );
+        const attachmentBuffer = Buffer.from(embeddedEml, "utf-8");
+        emlContent += `--${boundaryMix}\r\nContent-Type: message/rfc822; name="${attachmentName}"\r\nContent-Disposition: attachment; filename="${attachmentName}"\r\nContent-Transfer-Encoding: base64\r\n\r\n${attachmentBuffer.toString("base64")}\r\n\r\n`;
+      } else if (attachment.fileInputStream && attachment.size > 0) {
+        const attachmentBuffer = Buffer.alloc(attachment.size);
+        attachment.fileInputStream.read(attachmentBuffer);
+        emlContent += `--${boundaryMix}\r\nContent-Type: ${mimeType}; name="${attachmentName}"\r\nContent-Disposition: attachment; filename="${attachmentName}"\r\nContent-Transfer-Encoding: base64\r\n\r\n${attachmentBuffer.toString("base64")}\r\n\r\n`;
       }
-    } catch (nodeErr) {
-      console.warn(
-        `[PST Warning] Structural parsing error in directory messages block. Bypassing safely...`,
-        nodeErr,
-      );
     }
+    emlContent += `--${boundaryMix}--\r\n`;
   }
-
-  const subFolders = safeGetSubFolders(folder);
-  if (subFolders.length > 0) {
-    for (const sub of subFolders) {
-      await processEmailFolder(sub, fileId, metrics, false);
-    }
-  }
+  return emlContent;
 }
 
 export async function analyzePstDuplicates(
   fileId: string,
-): Promise<AnalysisMetrics> {
+  outputBaseDir = process.env.EXTRACTED_PATH ||
+    "/Users/rgomes/Projects/extracted_emails",
+) {
   const row = db
     .prepare("SELECT filepath FROM processed_files WHERE id = ?")
     .get(fileId) as { filepath: string } | undefined;
-  if (!row) throw new Error("File metadata not found in database.");
+  if (!row) throw new Error("File metadata not found.");
 
   db.prepare(
     "UPDATE processed_files SET status = 'processing' WHERE id = ?",
   ).run(fileId);
-
-  // Clear previous records for clean run
   db.prepare("DELETE FROM emails WHERE file_id = ?").run(fileId);
+
+  const stagingPath =
+    process.env.STAGING_PATH || "/Users/rgomes/Projects/staging-area";
+
+  let cleanRelativePath = "";
+  if (row.filepath.startsWith(stagingPath)) {
+    const rel = path.relative(stagingPath, row.filepath);
+    cleanRelativePath = path.dirname(rel);
+  } else {
+    cleanRelativePath = fileId;
+  }
+
+  if (cleanRelativePath === "." || cleanRelativePath === "") {
+    cleanRelativePath = path.parse(row.filepath).name;
+  }
+
+  // CRITICAL FIX: Create a file-specific raw folder so multiple PSTs don't delete each other's data
+  const targetFolder = path.join(
+    outputBaseDir,
+    cleanRelativePath,
+    `.raw_${fileId}`,
+  );
+  if (!fs.existsSync(targetFolder))
+    fs.mkdirSync(targetFolder, { recursive: true });
 
   const metrics: AnalysisMetrics = {
     uniqueCount: 0,
@@ -223,17 +202,115 @@ export async function analyzePstDuplicates(
     totalProcessed: 0,
     totalAttachments: 0,
   };
-
   const pst = new PSTFile(row.filepath);
-  await processEmailFolder(pst.getRootFolder(), fileId, metrics, true);
+
+  const checkStmt = db.prepare(
+    "SELECT id FROM emails WHERE email_hash = ? LIMIT 1",
+  );
+  const insertStmt = db.prepare(`
+    INSERT INTO emails (id, file_id, message_id, sent_date, email_hash, is_duplicate)
+    VALUES (?, ?, ?, ?, ?, ?)
+  `);
+
+  async function processEmailFolder(folder: PSTFolder, isRoot = false) {
+    const displayName = folder.displayName || "";
+    if (!isRoot && isSystemOrSearchFolder(displayName)) return;
+
+    if (folder.contentCount > 0) {
+      let emailObj = folder.getNextChild();
+      while (emailObj !== null) {
+        try {
+          const sentDate = emailObj.clientSubmitTime
+            ? emailObj.clientSubmitTime.toISOString()
+            : "no-date";
+          const subject = emailObj.subject?.trim() || "no-subject";
+          let messageId = (emailObj.internetMessageId || "")
+            .replace(/[<>]/g, "")
+            .trim();
+
+          if (!messageId && emailObj.transportMessageHeaders) {
+            const match = emailObj.transportMessageHeaders.match(
+              /Message-ID:\s*<?([^>\s]+)>?/i,
+            );
+            if (match) messageId = match[1];
+          }
+
+          let emailHash: string;
+          if (messageId && messageId.length > 5) {
+            emailHash = crypto
+              .createHash("sha256")
+              .update(messageId)
+              .digest("hex");
+          } else {
+            const senderRaw =
+              emailObj.senderName || emailObj.senderEmailAddress || "unknown";
+            emailHash = generateFallbackHash(
+              senderRaw,
+              subject,
+              emailObj.body || "",
+            );
+          }
+
+          const existingRecord = checkStmt.get(emailHash) as
+            | { id: string }
+            | undefined;
+          const isDuplicate = existingRecord ? 1 : 0;
+
+          if (isDuplicate === 1) {
+            metrics.duplicateCount++;
+          } else {
+            metrics.uniqueCount++;
+            if (emailObj.hasAttachments)
+              metrics.totalAttachments += emailObj.numberOfAttachments;
+          }
+          metrics.totalProcessed++;
+
+          const emailId = crypto.randomUUID();
+
+          // Extract email as EML unconditionally into the secure file-specific folder
+          const emlPath = path.join(targetFolder, `${emailId}.eml`);
+          const emlContent = buildRawEml(
+            emailObj,
+            messageId,
+            sentDate,
+            subject,
+          );
+          fs.writeFileSync(emlPath, emlContent);
+
+          insertStmt.run(
+            emailId,
+            fileId,
+            messageId,
+            sentDate,
+            emailHash,
+            isDuplicate,
+          );
+        } catch {
+          console.warn(`[PST Warning] Skipping damaged message record.`);
+        }
+        emailObj = folder.getNextChild();
+      }
+    }
+    for (const sub of safeGetSubFolders(folder)) {
+      await processEmailFolder(sub, false);
+    }
+  }
+
+  await processEmailFolder(pst.getRootFolder(), true);
+
+  // Detect and physically remove duplicated EML files from the disk
+  const duplicateRecords = db
+    .prepare("SELECT id FROM emails WHERE file_id = ? AND is_duplicate = 1")
+    .all(fileId) as { id: string }[];
+
+  for (const dup of duplicateRecords) {
+    const dupPath = path.join(targetFolder, `${dup.id}.eml`);
+    if (fs.existsSync(dupPath)) fs.unlinkSync(dupPath);
+  }
 
   db.prepare(`
     UPDATE processed_files 
-    SET status = 'analyzed',
-        total_emails = ?,
-        unique_emails = ?,
-        duplicate_emails = ?,
-        total_attachments = ?
+    SET status = 'analyzed', total_emails = ?, unique_emails = ?, duplicate_emails = ?, total_attachments = ?
     WHERE id = ?
   `).run(
     metrics.totalProcessed,
