@@ -21,7 +21,7 @@ export async function pollBatchStatus(fileId: string) {
       }
     | undefined;
 
-  if (!row || !row.batch_id) return;
+  if (!row || !row.batch_id) return "no_batch";
 
   const stagingPath =
     process.env.STAGING_PATH || "/Users/rgomes/Projects/staging-area";
@@ -97,15 +97,11 @@ export async function pollBatchStatus(fileId: string) {
     })();
 
     if (keptHashes.length > 0) {
-      // ---------------------------------------------------------
-      // STEP 5: Add selected emails to the "export" folder
-      // ---------------------------------------------------------
       const exportDir = path.join(targetFolder, "export");
       if (!fs.existsSync(exportDir)) {
         fs.mkdirSync(exportDir, { recursive: true });
       }
 
-      // Fetch chronological sent dates of ALL approved emails to ensure absolute order stability
       const placeholders = keptHashes.map(() => "?").join(",");
       const approvedEmails = db
         .prepare(`
@@ -120,19 +116,27 @@ export async function pollBatchStatus(fileId: string) {
 
       approvedEmails.sort((a, b) => a.sent_date.localeCompare(b.sent_date));
 
-      // STEP 7: Change the file name to match the naming convention
-      const padLength = Math.max(4, approvedEmails.length.toString().length);
+      const existingEmailNumbers = fs
+        .readdirSync(exportDir)
+        .map((f) => /^Email\s+(\d+)\.eml$/i.exec(f)?.[1])
+        .filter((value): value is string => Boolean(value))
+        .map(Number);
+
+      const startAt =
+        existingEmailNumbers.length > 0
+          ? Math.max(...existingEmailNumbers) + 1
+          : 1;
+      const finalNumber = startAt + approvedEmails.length - 1;
+      const padLength = Math.max(4, String(finalNumber).length);
 
       for (let i = 0; i < approvedEmails.length; i++) {
         const item = approvedEmails[i];
-        const newSeqName = `Email ${String(i + 1).padStart(padLength, "0")}`;
+        const newSeqName = `Email ${String(startAt + i).padStart(padLength, "0")}`;
 
         const sourceEmlPath = path.join(targetFolder, `${item.email_hash}.eml`);
         const destEmlPath = path.join(exportDir, `${newSeqName}.eml`);
 
         if (fs.existsSync(sourceEmlPath)) {
-          // We strictly copy only the .eml file.
-          // It safely contains all attachments inside its payload for Step 6.
           fs.copyFileSync(sourceEmlPath, destEmlPath);
         }
       }
@@ -155,12 +159,10 @@ export async function pollBatchStatus(fileId: string) {
       console.log(
         `[Batch Worker] Chunk complete. ${remaining.c} items remaining. Generating next chunk immediately...`,
       );
-      // Keep UI smoothly in "processing" state
       db.prepare(
         "UPDATE processed_files SET ai_status = 'processing', batch_id = NULL WHERE id = ?",
       ).run(fileId);
 
-      // 🔥 FIRE THE NEXT CHUNK INSTANTLY 🔥
       generateBatchFile(fileId, {
         name: row.subject_name || "",
         email: row.subject_email || "",
@@ -179,15 +181,20 @@ export async function pollBatchStatus(fileId: string) {
           "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
         ).run(fileId);
       });
-    } else {
-      console.log(
-        `[Batch Worker] All AI chunks completed successfully for file ${fileId}.`,
-      );
-      db.prepare(
-        "UPDATE processed_files SET ai_status = 'completed', batch_id = NULL WHERE id = ?",
-      ).run(fileId);
+
+      return "requeued";
     }
-  } else if (
+
+    console.log(
+      `[Batch Worker] All AI chunks completed successfully for file ${fileId}.`,
+    );
+    db.prepare(
+      "UPDATE processed_files SET ai_status = 'completed', batch_id = NULL WHERE id = ?",
+    ).run(fileId);
+    return "completed";
+  }
+
+  if (
     batch.status === "failed" ||
     batch.status === "expired" ||
     batch.status === "cancelled"
@@ -199,4 +206,6 @@ export async function pollBatchStatus(fileId: string) {
       "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
     ).run(fileId);
   }
+
+  return batch.status;
 }
