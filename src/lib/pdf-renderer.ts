@@ -93,10 +93,14 @@ export async function extractPdfText(buffer: Buffer): Promise<string> {
   const parser = new PDFParse({ data: buffer });
 
   try {
-    const pdfData = await parser.getText();
+    const pdfData = await withTimeout(
+      parser.getText(),
+      30_000,
+      "extractPdfText",
+    );
     return pdfData.text || "";
   } finally {
-    await parser.destroy();
+    await parser.destroy().catch(() => {});
   }
 }
 
@@ -618,7 +622,11 @@ export async function convertToPdfBatch(
 
       try {
         const rawEml = fs.readFileSync(emlPath);
-        const parsed = await simpleParser(rawEml);
+        const parsed = await withTimeout(
+          simpleParser(rawEml),
+          60_000,
+          `simpleParser ${baseName}`,
+        );
 
         const fromText = getAddressText(parsed.from);
         const toText = getAddressText(parsed.to);
@@ -639,7 +647,9 @@ export async function convertToPdfBatch(
             baseName,
           );
 
-          console.log(`[PDF Engine] Rendering ${baseName}.pdf from ${filename}`);
+          console.log(
+            `[PDF Engine] Rendering ${baseName}.pdf from ${filename}`,
+          );
 
           try {
             await renderHtmlToPdf(
@@ -663,7 +673,10 @@ export async function convertToPdfBatch(
             console.log(`[PDF Engine] Generated PDF: ${baseName}.pdf`);
           } catch (pdfErr) {
             renderFailures++;
-            console.error(`[PDF Engine] Puppeteer failed on ${baseName}.pdf:`, pdfErr);
+            console.error(
+              `[PDF Engine] Puppeteer failed on ${baseName}.pdf:`,
+              pdfErr,
+            );
 
             if (fs.existsSync(emailPdfPath)) {
               try {
