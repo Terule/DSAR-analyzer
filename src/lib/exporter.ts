@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { type AddressObject, simpleParser } from "mailparser";
@@ -49,6 +50,35 @@ function getAddressText(
   return addr.text || "";
 }
 
+function extractHeaderValue(block: string, header: string): string {
+  const match = block.match(new RegExp(`^${header}:\\s*(.*)$`, "im"));
+  return (match?.[1] || "").trim();
+}
+
+function stripQuotedHeaders(block: string): string {
+  return block
+    .replace(/^(from|to|cc|bcc|subject|date|sent):.*$/gim, "")
+    .replace(/^(-----Original Message-----|_{8,}).*$/gim, "")
+    .trim();
+}
+
+function splitThread(rawBody: string) {
+  const blocks = rawBody
+    .split(/(?:\r?\n)(?=From:\s|_{10,}|-----Original Message-----)/i)
+    .map((b) => b.trim())
+    .filter(Boolean);
+
+  const firstBlock = blocks[0] || rawBody;
+  const secondBlock = blocks[1] || "";
+  const restBlocks = blocks.slice(2);
+
+  return {
+    firstBlock,
+    secondBlock,
+    restText: restBlocks.join("\n\n"),
+  };
+}
+
 export async function extractUniqueEmails(
   fileId: string,
   outputBaseDir: string = process.env.EXTRACTED_PATH ||
@@ -80,7 +110,23 @@ export async function extractUniqueEmails(
     }
 
     const mainFolder = path.join(outputBaseDir, cleanRelativePath);
-    const rawFolder = path.join(mainFolder, `.raw_${fileId}`);
+    const pstExtractionKey = crypto
+      .createHash("sha256")
+      .update(`${fileId}:${row.filepath}`)
+      .digest("hex")
+      .substring(0, 12);
+    const rawFolder = path.join(mainFolder, `.pst-eml-${pstExtractionKey}`);
+
+    const uniqueEmailsFolder = path.join(mainFolder, ".unique-emails");
+    const uniqueRawEmailsFolder = path.join(uniqueEmailsFolder, "raw-emails");
+    const uniqueJsonFolder = path.join(uniqueEmailsFolder, "json-files");
+    const selectedFolder = path.join(uniqueEmailsFolder, "selected");
+    const discardedFolder = path.join(uniqueEmailsFolder, "discarded");
+
+    fs.mkdirSync(uniqueRawEmailsFolder, { recursive: true });
+    fs.mkdirSync(uniqueJsonFolder, { recursive: true });
+    fs.mkdirSync(selectedFolder, { recursive: true });
+    fs.mkdirSync(discardedFolder, { recursive: true });
 
     console.log(
       `[Extraction Debug] Looking for secure file-specific raw folder at: ${rawFolder}`,
@@ -103,8 +149,11 @@ export async function extractUniqueEmails(
 
     for (const record of uniqueRecords) {
       const emlPath = path.join(rawFolder, `${record.id}.eml`);
-      const jsonPath = path.join(mainFolder, `${record.email_hash}.json`);
-      const finalEmlPath = path.join(mainFolder, `${record.email_hash}.eml`);
+      const jsonPath = path.join(uniqueJsonFolder, `${record.email_hash}.json`);
+      const finalEmlPath = path.join(
+        uniqueRawEmailsFolder,
+        `${record.email_hash}.eml`,
+      );
 
       if (fs.existsSync(emlPath)) {
         fs.copyFileSync(emlPath, finalEmlPath);
@@ -154,18 +203,57 @@ export async function extractUniqueEmails(
         const subject = parsed.subject || "no-subject";
         const date = parsed.date ? parsed.date.toISOString() : "no-date";
 
-        const aiTextPayload = `Date: ${date}\nFrom: ${fromFormatted}\nTo: ${toFormatted}\nSubject: ${subject}\n\n${aiBodyText.substring(0, 15000)}`;
+        const { firstBlock, secondBlock, restText } = splitThread(aiBodyText);
 
-        fs.writeFileSync(
-          jsonPath,
-          JSON.stringify({ text: aiTextPayload }, null, 2),
-        );
+        const firstEmail = {
+          date,
+          from: fromFormatted,
+          to: toFormatted,
+          subject,
+          body: stripQuotedHeaders(firstBlock).substring(0, 12000),
+        };
 
-        totalTokens += estimateTokens(aiTextPayload);
+        const secondEmail = secondBlock
+          ? {
+              from: extractHeaderValue(secondBlock, "From") || "Unknown",
+              to: extractHeaderValue(secondBlock, "To") || "Unknown",
+              subject:
+                extractHeaderValue(secondBlock, "Subject") || "(No Subject)",
+              body: stripQuotedHeaders(secondBlock).substring(0, 6000),
+            }
+          : null;
+
+        const attachments = (parsed.attachments || []).map((att) => ({
+          filename: att.filename || "unknown",
+          content_type: att.contentType || "unknown",
+          size_bytes: att.size || 0,
+        }));
+
+        const aiPayload = {
+          meta: {
+            source_file: `${record.email_hash}.eml`,
+            attachment_count: attachments.length,
+            to_recipient_count: toRaw
+              .split(",")
+              .map((v) => v.trim())
+              .filter(Boolean).length,
+          },
+          first_email: firstEmail,
+          second_email: secondEmail,
+          rest_of_chain: {
+            text: restText.substring(0, 10000),
+          },
+          attachments,
+        };
+
+        const serializedPayload = JSON.stringify(aiPayload, null, 2);
+        fs.writeFileSync(jsonPath, serializedPayload);
+
+        totalTokens += estimateTokens(serializedPayload);
       }
     }
 
-    // Safe Cleanup: Strictly delete ONLY this specific file's raw folder
+    // Safe cleanup: remove per-PST extraction staging folder after normalization
     fs.rmSync(rawFolder, { recursive: true, force: true });
 
     // Update total discarded counter instantly with our blocked drafts

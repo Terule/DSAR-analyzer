@@ -34,6 +34,16 @@ function runWeasyPrint(htmlPath: string, pdfPath: string) {
   }
 }
 
+function extractZipAttachment(zipPath: string, outputDir: string) {
+  try {
+    fs.mkdirSync(outputDir, { recursive: true });
+    execSync(`unzip -oq "${zipPath}" -d "${outputDir}"`, { stdio: "ignore" });
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
+
 export async function extractPdfText(buffer: Buffer): Promise<string> {
   const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: buffer });
@@ -192,12 +202,14 @@ export async function processExcelToPdf(
 
     let htmlContent = `
       <html><head><title>${docTitle}</title><style>
-        @page { size: A4 landscape; margin: 10mm; }
-        body { font-family: sans-serif; font-size: 8pt; padding: 5px; }
-        table { border-collapse: collapse; width: 100%; table-layout: fixed; margin-bottom: 20px; }
-        th, td { border: 0.5px solid #ccc; padding: 4px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        @page { size: A4 landscape; margin: 8mm; }
+        body { font-family: Arial, sans-serif; font-size: 8pt; padding: 4px; }
+        table { border-collapse: collapse; width: 100%; table-layout: auto; margin-bottom: 16px; }
+        th, td { border: 0.5px solid #ccc; padding: 3px 4px; vertical-align: top; word-break: break-word; white-space: normal; }
         th { background-color: #f8f8f8; font-weight: bold; }
         .highlight { background-color: #fff3cd !important; }
+        h1 { margin: 0 0 10px; font-size: 13px; }
+        h2 { margin: 10px 0 6px; font-size: 11px; }
       </style></head><body><h1>Redacted Spreadsheet</h1>
     `;
 
@@ -340,11 +352,12 @@ export async function convertToPdfBatch(
     cleanRelativePath = path.parse(relativeSystemPath).name;
 
   const targetFolder = path.join(outputBaseDir, cleanRelativePath);
-  const exportDir = path.join(targetFolder, "export");
-  const deliverablesDir = path.join(targetFolder, "Deliverables");
-  const logsDir = path.join(targetFolder, "logs");
+  const uniqueEmailsFolder = path.join(targetFolder, ".unique-emails");
+  const selectedDir = path.join(uniqueEmailsFolder, "selected");
+  const deliverablesDir = path.join(targetFolder, "Emails");
+  const logsDir = path.join(targetFolder, ".logs");
 
-  if (!fs.existsSync(exportDir)) {
+  if (!fs.existsSync(selectedDir)) {
     const durationMs = Date.now() - startTime;
     db.prepare(
       "UPDATE processed_files SET pdf_status = 'failed', pdf_duration_ms = ? WHERE id = ?",
@@ -362,25 +375,31 @@ export async function convertToPdfBatch(
 
   try {
     const emlFiles = fs
-      .readdirSync(exportDir)
+      .readdirSync(selectedDir)
       .filter((f) => f.toLowerCase().endsWith(".eml"))
       .sort((a, b) =>
         a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
       );
 
-    const filterCriteria: string[] = [];
-    if (row.subject_name) filterCriteria.push(row.subject_name.toLowerCase());
-    if (row.subject_email) filterCriteria.push(row.subject_email.toLowerCase());
+    const padLength = Math.max(4, emlFiles.length.toString().length);
+
+    const filterCriteriaSet = new Set<string>();
     if (row.subject_aliases) {
       row.subject_aliases.split(",").forEach((a) => {
         const alias = a.trim().toLowerCase();
-        if (alias) filterCriteria.push(alias);
+        if (alias) filterCriteriaSet.add(alias);
       });
     }
+    if (row.subject_name) filterCriteriaSet.add(row.subject_name.toLowerCase());
+    if (row.subject_email)
+      filterCriteriaSet.add(row.subject_email.toLowerCase());
 
-    for (const filename of emlFiles) {
-      const emlPath = path.join(exportDir, filename);
-      const baseName = filename.replace(/\.eml$/i, "");
+    const filterCriteria = Array.from(filterCriteriaSet);
+
+    for (let idx = 0; idx < emlFiles.length; idx++) {
+      const filename = emlFiles[idx];
+      const emlPath = path.join(selectedDir, filename);
+      const baseName = `Email ${String(idx + 1).padStart(padLength, "0")}`;
       const emailPdfPath = path.join(deliverablesDir, `${baseName}.pdf`);
 
       const rawEml = fs.readFileSync(emlPath);
@@ -461,8 +480,17 @@ export async function convertToPdfBatch(
               attSeqName,
             );
           } else if (ext === ".zip") {
-            const rawPath = path.join(deliverablesDir, `${attSeqName}${ext}`);
-            fs.writeFileSync(rawPath, contentBuf);
+            const zipPath = path.join(deliverablesDir, `${attSeqName}${ext}`);
+            fs.writeFileSync(zipPath, contentBuf);
+            const extractedDir = path.join(
+              deliverablesDir,
+              `${attSeqName}_unzipped`,
+            );
+            const extracted = extractZipAttachment(zipPath, extractedDir);
+            if (!extracted) {
+              // Keep original zip when extraction tool is unavailable or archive is invalid.
+              fs.rmSync(extractedDir, { recursive: true, force: true });
+            }
           }
         }
       };

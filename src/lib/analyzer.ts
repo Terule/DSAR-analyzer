@@ -93,12 +93,17 @@ export async function analyzePstDuplicates(
     cleanRelativePath = path.parse(row.filepath).name;
   }
 
-  // The final destination for our perfectly extracted unique EMLs
-  const targetFolder = path.join(
-    outputBaseDir,
-    cleanRelativePath,
-    `.raw_${fileId}`,
-  );
+  const pstExtractionKey = crypto
+    .createHash("sha256")
+    .update(`${fileId}:${row.filepath}`)
+    .digest("hex")
+    .substring(0, 12);
+
+  const caseFolder = path.join(outputBaseDir, cleanRelativePath);
+  if (!fs.existsSync(caseFolder)) fs.mkdirSync(caseFolder, { recursive: true });
+
+  // Per-PST hidden folder for raw extracted EMLs before normalization
+  const targetFolder = path.join(caseFolder, `.pst-eml-${pstExtractionKey}`);
   if (!fs.existsSync(targetFolder))
     fs.mkdirSync(targetFolder, { recursive: true });
 

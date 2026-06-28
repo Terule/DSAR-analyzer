@@ -49,14 +49,18 @@ export async function generateBatchFile(
   }
 
   const targetFolder = path.join(extractedPath, cleanRelativePath);
+  const uniqueEmailsFolder = path.join(targetFolder, ".unique-emails");
+  const jsonFolder = path.join(uniqueEmailsFolder, "json-files");
   if (!fs.existsSync(targetFolder))
     throw new Error("Extracted folder not found");
+  if (!fs.existsSync(jsonFolder))
+    throw new Error("JSON folder not found in .unique-emails/json-files");
 
   const batchDir = path.join(process.cwd(), "batches");
   if (!fs.existsSync(batchDir)) fs.mkdirSync(batchDir, { recursive: true });
 
   const allFiles = fs
-    .readdirSync(targetFolder)
+    .readdirSync(jsonFolder)
     .filter((f) => f.endsWith(".json"));
 
   const unprocessedRecords = db
@@ -70,31 +74,49 @@ export async function generateBatchFile(
     unprocessedRecords.map((r) => r.email_hash),
   );
 
-  // STEP 4 UPDATE: The prompt now perfectly matches the new Flat JSON payload format.
-  // We removed references to ignoring database keys since they are no longer in the payload.
   const systemPrompt = `You are an expert Legal AI performing a Data Subject Access Request (DSAR) compliance audit.
 Target Data Subject: ${subjectCriteria.name}
 Target Email: ${subjectCriteria.email}
 Aliases: ${subjectCriteria.aliases.join(", ")}
 
 INSTRUCTIONS:
-You are receiving a flat text document containing an email's headers (Date, From, To, Subject) followed by its body text. Evaluate it using this strict reasoning sequence:
+You are receiving a JSON payload with these sections:
+- first_email: { from, to, subject, body }
+- second_email: { from, to, subject, body } | null
+- rest_of_chain: { text }
+- meta: { attachment_count, to_recipient_count }
+- attachments: [{ filename, content_type, size_bytes }]
 
-1. [HEADER CHECK] Does the subject line contain "Confidential", "CRO", "CROs", or "Confidentiality ring"?
-   - If Yes -> "discard" immediately.
-2. [HEADER CHECK] Was it sent by the subject? 
-   - If Yes -> "keep".
-3. [HEADER CHECK] Was it sent directly to the subject (excluding CC/BCC)? 
-   - If Yes -> "keep".
-4. [BODY CHECK] Is the name of the subject mentioned in the email body?
-   - If Yes -> "keep".
-5. [BODY CHECK] Is it forwarding a subject email directly? 
-   - If Yes -> "keep".
-6. Reject everything else.
-   - If none of the above are true -> "discard".
+  Your PRIMARY objective is precision: avoid false positives.
+  If uncertain, choose "discard".
+
+Apply these HARD rules in order and evaluate mainly using first_email:
+
+  1. [IMMEDIATE DISCARD]
+If first_email.subject contains the full token words "Confidential", "Confidentiality", "Privileged", "CRO", or "CROs" -> discard.
+Important: token boundary match only. Do NOT treat substrings like "MICROSOFT" as CRO.
+
+  2. [STRONG KEEP SIGNALS]
+  Keep ONLY if at least one strong signal exists:
+- Subject's exact email appears in first_email.from.
+- Subject's exact email appears in first_email.to AND first_email has only one recipient.
+- Subject name/alias/initials appear in first_email.body with clear substantive relation.
+- second_email.from is the subject (forwarded chain from subject).
+
+  3. [WEAK SIGNALS -> DISCARD]
+  Do NOT keep when evidence is only weak/ambiguous, including:
+  - Name appears once in disclaimer/signature/footer/contact list.
+  - Partial name/substrings only (token boundary mismatch).
+  - Generic references without clear linkage to the target subject.
+- Subject appears only in rest_of_chain.text without strong first/second email evidence.
+
+  4. [DEFAULT]
+  If no strong signal is present -> discard.
 
 OUTPUT FORMAT: You must return ONLY a raw JSON object. Do not wrap the output in markdown code blocks (\`\`\`json). Do not add conversational text.
-Format exactly like this: {"decision": "keep" | "discard", "reason": "Brief justification."}`;
+Format exactly like this: {"decision": "keep" | "discard", "reason": "Brief justification.", "needs_second_pass": true | false}
+
+Set needs_second_pass = true only when decision is "discard" and attachments may still contain relevant evidence (especially attached emails/documents).`;
 
   const systemPromptTokens = Math.ceil(systemPrompt.length / 4);
   const batchFilePath = path.join(
@@ -111,7 +133,7 @@ Format exactly like this: {"decision": "keep" | "discard", "reason": "Brief just
 
     if (!unprocessedHashes.has(hash)) continue;
 
-    const filePath = path.join(targetFolder, file);
+    const filePath = path.join(jsonFolder, file);
     const content = JSON.parse(fs.readFileSync(filePath, "utf-8")); // Now reads { text: "..." }
 
     const userPromptTokens = Math.ceil(JSON.stringify(content).length / 4);
