@@ -82,7 +82,7 @@ export async function POST(request: Request) {
       { status: 200 },
     );
   } catch (error) {
-    console.error("API route /api/reset-case encountered an error:", error);
+    console.error("API route /api/wipe encountered an error:", error);
     return NextResponse.json(
       { success: false, error: "Internal Server Error" },
       { status: 500 },

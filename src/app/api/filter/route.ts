@@ -6,7 +6,11 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
-    const { fileId, subjectCriteria } = await request.json();
+    // Cast the parsed request body to eliminate implicit 'any' warnings
+    const { fileId, subjectCriteria } = (await request.json()) as {
+      fileId: string;
+      subjectCriteria?: { name: string; email: string; aliases: string[] };
+    };
 
     if (!fileId) {
       return NextResponse.json(
@@ -66,14 +70,24 @@ export async function POST(request: Request) {
       "UPDATE processed_files SET ai_status = 'processing' WHERE id = ?",
     ).run(fileId);
 
+    // ⏱ Start Clock for AI Task Generation
+    const startTime = Date.now();
+
     // Trigger the Batch generation process safely in the background
     setTimeout(() => {
-      generateBatchFile(fileId, finalCriteria).catch((err) => {
-        console.error(`Batch generation crashed for file ${fileId}:`, err);
-        db.prepare(
-          "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
-        ).run(fileId);
-      });
+      generateBatchFile(fileId, finalCriteria)
+        .then(() => {
+          const durationMs = Date.now() - startTime;
+          db.prepare(
+            "UPDATE processed_files SET ai_duration_ms = COALESCE(ai_duration_ms, 0) + ? WHERE id = ?",
+          ).run(durationMs, fileId);
+        })
+        .catch((err) => {
+          console.error(`Batch generation crashed for file ${fileId}:`, err);
+          db.prepare(
+            "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
+          ).run(fileId);
+        });
     }, 50);
 
     return NextResponse.json(

@@ -36,8 +36,17 @@ export async function POST(request: Request) {
       );
     }
 
+    // ⏱ Start Clock
+    const startTime = Date.now();
+
     // CRITICAL FIX: Await the heavy I/O to ensure all JSONs are written to disk securely
     await extractUniqueEmails(fileId);
+
+    // ⏱ Save extraction duration
+    const durationMs = Date.now() - startTime;
+    db.prepare(
+      "UPDATE processed_files SET extract_duration_ms = COALESCE(extract_duration_ms, 0) + ? WHERE id = ?",
+    ).run(durationMs, fileId);
 
     return NextResponse.json(
       { success: true, message: "Extraction completed" },

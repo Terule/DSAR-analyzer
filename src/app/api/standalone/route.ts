@@ -1,8 +1,9 @@
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { NextResponse } from "next/server";
-import puppeteer from "puppeteer";
 import {
   extractPdfText,
   processDocxToPdf,
@@ -26,6 +27,63 @@ function getAllFiles(dirPath: string, arrayOfFiles: string[] = []) {
   return arrayOfFiles;
 }
 
+// Native WeasyPrint renderer to replace Puppeteer
+async function renderHtmlToPdfWeasyPrint(
+  htmlContent: string,
+  outputPath: string,
+  label: string,
+  timeoutMs = 90_000,
+): Promise<void> {
+  const tmpDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "weasyprint-standalone-"),
+  );
+  const htmlPath = path.join(
+    tmpDir,
+    `temp_${crypto.randomBytes(4).toString("hex")}.html`,
+  );
+
+  fs.writeFileSync(htmlPath, htmlContent, "utf-8");
+
+  return new Promise<void>((resolve, reject) => {
+    const child = spawn(
+      "weasyprint",
+      ["-q", "-e", "utf-8", htmlPath, outputPath],
+      {
+        cwd: process.cwd(),
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+
+    let stderr = "";
+
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(
+        new Error(`WeasyPrint timed out after ${timeoutMs}ms for ${label}`),
+      );
+    }, timeoutMs);
+
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk.toString();
+    });
+
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (code === 0) {
+        resolve();
+        return;
+      }
+      reject(
+        new Error(
+          `WeasyPrint failed for ${label} with exit code ${code} (Signal: ${signal}): ${stderr}`,
+        ),
+      );
+    });
+  }).finally(() => {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  });
+}
+
 export async function POST(request: Request) {
   try {
     const { caseName, subjectCriteria } = await request.json();
@@ -37,12 +95,16 @@ export async function POST(request: Request) {
       );
     }
 
-    // 1. Build Criteria & Exclusion Arrays
+    // 1. Build Criteria & Exclusion Arrays (Added trim for safety)
     const aliases = subjectCriteria.aliases || [];
-    const criteria = [subjectCriteria.name, ...aliases].map((c) =>
-      c.toLowerCase(),
-    );
-    const exclusions = ["confidential", "privileged", "cro"];
+    const criteria = [subjectCriteria.name, ...aliases]
+      .map((c) => c.trim().toLowerCase())
+      .filter(Boolean);
+
+    const exclusions = ["confidential", "privileged", "cro", "cros"];
+
+    // Strict word boundaries prevent "Microsoft" from triggering the "cro" exclusion!
+    const exclusionsRegex = new RegExp(`\\b(${exclusions.join("|")})\\b`, "i");
 
     // 2. Define Paths
     const stagingBase =
@@ -79,7 +141,6 @@ export async function POST(request: Request) {
     if (!fs.existsSync(deliverablesDirDocuments))
       fs.mkdirSync(deliverablesDirDocuments, { recursive: true });
 
-    let browser = null;
     let processedCount = 0;
     let skippedCount = 0;
     let duplicatesCount = 0;
@@ -95,192 +156,190 @@ export async function POST(request: Request) {
     );
     console.log(`=================================================\n`);
 
-    try {
-      // Launch Puppeteer for HTML & Office rendering
-      browser = await puppeteer.launch({
-        headless: true,
-        args: [
-          "--no-sandbox",
-          "--disable-setuid-sandbox",
-          "--disable-dev-shm-usage",
-        ],
-      });
-      const page = await browser.newPage();
+    // Retrieve all files recursively
+    const allFiles = getAllFiles(standaloneStagingDir);
 
-      // Retrieve all files recursively
-      const allFiles = getAllFiles(standaloneStagingDir);
+    // In-memory set to track hashes for deduplication
+    const processedHashes = new Set<string>();
 
-      // In-memory set to track hashes for deduplication
-      const processedHashes = new Set<string>();
+    for (const filePath of allFiles) {
+      const file = path.basename(filePath);
 
-      for (const filePath of allFiles) {
-        const file = path.basename(filePath);
+      // Skip hidden system files and JSON metadata files
+      if (file.startsWith(".") || file.toLowerCase().endsWith(".json"))
+        continue;
 
-        // Skip hidden system files and JSON metadata files
-        if (file.startsWith(".") || file.toLowerCase().endsWith(".json"))
-          continue;
+      const ext = path.extname(file).toLowerCase();
+      const buffer = fs.readFileSync(filePath);
 
-        const ext = path.extname(file).toLowerCase();
-        const buffer = fs.readFileSync(filePath);
+      // --- CRYPTOGRAPHIC DEDUPLICATION CHECK ---
+      const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
+      if (processedHashes.has(fileHash)) {
+        console.log(
+          `[Standalone Filter] Discarded Duplicate ${file} (Hash: ${fileHash.substring(0, 8)})`,
+        );
+        duplicatesCount++;
+        skippedCount++; // Count as skipped for the UI
+        continue;
+      }
 
-        // --- CRYPTOGRAPHIC DEDUPLICATION CHECK ---
-        const fileHash = crypto
-          .createHash("sha256")
-          .update(buffer)
-          .digest("hex");
-        if (processedHashes.has(fileHash)) {
+      let success = false;
+      let targetDir = deliverablesDirDocuments;
+      let isMessage = false;
+
+      // Route files to appropriate folders
+      if (
+        ext === ".html" ||
+        ext === ".htm" ||
+        ext === ".eml" ||
+        ext === ".msg"
+      ) {
+        targetDir = deliverablesDirMessages;
+        isMessage = true;
+      }
+
+      // Generate clean sequential names
+      const padLen = 4;
+      const seqName = isMessage
+        ? `Message ${String(messageCounter).padStart(padLen, "0")}`
+        : `Document ${String(documentCounter).padStart(padLen, "0")}`;
+
+      const pdfOutputPath = path.join(targetDir, `${seqName}.pdf`);
+
+      // --- HANDLER 1: Word Documents ---
+      if (ext === ".docx" || ext === ".doc") {
+        success = await processDocxToPdf(
+          buffer,
+          pdfOutputPath,
+          criteria,
+          seqName,
+          processedHashes,
+        );
+      }
+
+      // --- HANDLER 2: Excel Spreadsheets ---
+      else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
+        success = await processExcelToPdf(
+          buffer,
+          pdfOutputPath,
+          criteria,
+          seqName,
+          processedHashes,
+        );
+      }
+
+      // --- HANDLER 3: Teams Chats (HTML) ---
+      else if (ext === ".html" || ext === ".htm") {
+        const rawHtml = buffer.toString("utf-8");
+        const rawText = rawHtml.replace(/<[^>]*>?/gm, " ").toLowerCase();
+
+        if (exclusionsRegex.test(rawText)) {
           console.log(
-            `[Standalone Filter] Discarded Duplicate ${file} (Hash: ${fileHash.substring(0, 8)})`,
+            `[Standalone Filter] Discarded HTML ${file}: Contains excluded keyword.`,
           );
-          duplicatesCount++;
-          skippedCount++; // Count as skipped for the UI
-          continue;
-        }
-
-        let success = false;
-        let targetDir = deliverablesDirDocuments;
-        let isMessage = false;
-
-        // Route files to appropriate folders
-        if (ext === ".html" || ext === ".htm") {
-          targetDir = deliverablesDirMessages;
-          isMessage = true;
-        }
-
-        // Generate clean sequential names
-        const padLen = 4;
-        const seqName = isMessage
-          ? `Message ${String(messageCounter).padStart(padLen, "0")}`
-          : `Document ${String(documentCounter).padStart(padLen, "0")}`;
-
-        const pdfOutputPath = path.join(targetDir, `${seqName}.pdf`);
-
-        // --- HANDLER 1: Word Documents ---
-        if (ext === ".docx" || ext === ".doc") {
-          success = await processDocxToPdf(
-            buffer,
-            pdfOutputPath,
-            criteria,
-            page,
-            seqName,
-            processedHashes,
+        } else if (!criteria.some((c) => rawText.includes(c))) {
+          console.log(
+            `[Standalone Filter] Discarded HTML ${file}: Data subject not mentioned.`,
           );
-        }
-
-        // --- HANDLER 2: Excel Spreadsheets ---
-        else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
-          success = await processExcelToPdf(
-            buffer,
-            pdfOutputPath,
-            criteria,
-            page,
-            seqName,
-            processedHashes,
-          );
-        }
-
-        // --- HANDLER 3: Teams Chats (HTML) ---
-        else if (ext === ".html" || ext === ".htm") {
-          const rawHtml = buffer.toString("utf-8");
-          const rawText = rawHtml.replace(/<[^>]*>?/gm, "").toLowerCase();
-
-          if (exclusions.some((ex) => rawText.includes(ex))) {
-            console.log(
-              `[Standalone Filter] Discarded HTML ${file}: Contains excluded keyword.`,
-            );
-          } else if (!criteria.some((c) => rawText.includes(c))) {
-            console.log(
-              `[Standalone Filter] Discarded HTML ${file}: Data subject not mentioned.`,
-            );
-          } else {
-            try {
-              await page.setContent(rawHtml, {
-                waitUntil: "domcontentloaded",
-                timeout: 20000,
-              });
-              await page.pdf({
-                path: pdfOutputPath,
-                format: "A4",
-                margin: {
-                  top: "20mm",
-                  bottom: "20mm",
-                  left: "20mm",
-                  right: "20mm",
-                },
-                printBackground: true,
-                timeout: 45000,
-              });
-              success = true;
-            } catch (_e) {
-              console.warn(
-                `[Standalone Filter] Failed to render HTML to PDF: ${file}`,
-              );
-            }
-          }
-        }
-
-        // --- HANDLER 4: Raw PDFs ---
-        else if (ext === ".pdf") {
+        } else {
           try {
-            const rawText = (await extractPdfText(buffer)).toLowerCase();
-
-            if (exclusions.some((ex) => rawText.includes(ex))) {
-              console.log(
-                `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
-              );
-            } else if (!criteria.some((c) => rawText.includes(c))) {
-              console.log(
-                `[Standalone Filter] Discarded PDF ${file}: Data subject not mentioned.`,
-              );
-            } else {
-              // ADD SEMANTIC HASH CHECK HERE
-              const textHash = crypto
-                .createHash("sha256")
-                .update(rawText)
-                .digest("hex");
-              if (processedHashes.has(textHash)) {
-                console.log(
-                  `[Standalone Filter] Discarded Duplicate PDF ${file} (Content Match).`,
-                );
-                duplicatesCount++;
-                skippedCount++;
-                continue;
-              }
-              processedHashes.add(textHash);
-
-              fs.copyFileSync(filePath, pdfOutputPath);
-              success = true;
-            }
+            await renderHtmlToPdfWeasyPrint(rawHtml, pdfOutputPath, seqName);
+            success = true;
           } catch (_e) {
             console.warn(
-              `[Standalone Filter] Failed to parse PDF ${file}. Saving raw file as fallback.`,
+              `[Standalone Filter] Failed to render HTML to PDF: ${file}. Saving raw HTML instead as fallback.`,
             );
-            fs.copyFileSync(filePath, pdfOutputPath);
+
+            // 🔥 The Fallback Fix: Save the raw HTML directly if WeasyPrint crashes!
+            const fallbackPath = path.join(targetDir, `${seqName}${ext}`);
+            fs.copyFileSync(filePath, fallbackPath);
             success = true;
           }
         }
+      }
 
-        // --- Unsupported Files ---
-        else {
+      // --- HANDLER 4: Outlook MSG & EML Files ---
+      else if (ext === ".msg" || ext === ".eml") {
+        // 🔥 The UTF-16LE Fix: Read both UTF-8 (for EML) and UTF-16 (for MSG blobs)
+        // simultaneously, and strip out null bytes to ensure pure text matching!
+        const rawUtf8 = buffer.toString("utf-8").toLowerCase();
+        const rawUtf16 = buffer.toString("utf16le").toLowerCase();
+        const rawText = (`${rawUtf8} ${rawUtf16}`).replace(/\0/g, "");
+
+        if (exclusionsRegex.test(rawText)) {
           console.log(
-            `[Standalone Engine] Skipping unsupported format: ${file}`,
+            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword.`,
           );
-          continue;
-        }
-
-        // Tally results and increment counters only on success
-        if (success) {
-          processedHashes.add(fileHash); // Lock this hash so future duplicates are dropped
-          processedCount++;
-          if (isMessage) messageCounter++;
-          else documentCounter++;
-          console.log(`[Standalone Engine] Exported: ${seqName}.pdf`);
+        } else if (!criteria.some((c) => rawText.includes(c))) {
+          console.log(
+            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Data subject not mentioned.`,
+          );
         } else {
-          skippedCount++;
+          const outputFilePath = path.join(targetDir, `${seqName}${ext}`);
+          fs.copyFileSync(filePath, outputFilePath);
+          success = true;
         }
       }
-    } finally {
-      if (browser) await browser.close();
+
+      // --- HANDLER 5: Raw PDFs ---
+      else if (ext === ".pdf") {
+        try {
+          const rawText = (await extractPdfText(buffer)).toLowerCase();
+
+          if (exclusionsRegex.test(rawText)) {
+            console.log(
+              `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
+            );
+          } else if (!criteria.some((c) => rawText.includes(c))) {
+            console.log(
+              `[Standalone Filter] Discarded PDF ${file}: Data subject not mentioned.`,
+            );
+          } else {
+            // ADD SEMANTIC HASH CHECK HERE
+            const textHash = crypto
+              .createHash("sha256")
+              .update(rawText)
+              .digest("hex");
+            if (processedHashes.has(textHash)) {
+              console.log(
+                `[Standalone Filter] Discarded Duplicate PDF ${file} (Content Match).`,
+              );
+              duplicatesCount++;
+              skippedCount++;
+              continue;
+            }
+            processedHashes.add(textHash);
+
+            fs.copyFileSync(filePath, pdfOutputPath);
+            success = true;
+          }
+        } catch (_e) {
+          console.warn(
+            `[Standalone Filter] Failed to parse PDF ${file}. Saving raw file as fallback.`,
+          );
+          fs.copyFileSync(filePath, pdfOutputPath);
+          success = true;
+        }
+      }
+
+      // --- Unsupported Files ---
+      else {
+        console.log(`[Standalone Engine] Skipping unsupported format: ${file}`);
+        continue;
+      }
+
+      // Tally results and increment counters only on success
+      if (success) {
+        processedHashes.add(fileHash); // Lock this hash so future duplicates are dropped
+        processedCount++;
+        if (isMessage) messageCounter++;
+        else documentCounter++;
+        console.log(
+          `[Standalone Engine] Exported: ${seqName}${ext === ".msg" || ext === ".eml" ? ext : ".pdf"}`,
+        );
+      } else {
+        skippedCount++;
+      }
     }
 
     console.log(

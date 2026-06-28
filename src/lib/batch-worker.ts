@@ -7,6 +7,9 @@ import { db } from "./db";
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 export async function pollBatchStatus(fileId: string) {
+  // ⏱ Start Tracking Download & DB Processing Time
+  const startTime = Date.now();
+
   const row = db
     .prepare(
       "SELECT filepath, batch_id, subject_name, subject_email, subject_aliases FROM processed_files WHERE id = ?",
@@ -45,8 +48,29 @@ export async function pollBatchStatus(fileId: string) {
 
   console.log(`[Batch Worker] Checking status of batch: ${row.batch_id}...`);
   const batch = await openai.batches.retrieve(row.batch_id);
+  console.log(`[Batch Worker] Status returned from OpenAI: ${batch.status}`);
 
-  if (batch.status === "completed" && batch.output_file_id) {
+  if (batch.status === "completed") {
+    // 🔥 NEW SAFETY CHECK: Catch silent OpenAI validation failures
+    if (!batch.output_file_id) {
+      console.error(
+        `[Batch Worker] ERROR: Batch ${batch.id} completed but provided NO output_file_id!`,
+      );
+      if (batch.error_file_id) {
+        try {
+          const errRes = await openai.files.content(batch.error_file_id);
+          const errText = await errRes.text();
+          console.error(`[Batch Worker] OpenAI Error Log:\n`, errText);
+        } catch (e) {
+          console.error("Could not download error file", e);
+        }
+      }
+      db.prepare(
+        "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
+      ).run(fileId);
+      return batch.status;
+    }
+
     db.prepare(
       "UPDATE processed_files SET ai_status = 'processing' WHERE id = ?",
     ).run(fileId);
@@ -97,11 +121,15 @@ export async function pollBatchStatus(fileId: string) {
     })();
 
     if (keptHashes.length > 0) {
+      // ---------------------------------------------------------
+      // STEP 5: Add selected emails to the "export" folder
+      // ---------------------------------------------------------
       const exportDir = path.join(targetFolder, "export");
       if (!fs.existsSync(exportDir)) {
         fs.mkdirSync(exportDir, { recursive: true });
       }
 
+      // Fetch chronological sent dates of ALL approved emails to ensure absolute order stability
       const placeholders = keptHashes.map(() => "?").join(",");
       const approvedEmails = db
         .prepare(`
@@ -116,27 +144,19 @@ export async function pollBatchStatus(fileId: string) {
 
       approvedEmails.sort((a, b) => a.sent_date.localeCompare(b.sent_date));
 
-      const existingEmailNumbers = fs
-        .readdirSync(exportDir)
-        .map((f) => /^Email\s+(\d+)\.eml$/i.exec(f)?.[1])
-        .filter((value): value is string => Boolean(value))
-        .map(Number);
-
-      const startAt =
-        existingEmailNumbers.length > 0
-          ? Math.max(...existingEmailNumbers) + 1
-          : 1;
-      const finalNumber = startAt + approvedEmails.length - 1;
-      const padLength = Math.max(4, String(finalNumber).length);
+      // STEP 7: Change the file name to match the naming convention
+      const padLength = Math.max(4, approvedEmails.length.toString().length);
 
       for (let i = 0; i < approvedEmails.length; i++) {
         const item = approvedEmails[i];
-        const newSeqName = `Email ${String(startAt + i).padStart(padLength, "0")}`;
+        const newSeqName = `Email ${String(i + 1).padStart(padLength, "0")}`;
 
         const sourceEmlPath = path.join(targetFolder, `${item.email_hash}.eml`);
         const destEmlPath = path.join(exportDir, `${newSeqName}.eml`);
 
         if (fs.existsSync(sourceEmlPath)) {
+          // We strictly copy only the .eml file.
+          // It safely contains all attachments inside its payload for Step 6.
           fs.copyFileSync(sourceEmlPath, destEmlPath);
         }
       }
@@ -159,10 +179,14 @@ export async function pollBatchStatus(fileId: string) {
       console.log(
         `[Batch Worker] Chunk complete. ${remaining.c} items remaining. Generating next chunk immediately...`,
       );
-      db.prepare(
-        "UPDATE processed_files SET ai_status = 'processing', batch_id = NULL WHERE id = ?",
-      ).run(fileId);
 
+      // ⏱ Save Duration for this Chunk before generating next
+      const durationMs = Date.now() - startTime;
+      db.prepare(
+        "UPDATE processed_files SET ai_status = 'processing', batch_id = NULL, ai_duration_ms = COALESCE(ai_duration_ms, 0) + ? WHERE id = ?",
+      ).run(durationMs, fileId);
+
+      // 🔥 FIRE THE NEXT CHUNK INSTANTLY 🔥
       generateBatchFile(fileId, {
         name: row.subject_name || "",
         email: row.subject_email || "",
@@ -181,20 +205,18 @@ export async function pollBatchStatus(fileId: string) {
           "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
         ).run(fileId);
       });
+    } else {
+      console.log(
+        `[Batch Worker] All AI chunks completed successfully for file ${fileId}.`,
+      );
 
-      return "requeued";
+      // ⏱ Save Final Duration
+      const durationMs = Date.now() - startTime;
+      db.prepare(
+        "UPDATE processed_files SET ai_status = 'completed', batch_id = NULL, ai_duration_ms = COALESCE(ai_duration_ms, 0) + ? WHERE id = ?",
+      ).run(durationMs, fileId);
     }
-
-    console.log(
-      `[Batch Worker] All AI chunks completed successfully for file ${fileId}.`,
-    );
-    db.prepare(
-      "UPDATE processed_files SET ai_status = 'completed', batch_id = NULL WHERE id = ?",
-    ).run(fileId);
-    return "completed";
-  }
-
-  if (
+  } else if (
     batch.status === "failed" ||
     batch.status === "expired" ||
     batch.status === "cancelled"

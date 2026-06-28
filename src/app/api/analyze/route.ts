@@ -36,15 +36,20 @@ export async function POST(request: Request) {
       );
     }
 
-    // Set UI to processing immediately
     db.prepare(
       "UPDATE processed_files SET status = 'processing' WHERE id = ?",
     ).run(fileId);
 
-    // CRITICAL FIX: We MUST await this operation.
-    // If we return the response before this finishes, the Node.js process
-    // may abruptly terminate the file system (fs) write streams.
+    // ⏱ 1. Start Clock
+    const startTime = Date.now();
+
     await analyzePstDuplicates(fileId);
+
+    // ⏱ 2. Calculate and Save Clock
+    const durationMs = Date.now() - startTime;
+    db.prepare(
+      "UPDATE processed_files SET analyze_duration_ms = COALESCE(analyze_duration_ms, 0) + ? WHERE id = ?",
+    ).run(durationMs, fileId);
 
     return NextResponse.json(
       { success: true, message: "Analysis completed" },

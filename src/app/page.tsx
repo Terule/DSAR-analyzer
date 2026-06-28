@@ -1,76 +1,28 @@
 "use client";
 
-import {
-  AlertCircle,
-  CheckCircle,
-  Database,
-  FileText,
-  Folder,
-  Loader2,
-  MessageSquare,
-  Play,
-  RefreshCw,
-  RotateCcw,
-  ShieldAlert,
-} from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
-
-interface StagedFile {
-  id: string;
-  filename: string;
-  filepath: string;
-  file_size_bytes: number;
-  status:
-    | "pending"
-    | "scanning_metadata"
-    | "processing"
-    | "pending_analysis"
-    | "analyzed"
-    | "extracting"
-    | "completed"
-    | "failed";
-  total_emails: number;
-  total_attachments: number;
-  unique_emails: number;
-  duplicate_emails: number;
-  estimated_tokens?: number;
-  ai_status?: "pending" | "processing" | "completed" | "failed" | "batch_ready";
-  ai_approved_count?: number;
-  ai_discarded_count?: number;
-  pdf_status?: "pending" | "processing" | "completed" | "failed";
-}
-
-interface AiConfig {
-  name: string;
-  email: string;
-  aliases: string[];
-}
-
-function getRelativePath(filepath: string) {
-  if (!filepath) return "";
-  return filepath.split(/staging-area[/\\]/)[1] || filepath;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes === 0) return "0 Bytes";
-  const k = 1024;
-  const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(k));
-  return `${Number.parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
-}
+import { CaseCard } from "@/components/dashboard/CaseCard";
+import { DashboardHeader } from "@/components/dashboard/DashboardHeader";
+import { ConnectingState, EmptyState } from "@/components/dashboard/EmptyState";
+import { NotificationToast } from "@/components/dashboard/NotificationToast";
+import { StandalonePanel } from "@/components/dashboard/StandalonePanel";
+import { TabNavigation } from "@/components/dashboard/TabNavigation";
+import { useFileStream } from "@/hooks/useFileStream";
+import { useNotification } from "@/hooks/useNotification";
+import * as api from "@/lib/api";
+import { getRelativePath } from "@/lib/format";
+import type { AiConfig, StagedFile, TabKey } from "@/lib/types";
 
 export default function Dashboard() {
-  // Global States
-  const [activeTab, setActiveTab] = useState<"pst" | "standalone">("pst");
+  const { files, loading } = useFileStream();
+  const { notification, setNotification } = useNotification();
 
-  // PST Pipeline States
-  const [files, setFiles] = useState<StagedFile[]>([]);
-  const [loading, setLoading] = useState<boolean>(true);
-  const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<TabKey>("pst");
+  const [isRefreshing, setIsRefreshing] = useState(false);
+
   const [activeCaseSequence, setActiveCaseSequence] = useState<
     Record<string, string>
   >({});
-
   const [pendingAiConfigs, setPendingAiConfigs] = useState<
     Record<string, AiConfig>
   >({});
@@ -79,34 +31,9 @@ export default function Dashboard() {
     {},
   );
   const [activeConfigCase, setActiveConfigCase] = useState<string | null>(null);
-  const [subjectName, setSubjectName] = useState<string>("");
-  const [subjectEmail, setSubjectEmail] = useState<string>("");
-  const [subjectAliases, setSubjectAliases] = useState<string>("");
+  const [openMetrics, setOpenMetrics] = useState<Record<string, boolean>>({});
 
-  // Standalone Pipeline States
-  const [stdCaseName, setStdCaseName] = useState("");
-  const [stdSubjectName, setStdSubjectName] = useState("");
-  const [stdSubjectAliases, setStdSubjectAliases] = useState("");
-  const [isStdProcessing, setIsStdProcessing] = useState(false);
-  const [stdResults, setStdResults] = useState<{
-    processed: number;
-    skipped: number;
-    message: string;
-  } | null>(null);
-  const [stdError, setStdError] = useState("");
-
-  // ==========================================
-  // PST PIPELINE LOGIC
-  // ==========================================
-  useEffect(() => {
-    const evtSource = new EventSource("/api/events");
-    evtSource.onmessage = (event) => {
-      const data = JSON.parse(event.data);
-      setFiles(data);
-      setLoading(false);
-    };
-    return () => evtSource.close();
-  }, []);
+  const isSequenceLocked = Object.keys(activeCaseSequence).length > 0;
 
   const groupedCases = useMemo(() => {
     const groups: Record<string, StagedFile[]> = {};
@@ -125,51 +52,41 @@ export default function Dashboard() {
     return groups;
   }, [files]);
 
+  const toggleMetrics = (caseName: string) => {
+    setOpenMetrics((prev) => ({ ...prev, [caseName]: !prev[caseName] }));
+  };
+
+  // API Callbacks
   const handleScanDirectory = useCallback(() => {
     setIsRefreshing(true);
-    fetch("/api/files?sync=true", { cache: "no-store" })
+    api
+      .scanDirectory()
       .catch(console.error)
       .finally(() => setIsRefreshing(false));
   }, []);
 
   const handleScanMetadata = useCallback(async (fileId: string) => {
     try {
-      await fetch("/api/metadata", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileId }),
-      });
+      await api.scanMetadata(fileId);
     } catch (_e) {}
   }, []);
 
   const handleAnalyze = useCallback(async (fileId: string) => {
     try {
-      await fetch("/api/analyze", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileId }),
-      });
+      await api.analyzeFile(fileId);
     } catch (_e) {}
   }, []);
 
   const handleExtract = useCallback(async (fileId: string) => {
     try {
-      await fetch("/api/extract", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileId }),
-      });
+      await api.extractFile(fileId);
     } catch (_e) {}
   }, []);
 
   const handleRunAIAudit = useCallback(
     async (fileId: string, config: AiConfig) => {
       try {
-        await fetch("/api/filter", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ fileId, subjectCriteria: config }),
-        });
+        await api.runAiAudit(fileId, config);
       } catch (_e) {}
     },
     [],
@@ -177,11 +94,7 @@ export default function Dashboard() {
 
   const handleConvertToPdf = useCallback(async (fileId: string) => {
     try {
-      await fetch("/api/convert", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileId }),
-      });
+      await api.convertToPdf(fileId);
     } catch (_e) {}
   }, []);
 
@@ -190,80 +103,74 @@ export default function Dashboard() {
       setSyncingCases((prev) => ({ ...prev, [caseName]: true }));
       let stillProcessing = false;
       let wasReverted = false;
-
       try {
         for (const fileId of filesToSync) {
-          const res = await fetch("/api/batch-poll", {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ fileId }),
+          const data = await api.pollBatch(fileId);
+          if (
+            data.status === "in_progress" ||
+            data.status === "validating" ||
+            data.status === "finalizing"
+          )
+            stillProcessing = true;
+          if (data.status === "reverted") wasReverted = true;
+        }
+
+        if (wasReverted)
+          setNotification({
+            type: "error",
+            message: "Stuck batch detected: Auto-healing initiated.",
           });
-
-          if (res.ok) {
-            const data = await res.json();
-            if (
-              data.status === "in_progress" ||
-              data.status === "validating" ||
-              data.status === "finalizing"
-            ) {
-              stillProcessing = true;
-            } else if (data.status === "reverted") {
-              wasReverted = true;
-            }
-          }
-        }
-
-        if (wasReverted) {
-          alert(
-            "Detected an orphaned/stuck batch! The file has been auto-healed and reverted to 'pending'. The AI Engine will automatically generate a new chunk shortly.",
-          );
-        } else if (stillProcessing) {
-          alert(
-            "OpenAI is still processing the batches (Status: In Progress). This can take up to 24 hours depending on their server load. The dashboard will update automatically when finished.",
-          );
-        }
-      } catch (error) {
-        console.error(error);
+        else if (stillProcessing)
+          setNotification({
+            type: "info",
+            message:
+              "OpenAI is still processing this batch. Check back in a few minutes.",
+          });
+        else
+          setNotification({
+            type: "success",
+            message: "Sync successful: Batch status updated.",
+          });
+      } catch (_err) {
+        setNotification({
+          type: "error",
+          message: "Network error during sync.",
+        });
       } finally {
         setSyncingCases((prev) => ({ ...prev, [caseName]: false }));
       }
     },
-    [],
+    [setNotification],
   );
 
   const handleResetCase = useCallback(
     async (caseName: string, fileIds: string[]) => {
-      const isConfirmed = window.confirm(
-        `Are you sure you want to reset all progress for the case "${caseName}"? This will delete all generated PDFs and AI data. (The original PST files will not be touched).`,
-      );
-      if (!isConfirmed) return;
-
+      if (
+        !window.confirm(
+          `Are you sure you want to permanently reset case "${caseName}"? This will delete all extracted data.`,
+        )
+      )
+        return;
       setResettingCases((prev) => ({ ...prev, [caseName]: true }));
       try {
-        const res = await fetch("/api/wipe", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ caseName, fileIds }),
+        const ok = await api.wipeCase(caseName, fileIds);
+        if (!ok) throw new Error("Wipe failed");
+        setActiveCaseSequence((prev) => {
+          const next = { ...prev };
+          delete next[caseName];
+          return next;
         });
-
-        if (!res.ok) {
-          const errData = await res.json();
-          console.error("Reset failed:", errData);
-          alert(`Failed to reset case: ${errData.error}`);
-        } else {
-          setActiveCaseSequence((prev) => {
-            const next = { ...prev };
-            delete next[caseName];
-            return next;
-          });
-        }
-      } catch (_error) {
-        console.error("Network error during case reset");
+        setNotification({
+          type: "success",
+          message: "Case reset successfully.",
+        });
+      } catch (_err) {
+        setNotification({ type: "error", message: "Failed to reset case." });
       } finally {
         setResettingCases((prev) => ({ ...prev, [caseName]: false }));
       }
     },
-    [],
+    [setNotification],
   );
 
   useEffect(() => {
@@ -285,8 +192,7 @@ export default function Dashboard() {
           (action === "ai" && f.ai_status === "batch_ready"),
       );
 
-      if (caseIsBusy) return;
-      if (action === "ai" && isGlobalAiBusy) return;
+      if (caseIsBusy || (action === "ai" && isGlobalAiBusy)) return;
 
       const nextFile = caseFiles.find((f) => {
         if (action === "metadata") return f.status === "pending";
@@ -313,11 +219,18 @@ export default function Dashboard() {
           handleRunAIAudit(nextFile.id, pendingAiConfigs[caseName]);
         else if (action === "pdf") handleConvertToPdf(nextFile.id);
       } else {
-        setActiveCaseSequence((prev) => {
-          const next = { ...prev };
-          delete next[caseName];
-          return next;
-        });
+        if (action === "metadata")
+          setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "analyze" }));
+        else if (action === "analyze")
+          setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "extract" }));
+        else if (action === "ai")
+          setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "pdf" }));
+        else
+          setActiveCaseSequence((prev) => {
+            const next = { ...prev };
+            delete next[caseName];
+            return next;
+          });
       }
     });
   }, [
@@ -332,839 +245,68 @@ export default function Dashboard() {
     handleConvertToPdf,
   ]);
 
-  function startSequence(caseName: string, action: string) {
+  const startSequence = useCallback((caseName: string, action: string) => {
     setActiveCaseSequence((prev) => ({ ...prev, [caseName]: action }));
-  }
+  }, []);
 
-  function submitAiConfigAndStart(caseName: string) {
-    if (!subjectName || !subjectEmail) return;
-    setPendingAiConfigs((prev) => ({
-      ...prev,
-      [caseName]: {
-        name: subjectName,
-        email: subjectEmail,
-        aliases: subjectAliases
-          .split(",")
-          .map((a) => a.trim())
-          .filter(Boolean),
-      },
-    }));
-    setActiveConfigCase(null);
-    startSequence(caseName, "ai");
-  }
+  const submitAiConfigAndStart = useCallback(
+    (caseName: string, config: AiConfig) => {
+      setPendingAiConfigs((prev) => ({ ...prev, [caseName]: config }));
+      setActiveConfigCase(null);
+      startSequence(caseName, "ai");
+    },
+    [startSequence],
+  );
 
-  // ==========================================
-  // STANDALONE PIPELINE LOGIC
-  // ==========================================
-  const handleRunStandalone = async () => {
-    if (!stdCaseName.trim() || !stdSubjectName.trim()) {
-      setStdError("Case Name and Subject Full Name are required.");
-      return;
-    }
-
-    setIsStdProcessing(true);
-    setStdError("");
-    setStdResults(null);
-
-    try {
-      const res = await fetch("/api/standalone", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          caseName: stdCaseName.trim(),
-          subjectCriteria: {
-            name: stdSubjectName.trim(),
-            aliases: stdSubjectAliases
-              .split(",")
-              .map((a) => a.trim())
-              .filter(Boolean),
-          },
-        }),
-      });
-
-      const data = await res.json();
-
-      if (res.ok && data.success) {
-        setStdResults({
-          processed: data.processedCount,
-          skipped: data.skippedCount,
-          message: data.message,
-        });
-      } else {
-        setStdError(data.error || "Failed to process standalone files.");
-      }
-    } catch (_err) {
-      setStdError(
-        "A network error occurred while reaching the standalone engine.",
-      );
-    } finally {
-      setIsStdProcessing(false);
-    }
-  };
-
-  const isGlobalScanDisabled =
-    loading || isRefreshing || Object.keys(activeCaseSequence).length > 0;
+  const isGlobalScanDisabled = loading || isRefreshing || isSequenceLocked;
 
   return (
-    <main className="min-h-screen bg-slate-900 text-slate-100 p-8">
+    <main className="min-h-screen bg-slate-900 text-slate-100 p-4 sm:p-8 font-sans">
+      {notification && <NotificationToast notification={notification} />}
+
       <div className="max-w-6xl mx-auto">
-        <header className="mb-8 pb-6 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
-              <Database className="w-8 h-8 text-indigo-500" />
-              DSAR Workspace
-            </h1>
-            <p className="text-slate-400 mt-2">
-              Automated data extraction, deduplication, and compliance
-              filtering.
-            </p>
-          </div>
+        <DashboardHeader
+          showScanButton={activeTab === "pst"}
+          isRefreshing={isRefreshing}
+          scanDisabled={isGlobalScanDisabled}
+          onScan={handleScanDirectory}
+        />
 
-          <div className="flex shrink-0">
-            {activeTab === "pst" && (
-              <button
-                type="button"
-                suppressHydrationWarning
-                disabled={isGlobalScanDisabled}
-                onClick={handleScanDirectory}
-                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-5 py-2.5 rounded-lg font-medium text-sm border border-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-              >
-                <RefreshCw
-                  className={`w-4 h-4 ${isRefreshing ? "animate-spin text-teal-400" : ""}`}
-                />
-                {isRefreshing ? "Scanning Storage..." : "Scan PST Directory"}
-              </button>
-            )}
-          </div>
-        </header>
+        <TabNavigation activeTab={activeTab} onChange={setActiveTab} />
 
-        <div className="flex space-x-6 mb-8 border-b border-slate-800">
-          <button
-            type="button"
-            onClick={() => setActiveTab("pst")}
-            className={`pb-3 border-b-2 font-bold text-sm tracking-wide transition-colors flex items-center gap-2 ${
-              activeTab === "pst"
-                ? "border-indigo-500 text-indigo-400"
-                : "border-transparent text-slate-500 hover:text-slate-300"
-            }`}
-          >
-            <Database className="w-4 h-4" />
-            Email Archives (PST)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab("standalone")}
-            className={`pb-3 border-b-2 font-bold text-sm tracking-wide transition-colors flex items-center gap-2 ${
-              activeTab === "standalone"
-                ? "border-emerald-500 text-emerald-400"
-                : "border-transparent text-slate-500 hover:text-slate-300"
-            }`}
-          >
-            <FileText className="w-4 h-4" />
-            Standalone Docs & Teams
-          </button>
-        </div>
-
-        {/* ========================================== */}
-        {/* TAB 1: PST PIPELINE                        */}
-        {/* ========================================== */}
         {activeTab === "pst" &&
           (loading && !isRefreshing ? (
-            <div className="flex flex-col items-center justify-center text-slate-400 py-12">
-              <Loader2 className="w-8 h-8 animate-spin mb-4 text-indigo-500" />
-              Connecting to real-time orchestrator...
-            </div>
+            <ConnectingState />
           ) : files.length === 0 ? (
-            <div className="text-center border-2 border-dashed border-slate-800 rounded-xl p-12 text-slate-500 flex flex-col items-center">
-              <Folder className="w-12 h-12 text-slate-700 mb-4" />
-              No PST files detected inside the staging directory.
-            </div>
+            <EmptyState />
           ) : (
-            <div className="grid gap-8">
-              {Object.entries(groupedCases).map(([caseName, caseFiles]) => {
-                const stats = caseFiles.reduce(
-                  (acc, file) => {
-                    acc.size += file.file_size_bytes || 0;
-                    acc.totalEmails += file.total_emails || 0;
-                    acc.uniqueEmails += file.unique_emails || 0;
-                    acc.duplicateEmails += file.duplicate_emails || 0;
-                    acc.estimatedTokens += file.estimated_tokens || 0;
-                    acc.aiApproved += file.ai_approved_count || 0;
-                    acc.aiDiscarded += file.ai_discarded_count || 0;
-                    return acc;
-                  },
-                  {
-                    size: 0,
-                    totalEmails: 0,
-                    uniqueEmails: 0,
-                    duplicateEmails: 0,
-                    estimatedTokens: 0,
-                    aiApproved: 0,
-                    aiDiscarded: 0,
-                  },
-                );
-
-                const filesToSync = caseFiles
-                  .filter((f) => f.ai_status === "batch_ready")
-                  .map((f) => f.id);
-                const isSyncing = syncingCases[caseName];
-                const isResetting = resettingCases[caseName];
-
-                let caseAction = "";
-                let btnText = "";
-                let isBusy = false;
-                let needsSync = false;
-                let isFaulted = false;
-
-                if (
-                  caseFiles.some(
-                    (f) =>
-                      f.status === "failed" ||
-                      f.pdf_status === "failed" ||
-                      f.ai_status === "failed",
-                  )
-                ) {
-                  isFaulted = true;
-                  btnText = "Case Faulted";
-                } else if (filesToSync.length > 0) {
-                  needsSync = true;
-                  btnText = "Sync AI Status";
-                } else if (caseFiles.some((f) => f.status === "pending")) {
-                  caseAction = "metadata";
-                  btnText = "Scan Metadata Sequence";
-                } else if (
-                  caseFiles.some((f) => f.status === "scanning_metadata")
-                ) {
-                  isBusy = true;
-                  btnText = "Scanning Headers...";
-                } else if (
-                  caseFiles.some((f) => f.status === "pending_analysis")
-                ) {
-                  caseAction = "analyze";
-                  btnText = "Analyze Case Sequence";
-                } else if (caseFiles.some((f) => f.status === "processing")) {
-                  isBusy = true;
-                  btnText = "Analyzing Deduplication...";
-                } else if (caseFiles.some((f) => f.status === "analyzed")) {
-                  caseAction = "extract";
-                  btnText = `Extract ${stats.uniqueEmails.toLocaleString()} Unique Emails`;
-                } else if (caseFiles.some((f) => f.status === "extracting")) {
-                  isBusy = true;
-                  btnText = "Exporting Unified Folder...";
-                } else if (
-                  caseFiles.some(
-                    (f) =>
-                      f.status === "completed" &&
-                      (!f.ai_status || f.ai_status === "pending"),
-                  )
-                ) {
-                  caseAction = "configure_ai";
-                  btnText = "Configure AI Audit Sequence";
-                } else if (
-                  caseFiles.some((f) => f.ai_status === "processing")
-                ) {
-                  isBusy = true;
-                  btnText = "AI Auditing Unified Folder...";
-                } else if (
-                  caseFiles.some(
-                    (f) =>
-                      f.ai_status === "completed" &&
-                      (!f.pdf_status || f.pdf_status === "pending"),
-                  )
-                ) {
-                  caseAction = "pdf";
-                  btnText = "Compile Final PDFs Sequence";
-                } else if (
-                  caseFiles.some((f) => f.pdf_status === "processing")
-                ) {
-                  isBusy = true;
-                  btnText = "Rendering PDFs...";
-                } else {
-                  btnText = "Unified DSAR Package Ready";
-                }
-
-                const liveProcessedCount =
-                  stats.uniqueEmails + stats.duplicateEmails;
-                const analyzeProgress =
-                  stats.totalEmails > 0
-                    ? Math.min(
-                        100,
-                        Math.round(
-                          (liveProcessedCount / stats.totalEmails) * 100,
-                        ),
-                      )
-                    : 0;
-                const aiProcessedCount = stats.aiApproved + stats.aiDiscarded;
-                const aiProgress =
-                  stats.uniqueEmails > 0
-                    ? Math.min(
-                        100,
-                        Math.round(
-                          (aiProcessedCount / stats.uniqueEmails) * 100,
-                        ),
-                      )
-                    : 0;
-
-                return (
-                  <div
-                    key={caseName}
-                    className={`bg-slate-800 rounded-2xl border p-6 flex flex-col gap-6 shadow-xl transition-all duration-300 ${
-                      isBusy || isSyncing || isResetting
-                        ? "border-amber-500/40 bg-slate-800/90"
-                        : "border-slate-700"
-                    }`}
-                  >
-                    <div className="flex flex-col xl:flex-row xl:items-start justify-between gap-6">
-                      <div className="flex-1 space-y-4">
-                        <div className="flex items-center gap-3 border-b border-slate-700/50 pb-3">
-                          <Folder className="w-6 h-6 text-indigo-400" />
-                          <h2
-                            className="text-2xl font-bold text-white tracking-wide truncate"
-                            title={caseName}
-                          >
-                            {caseName}
-                          </h2>
-                        </div>
-
-                        <div className="flex flex-wrap gap-2 pt-1">
-                          {caseFiles.map((f, i) => {
-                            let activeColorClass =
-                              "bg-slate-900/60 border-slate-700/50 text-slate-400";
-                            let StatusIcon = FileText;
-                            let iconClass = "text-slate-500";
-                            let isFileBusy = false;
-
-                            const fileFaulted =
-                              f.status === "failed" ||
-                              f.pdf_status === "failed" ||
-                              f.ai_status === "failed";
-
-                            if (fileFaulted) {
-                              StatusIcon = AlertCircle;
-                              iconClass = "text-rose-400";
-                              activeColorClass =
-                                "bg-rose-950/30 border-rose-500/50 text-rose-300";
-                            } else if (
-                              f.pdf_status === "processing" ||
-                              f.ai_status === "processing" ||
-                              f.status === "extracting" ||
-                              f.status === "processing" ||
-                              f.status === "scanning_metadata"
-                            ) {
-                              isFileBusy = true;
-                              StatusIcon = Loader2;
-                              iconClass = "animate-spin text-white";
-
-                              if (f.pdf_status === "processing")
-                                activeColorClass =
-                                  "bg-blue-900/40 border-blue-400 text-blue-200 shadow-[0_0_12px_rgba(59,130,246,0.6)]";
-                              else if (f.ai_status === "processing")
-                                activeColorClass =
-                                  "bg-emerald-900/40 border-emerald-400 text-emerald-200 shadow-[0_0_12px_rgba(16,185,129,0.6)]";
-                              else if (f.status === "extracting")
-                                activeColorClass =
-                                  "bg-purple-900/40 border-purple-400 text-purple-200 shadow-[0_0_12px_rgba(168,85,247,0.6)]";
-                              else if (f.status === "processing")
-                                activeColorClass =
-                                  "bg-amber-900/40 border-amber-400 text-amber-200 shadow-[0_0_12px_rgba(245,158,11,0.6)]";
-                              else
-                                activeColorClass =
-                                  "bg-indigo-900/40 border-indigo-400 text-indigo-200 shadow-[0_0_12px_rgba(99,102,241,0.6)]";
-                            } else if (
-                              f.pdf_status === "completed" ||
-                              f.ai_status === "completed" ||
-                              f.status === "completed" ||
-                              f.status === "analyzed" ||
-                              f.status === "pending_analysis"
-                            ) {
-                              StatusIcon = CheckCircle;
-                              if (f.pdf_status === "completed") {
-                                iconClass = "text-emerald-400";
-                                activeColorClass =
-                                  "bg-emerald-950/20 border-emerald-500/30 text-emerald-500";
-                              } else if (
-                                f.ai_status === "completed" ||
-                                f.status === "completed"
-                              ) {
-                                iconClass = "text-blue-400";
-                                activeColorClass =
-                                  "bg-blue-950/20 border-blue-500/30 text-blue-400";
-                              } else {
-                                iconClass = "text-slate-400";
-                                activeColorClass =
-                                  "bg-slate-800/80 border-slate-600/50 text-slate-300";
-                              }
-                            } else if (f.ai_status === "batch_ready") {
-                              StatusIcon = RefreshCw;
-                              iconClass = "text-amber-400";
-                              activeColorClass =
-                                "bg-amber-950/20 border-amber-500/30 text-amber-400";
-                            }
-
-                            return (
-                              <div
-                                key={f.id}
-                                className={`text-xs flex items-center gap-1.5 px-2.5 py-1.5 rounded-md border transition-all duration-300 ${activeColorClass}`}
-                              >
-                                <span
-                                  className={`font-mono ${isFileBusy ? "text-white font-bold" : "text-slate-500"}`}
-                                >
-                                  {i + 1}.
-                                </span>
-                                <span
-                                  className={`truncate max-w-40 ${isFileBusy ? "font-semibold" : ""}`}
-                                >
-                                  {f.filename}
-                                </span>
-                                <StatusIcon
-                                  className={`w-3.5 h-3.5 ml-0.5 ${iconClass}`}
-                                />
-                              </div>
-                            );
-                          })}
-                        </div>
-
-                        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-3">
-                          <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-700/50">
-                            <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">
-                              Total Size
-                            </span>
-                            <span className="text-base font-semibold text-slate-200">
-                              {formatBytes(stats.size)}
-                            </span>
-                          </div>
-                          <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-700/50">
-                            <span className="block text-[10px] text-slate-500 font-bold uppercase tracking-wider mb-1">
-                              Gross Emails
-                            </span>
-                            <span className="text-base font-semibold text-slate-200">
-                              {stats.totalEmails.toLocaleString()}
-                            </span>
-                          </div>
-                          <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-700/50">
-                            <span className="block text-[10px] text-rose-400 font-bold uppercase tracking-wider mb-1">
-                              Duplicates
-                            </span>
-                            <span className="text-base font-semibold text-rose-400 font-mono">
-                              {stats.duplicateEmails.toLocaleString()}
-                            </span>
-                          </div>
-                          <div className="bg-slate-900/50 p-3 rounded-xl border border-slate-700/50">
-                            <span className="block text-[10px] text-teal-400 font-bold uppercase tracking-wider mb-1">
-                              Unique Items
-                            </span>
-                            <span className="text-base font-semibold text-teal-400 font-mono">
-                              {stats.uniqueEmails.toLocaleString()}
-                            </span>
-                          </div>
-
-                          {(stats.aiApproved > 0 || stats.aiDiscarded > 0) && (
-                            <>
-                              <div className="bg-emerald-950/20 p-3 rounded-xl border border-emerald-500/30 col-span-2 sm:col-span-1">
-                                <span className="block text-[10px] text-emerald-400 font-bold uppercase tracking-wider mb-1">
-                                  AI Approved
-                                </span>
-                                <span className="text-base font-semibold text-emerald-300 font-mono">
-                                  {stats.aiApproved.toLocaleString()}
-                                </span>
-                              </div>
-                              <div className="bg-rose-950/20 p-3 rounded-xl border border-rose-500/30 col-span-2 sm:col-span-1">
-                                <span className="block text-[10px] text-rose-400 font-bold uppercase tracking-wider mb-1">
-                                  AI Discarded
-                                </span>
-                                <span className="text-base font-semibold text-rose-300 font-mono">
-                                  {stats.aiDiscarded.toLocaleString()}
-                                </span>
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      </div>
-
-                      <div className="flex flex-col items-end justify-center gap-3 min-w-70 shrink-0 xl:pt-2">
-                        {needsSync ? (
-                          <button
-                            type="button"
-                            disabled={isSyncing}
-                            onClick={() =>
-                              handleSyncBatch(caseName, filesToSync)
-                            }
-                            className="w-full bg-amber-600 hover:bg-amber-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3.5 rounded-xl font-bold text-sm transition-all shadow-lg flex items-center justify-center gap-2"
-                          >
-                            {isSyncing ? (
-                              <>
-                                <Loader2 className="w-4 h-4 animate-spin" />{" "}
-                                Syncing...
-                              </>
-                            ) : (
-                              <>
-                                <RefreshCw className="w-4 h-4" /> {btnText}
-                              </>
-                            )}
-                          </button>
-                        ) : caseAction === "configure_ai" ? (
-                          <button
-                            type="button"
-                            onClick={() => {
-                              setActiveConfigCase(caseName);
-                              setSubjectName("");
-                              setSubjectEmail("");
-                              setSubjectAliases("");
-                            }}
-                            className="w-full bg-emerald-600 hover:bg-emerald-500 text-white px-6 py-3.5 rounded-xl font-bold text-sm transition-all shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2"
-                          >
-                            <Play className="w-4 h-4" /> {btnText}
-                          </button>
-                        ) : caseAction ? (
-                          <button
-                            type="button"
-                            disabled={
-                              Object.keys(activeCaseSequence).length > 0 ||
-                              isResetting
-                            }
-                            onClick={() => startSequence(caseName, caseAction)}
-                            className={`w-full text-white px-6 py-3.5 rounded-xl font-bold text-sm transition-all shadow-lg flex items-center justify-center gap-2 disabled:opacity-40 disabled:cursor-not-allowed ${
-                              caseAction === "metadata"
-                                ? "bg-slate-600 hover:bg-slate-500 shadow-slate-600/20"
-                                : caseAction === "analyze"
-                                  ? "bg-blue-600 hover:bg-blue-500 shadow-blue-600/20"
-                                  : caseAction === "extract"
-                                    ? "bg-purple-600 hover:bg-purple-500 shadow-purple-600/20"
-                                    : "bg-blue-600 hover:bg-blue-500 shadow-blue-600/20"
-                            }`}
-                          >
-                            <Play className="w-4 h-4" /> {btnText}
-                          </button>
-                        ) : (
-                          <div
-                            className={`w-full inline-flex justify-center items-center gap-2 px-6 py-3.5 rounded-xl font-bold text-sm ${
-                              isFaulted
-                                ? "bg-rose-500/10 text-rose-400 border border-rose-500/20"
-                                : btnText.includes("Ready")
-                                  ? "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20"
-                                  : "bg-slate-800 border border-slate-700 text-slate-300"
-                            }`}
-                          >
-                            {isFaulted && <AlertCircle className="w-4 h-4" />}
-                            {isBusy && (
-                              <Loader2 className="animate-spin w-4 h-4" />
-                            )}
-                            {btnText.includes("Ready") && (
-                              <CheckCircle className="w-4 h-4" />
-                            )}
-                            {!isFaulted &&
-                              !isBusy &&
-                              !btnText.includes("Ready") && (
-                                <span>{btnText}</span>
-                              )}
-                            {(isFaulted ||
-                              isBusy ||
-                              btnText.includes("Ready")) && (
-                              <span>{btnText}</span>
-                            )}
-                          </div>
-                        )}
-
-                        <button
-                          type="button"
-                          disabled={
-                            isBusy ||
-                            isSyncing ||
-                            isResetting ||
-                            Object.keys(activeCaseSequence).length > 0
-                          }
-                          onClick={() =>
-                            handleResetCase(
-                              caseName,
-                              caseFiles.map((f) => f.id),
-                            )
-                          }
-                          className="w-full flex items-center justify-center gap-2 text-slate-500 hover:text-rose-400 text-xs font-semibold uppercase tracking-wider py-1.5 transition-colors disabled:opacity-30 disabled:hover:text-slate-500"
-                        >
-                          {isResetting ? (
-                            <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          ) : (
-                            <RotateCcw className="w-3.5 h-3.5" />
-                          )}
-                          {isResetting
-                            ? "Resetting Case..."
-                            : "Reset Case Progress"}
-                        </button>
-                      </div>
-                    </div>
-
-                    {/* Config Panel Dropdown */}
-                    {activeConfigCase === caseName && (
-                      <div className="bg-slate-900 border border-slate-700/60 rounded-xl p-6 mt-2 space-y-5 shadow-inner">
-                        <div className="border-b border-slate-800 pb-3">
-                          <h4 className="text-base font-bold text-slate-200">
-                            Configure AI Audit Sequence
-                          </h4>
-                          <p className="text-sm text-slate-400 mt-1">
-                            This configuration will be strictly applied across
-                            all files in this Unified Case.
-                          </p>
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
-                          <div>
-                            <label
-                              htmlFor="subjectName"
-                              className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2"
-                            >
-                              Subject Full Name
-                            </label>
-                            <input
-                              id="subjectName"
-                              type="text"
-                              value={subjectName}
-                              onChange={(e) => setSubjectName(e.target.value)}
-                              placeholder="e.g., Rafael Gomes"
-                              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-purple-500 transition-colors"
-                            />
-                          </div>
-                          <div>
-                            <label
-                              htmlFor="subjectEmail"
-                              className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2"
-                            >
-                              Primary Email
-                            </label>
-                            <input
-                              id="subjectEmail"
-                              type="email"
-                              value={subjectEmail}
-                              onChange={(e) => setSubjectEmail(e.target.value)}
-                              placeholder="e.g., rgomes@companydomain.com"
-                              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-purple-500 transition-colors"
-                            />
-                          </div>
-                          <div>
-                            <label
-                              htmlFor="subjectAliases"
-                              className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2"
-                            >
-                              Aliases (Comma Separated)
-                            </label>
-                            <input
-                              id="subjectAliases"
-                              type="text"
-                              value={subjectAliases}
-                              onChange={(e) =>
-                                setSubjectAliases(e.target.value)
-                              }
-                              placeholder="e.g., Rafael G., RGomes"
-                              className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-slate-100 focus:outline-none focus:border-purple-500 transition-colors"
-                            />
-                          </div>
-                        </div>
-                        <div className="flex justify-end gap-3 pt-4 border-t border-slate-800/50">
-                          <button
-                            type="button"
-                            onClick={() => setActiveConfigCase(null)}
-                            className="bg-slate-800 hover:bg-slate-700 text-slate-300 px-5 py-2.5 rounded-lg text-sm font-bold border border-slate-700 transition-colors"
-                          >
-                            Cancel
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => submitAiConfigAndStart(caseName)}
-                            className="flex items-center gap-2 bg-purple-600 hover:bg-purple-500 text-white px-6 py-2.5 rounded-lg text-sm font-bold transition-colors shadow-lg shadow-purple-600/20"
-                          >
-                            <Play className="w-4 h-4" /> Launch Sequence
-                          </button>
-                        </div>
-                      </div>
-                    )}
-
-                    {isBusy && (
-                      <div className="mt-2 pt-4 border-t border-slate-700/50">
-                        <div className="flex justify-between text-sm font-semibold text-slate-400 mb-2 px-1">
-                          <span>Unified Case Engine Running...</span>
-                          <span className="font-mono text-amber-400">
-                            {btnText.includes("AI")
-                              ? `${aiProcessedCount.toLocaleString()} items audited (${aiProgress}%)`
-                              : btnText.includes("Analyzing")
-                                ? `${liveProcessedCount.toLocaleString()} parsed (${analyzeProgress}%)`
-                                : btnText.includes("Exporting")
-                                  ? "Saving to disk..."
-                                  : ""}
-                          </span>
-                        </div>
-                        <div className="w-full bg-slate-900 rounded-full h-3 overflow-hidden border border-slate-700/50 shadow-inner">
-                          <div
-                            className={`h-3 rounded-full transition-all duration-700 ease-out ${btnText.includes("Scanning") ? "bg-linear-to-r from-indigo-500 to-purple-500 w-full animate-[pulse_1.5s_infinite]" : btnText.includes("Exporting") ? "bg-linear-to-r from-purple-500 to-indigo-500 w-full animate-[pulse_1.5s_infinite]" : btnText.includes("AI") ? "bg-linear-to-r from-emerald-500 to-teal-500" : btnText.includes("Rendering") ? "bg-linear-to-r from-blue-500 to-indigo-500 w-full animate-[pulse_1.5s_infinite]" : "bg-linear-to-r from-amber-500 to-yellow-400"}`}
-                            style={{
-                              width: btnText.includes("AI")
-                                ? `${aiProgress}%`
-                                : btnText.includes("Analyzing")
-                                  ? `${analyzeProgress}%`
-                                  : "100%",
-                            }}
-                          />
-                        </div>
-                      </div>
-                    )}
-                  </div>
-                );
-              })}
+            // CRITICAL FIX: items-start prevents grids from stretching when accordion opens
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+              {Object.entries(groupedCases).map(([caseName, caseFiles]) => (
+                <CaseCard
+                  key={caseName}
+                  caseName={caseName}
+                  caseFiles={caseFiles}
+                  isSequenceLocked={isSequenceLocked}
+                  isSyncing={!!syncingCases[caseName]}
+                  isResetting={!!resettingCases[caseName]}
+                  isMetricsOpen={!!openMetrics[caseName]}
+                  isConfigOpen={activeConfigCase === caseName}
+                  onToggleMetrics={() => toggleMetrics(caseName)}
+                  onOpenConfig={() => setActiveConfigCase(caseName)}
+                  onCloseConfig={() => setActiveConfigCase(null)}
+                  onSync={(ids) => handleSyncBatch(caseName, ids)}
+                  onReset={(ids) => handleResetCase(caseName, ids)}
+                  onStartSequence={(action) => startSequence(caseName, action)}
+                  onSubmitAiConfig={(config) =>
+                    submitAiConfigAndStart(caseName, config)
+                  }
+                />
+              ))}
             </div>
           ))}
 
-        {/* ========================================== */}
-        {/* TAB 2: STANDALONE DOCUMENTS & TEAMS          */}
-        {/* ========================================== */}
-        {activeTab === "standalone" && (
-          <div className="bg-slate-800 rounded-2xl border border-slate-700 shadow-xl overflow-hidden">
-            <div className="p-8 space-y-8">
-              <div className="flex flex-col gap-2">
-                <h2 className="text-2xl font-bold text-white flex items-center gap-3">
-                  <FileText className="w-7 h-7 text-emerald-400" />
-                  Hard-Filter Engine
-                </h2>
-                <p className="text-slate-400 text-sm">
-                  Process raw documents (PDF, DOCX, XLSX) and Teams Chats
-                  (HTML). This engine bypasses the AI and uses strict keyword
-                  rules to instantly discard privileged data and keep only files
-                  mentioning the Data Subject.
-                </p>
-              </div>
-
-              <div className="bg-slate-900/60 border border-slate-700/60 rounded-xl p-5 flex items-start gap-4">
-                <ShieldAlert className="w-6 h-6 text-amber-500 shrink-0 mt-0.5" />
-                <div className="text-sm text-slate-300">
-                  <strong className="text-white block mb-1">
-                    Required Setup Instructions:
-                  </strong>
-                  Before running this filter, you must place the loose files or
-                  nested export folders into the following directory structure:
-                  <br />
-                  <code className="text-emerald-400 font-mono bg-slate-950 px-2 py-1 rounded mt-2 inline-block">
-                    /staging-area/standalone/[Case Name]/
-                  </code>
-                </div>
-              </div>
-
-              <div className="space-y-5">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                  <div>
-                    <label
-                      htmlFor="stdCaseName"
-                      className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2"
-                    >
-                      Case Name (Nested Path)
-                    </label>
-                    <input
-                      id="stdCaseName"
-                      type="text"
-                      value={stdCaseName}
-                      onChange={(e) => setStdCaseName(e.target.value)}
-                      placeholder="e.g., MB/R2"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
-                    />
-                  </div>
-                  <div>
-                    <label
-                      htmlFor="stdSubjectName"
-                      className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2"
-                    >
-                      Subject Full Name
-                    </label>
-                    <input
-                      id="stdSubjectName"
-                      type="text"
-                      value={stdSubjectName}
-                      onChange={(e) => setStdSubjectName(e.target.value)}
-                      placeholder="e.g., Rafael Gomes"
-                      className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label
-                    htmlFor="stdSubjectAliases"
-                    className="block text-xs font-bold text-slate-400 uppercase tracking-wider mb-2"
-                  >
-                    Aliases (Comma Separated, Optional)
-                  </label>
-                  <input
-                    id="stdSubjectAliases"
-                    type="text"
-                    value={stdSubjectAliases}
-                    onChange={(e) => setStdSubjectAliases(e.target.value)}
-                    placeholder="e.g., Rafael G., RGomes"
-                    className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-slate-100 focus:outline-none focus:border-emerald-500 transition-colors"
-                  />
-                </div>
-              </div>
-
-              {stdError && (
-                <div className="bg-rose-500/10 border border-rose-500/20 text-rose-400 p-4 rounded-lg text-sm flex items-center gap-3">
-                  <AlertCircle className="w-5 h-5" />
-                  {stdError}
-                </div>
-              )}
-
-              {stdResults && (
-                <div className="bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 p-6 rounded-lg flex flex-col gap-3">
-                  <div className="flex items-center gap-3 font-bold text-lg mb-2">
-                    <CheckCircle className="w-6 h-6" />
-                    Batch Processing Complete
-                  </div>
-                  <div className="grid grid-cols-2 gap-4">
-                    <div className="bg-emerald-950/30 p-4 rounded border border-emerald-500/20">
-                      <span className="block text-xs text-emerald-500 uppercase font-bold mb-1">
-                        Approved & Exported
-                      </span>
-                      <span className="text-2xl font-mono text-emerald-300">
-                        {stdResults.processed}
-                      </span>
-                    </div>
-                    <div className="bg-slate-900/50 p-4 rounded border border-slate-700/50">
-                      <span className="block text-xs text-slate-500 uppercase font-bold mb-1">
-                        Skipped / Excluded
-                      </span>
-                      <span className="text-2xl font-mono text-slate-300">
-                        {stdResults.skipped}
-                      </span>
-                    </div>
-                  </div>
-                  <p className="text-xs text-emerald-500 mt-2">
-                    Deliverables securely flattened and saved to: <br />
-                    <code className="font-mono bg-emerald-950 px-1 rounded">
-                      /extracted_emails/{stdCaseName}/Messages/
-                    </code>
-                    <br />
-                    <code className="font-mono bg-emerald-950 px-1 rounded">
-                      /extracted_emails/{stdCaseName}/Documents/
-                    </code>
-                  </p>
-                </div>
-              )}
-
-              <div className="pt-4 border-t border-slate-700/50">
-                <button
-                  type="button"
-                  disabled={isStdProcessing || !stdCaseName || !stdSubjectName}
-                  onClick={handleRunStandalone}
-                  className="w-full bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-4 rounded-xl font-bold text-sm transition-all shadow-lg flex items-center justify-center gap-2"
-                >
-                  {isStdProcessing ? (
-                    <>
-                      <Loader2 className="w-5 h-5 animate-spin" /> Processing
-                      Hard-Filter...
-                    </>
-                  ) : (
-                    <>
-                      <MessageSquare className="w-5 h-5" /> Launch Standalone
-                      Pipeline
-                    </>
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-        )}
+        {activeTab === "standalone" && <StandalonePanel />}
       </div>
     </main>
   );
