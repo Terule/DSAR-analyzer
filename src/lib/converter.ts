@@ -1,4 +1,4 @@
-import { execSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -23,25 +23,162 @@ function getAddressText(
   return addr.text?.trim() || "Unknown";
 }
 
+function sanitizeFontsForPdf(html: string): string {
+  let sanitized = html;
+
+  // Remove embedded font definitions that can produce invalid font metadata.
+  sanitized = sanitized.replace(/@font-face\s*\{[\s\S]*?\}/gi, "");
+
+  // Remove explicit font-family declarations from inline style attributes.
+  sanitized = sanitized.replace(/font-family\s*:[^;"']*;?/gi, "");
+
+  // Strip forced page breaks that can leave a near-empty first page.
+  sanitized = sanitized.replace(
+    /(?:page-)?break-(?:before|after|inside)\s*:[^;"']*;?/gi,
+    "",
+  );
+
+  // Strip explicit min-height/height declarations that inflate layout height.
+  sanitized = sanitized.replace(/min-height\s*:[^;"']*;?/gi, "");
+  sanitized = sanitized.replace(/\bheight\s*:[^;"']*;?/gi, "");
+
+  // Collapse runs of empty paragraphs / line breaks that push content down.
+  sanitized = sanitized.replace(/(?:\s*<br\s*\/?>\s*){3,}/gi, "<br><br>");
+  sanitized = sanitized.replace(/<p[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/p>/gi, "");
+
+  // Force a stable font stack and neutralize layout-inflating styles.
+  const fontOverride = `
+    <style>
+      @page { size: A4; margin: 18mm; }
+      html, body, * {
+        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+        min-height: 0 !important;
+        page-break-before: auto !important;
+        page-break-after: auto !important;
+        break-before: auto !important;
+        break-after: auto !important;
+      }
+      html, body {
+        height: auto !important;
+        margin: 0 !important;
+        padding: 0 !important;
+      }
+      table { page-break-inside: auto !important; }
+    </style>
+  `;
+
+  if (/<head[^>]*>/i.test(sanitized)) {
+    sanitized = sanitized.replace(/(<head[^>]*>)/i, `$1\n${fontOverride}`);
+  } else {
+    sanitized = `<!DOCTYPE html><html><head>${fontOverride}</head><body>${sanitized}</body></html>`;
+  }
+
+  return sanitized;
+}
+
 // 🔥 Pure WeasyPrint CLI Exec Wrapper (Zero Puppeteer)
-function runWeasyPrint(htmlPath: string, pdfPath: string) {
-  try {
-    execSync(`weasyprint "${htmlPath}" "${pdfPath}"`, { stdio: "ignore" });
-  } catch (err) {
-    throw new Error(
-      `WeasyPrint execution failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+const MAX_CONCURRENT_SUBPROCESSES = 2;
+let activeSubprocesses = 0;
+const subprocessQueue: Array<() => void> = [];
+
+function acquireSlot(): Promise<void> {
+  if (activeSubprocesses < MAX_CONCURRENT_SUBPROCESSES) {
+    activeSubprocesses++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve) => subprocessQueue.push(resolve));
+}
+
+function releaseSlot(): void {
+  const next = subprocessQueue.shift();
+  if (next) {
+    next();
+  } else {
+    activeSubprocesses--;
   }
 }
 
-function extractZipAttachment(zipPath: string, outputDir: string) {
+function runCommand(
+  cmd: string,
+  args: string[],
+  timeoutMs: number,
+  label: string,
+): Promise<void> {
+  return acquireSlot().then(
+    () =>
+      new Promise<void>((resolve, reject) => {
+        const child = spawn(cmd, args, { stdio: "ignore" });
+        let done = false;
+
+        const finish = (cb: () => void) => {
+          if (done) return;
+          done = true;
+          clearTimeout(timer);
+          releaseSlot();
+          cb();
+        };
+
+        const timer = setTimeout(() => {
+          child.kill("SIGKILL");
+          finish(() =>
+            reject(new Error(`${label} timed out after ${timeoutMs}ms`)),
+          );
+        }, timeoutMs);
+
+        child.once("error", (err) => {
+          finish(() => {
+            reject(
+              new Error(
+                `${label} failed to start: ${err instanceof Error ? err.message : String(err)}`,
+              ),
+            );
+          });
+        });
+
+        child.once("close", (code, signal) => {
+          if (code === 0) {
+            finish(resolve);
+            return;
+          }
+
+          finish(() => {
+            reject(
+              new Error(
+                `${label} exited with code ${code ?? "unknown"}${signal ? ` (signal ${signal})` : ""}`,
+              ),
+            );
+          });
+        });
+      }),
+  );
+}
+
+async function runWeasyPrint(htmlPath: string, pdfPath: string) {
+  await runCommand(
+    "weasyprint",
+    [htmlPath, pdfPath],
+    120_000,
+    "WeasyPrint execution",
+  );
+}
+
+async function extractZipAttachment(zipPath: string, outputDir: string) {
   try {
     fs.mkdirSync(outputDir, { recursive: true });
-    execSync(`unzip -oq "${zipPath}" -d "${outputDir}"`, { stdio: "ignore" });
+    await runCommand(
+      "unzip",
+      ["-oq", zipPath, "-d", outputDir],
+      60_000,
+      "ZIP extraction",
+    );
     return true;
   } catch (_err) {
     return false;
   }
+}
+
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
 }
 
 export async function extractPdfText(buffer: Buffer): Promise<string> {
@@ -117,7 +254,7 @@ function generateEmailHtml(
       }
     });
   }
-  return html;
+  return sanitizeFontsForPdf(html);
 }
 
 export async function processDocxToPdf(
@@ -156,12 +293,17 @@ export async function processDocxToPdf(
     }
 
     const result = await mammoth.convertToHtml({ buffer });
-    const htmlContent = `<html><head><title>${docTitle}</title><style>body { font-family: sans-serif; line-height: 1.6; padding: 20px; }</style></head><body>${result.value || ""}</body></html>`;
+    const htmlContent = sanitizeFontsForPdf(
+      `<html><head><title>${docTitle}</title><style>body { font-family: sans-serif; line-height: 1.6; padding: 20px; }</style></head><body>${result.value || ""}</body></html>`,
+    );
 
     const tempHtmlPath = `${outputPath}.tmp.html`;
     fs.writeFileSync(tempHtmlPath, htmlContent);
-    runWeasyPrint(tempHtmlPath, outputPath);
-    fs.unlinkSync(tempHtmlPath);
+    try {
+      await runWeasyPrint(tempHtmlPath, outputPath);
+    } finally {
+      fs.rmSync(tempHtmlPath, { force: true });
+    }
 
     return true;
   } catch (_err) {
@@ -266,10 +408,14 @@ export async function processExcelToPdf(
     }
 
     htmlContent += `</body></html>`;
+    htmlContent = sanitizeFontsForPdf(htmlContent);
     const tempHtmlPath = `${outputPath}.tmp.html`;
     fs.writeFileSync(tempHtmlPath, htmlContent);
-    runWeasyPrint(tempHtmlPath, outputPath);
-    fs.unlinkSync(tempHtmlPath);
+    try {
+      await runWeasyPrint(tempHtmlPath, outputPath);
+    } finally {
+      fs.rmSync(tempHtmlPath, { force: true });
+    }
 
     return true;
   } catch (_err) {
@@ -419,8 +565,11 @@ export async function convertToPdfBatch(
         );
         const tempHtml = `${emailPdfPath}.tmp.html`;
         fs.writeFileSync(tempHtml, htmlContent);
-        runWeasyPrint(tempHtml, emailPdfPath);
-        fs.unlinkSync(tempHtml);
+        try {
+          await runWeasyPrint(tempHtml, emailPdfPath);
+        } finally {
+          fs.rmSync(tempHtml, { force: true });
+        }
       }
 
       // Process Flattened Attachments
@@ -486,7 +635,7 @@ export async function convertToPdfBatch(
               deliverablesDir,
               `${attSeqName}_unzipped`,
             );
-            const extracted = extractZipAttachment(zipPath, extractedDir);
+            const extracted = await extractZipAttachment(zipPath, extractedDir);
             if (!extracted) {
               // Keep original zip when extraction tool is unavailable or archive is invalid.
               fs.rmSync(extractedDir, { recursive: true, force: true });
@@ -498,6 +647,9 @@ export async function convertToPdfBatch(
       if (parsed.attachments && parsed.attachments.length > 0) {
         await processNestedAttachments(parsed.attachments, baseName);
       }
+
+      // Keep the API server responsive while processing large batches.
+      await yieldToEventLoop();
     }
 
     const durationMs = Date.now() - startTime;
