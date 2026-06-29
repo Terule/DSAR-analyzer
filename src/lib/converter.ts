@@ -181,6 +181,31 @@ function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+// Hard per-file budget: skip an email if it takes too long to render.
+const PER_EMAIL_TIMEOUT_MS = 60_000;
+
+function withTimeout<T>(
+  work: Promise<T>,
+  timeoutMs: number,
+  label: string,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    work.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (err) => {
+        clearTimeout(timer);
+        reject(err);
+      },
+    );
+  });
+}
+
 export async function extractPdfText(buffer: Buffer): Promise<string> {
   const { PDFParse } = await import("pdf-parse");
   const parser = new PDFParse({ data: buffer });
@@ -548,104 +573,132 @@ export async function convertToPdfBatch(
       const baseName = `Email ${String(idx + 1).padStart(padLength, "0")}`;
       const emailPdfPath = path.join(deliverablesDir, `${baseName}.pdf`);
 
-      const rawEml = fs.readFileSync(emlPath);
-      const parsed = await simpleParser(rawEml);
+      try {
+        await withTimeout(
+          (async () => {
+            const rawEml = fs.readFileSync(emlPath);
+            const parsed = await simpleParser(rawEml);
 
-      const fromText = getAddressText(parsed.from);
-      const toText = getAddressText(parsed.to);
+            const fromText = getAddressText(parsed.from);
+            const toText = getAddressText(parsed.to);
 
-      if (fromText === "Unknown" || toText === "Unknown") continue;
+            if (fromText === "Unknown" || toText === "Unknown") return;
 
-      if (!fs.existsSync(emailPdfPath)) {
-        const htmlContent = generateEmailHtml(
-          parsed,
-          fromText,
-          toText,
-          baseName,
-        );
-        const tempHtml = `${emailPdfPath}.tmp.html`;
-        fs.writeFileSync(tempHtml, htmlContent);
-        try {
-          await runWeasyPrint(tempHtml, emailPdfPath);
-        } finally {
-          fs.rmSync(tempHtml, { force: true });
-        }
-      }
-
-      // Process Flattened Attachments
-      const processNestedAttachments = async (
-        attachments: Attachment[],
-        currentBaseName: string,
-      ) => {
-        let attachmentCounter = 1;
-        const padLen = Math.max(2, attachments.length.toString().length);
-
-        for (const att of attachments) {
-          if (!att || !att.content) continue;
-          const ext = path.extname(att.filename || "").toLowerCase();
-          const contentBuf = Buffer.isBuffer(att.content)
-            ? att.content
-            : Buffer.from(att.content);
-
-          const attSeqName = `${currentBaseName} Attachment ${String(attachmentCounter).padStart(padLen, "0")}`;
-          attachmentCounter++;
-
-          const allowedExtensions = [
-            ".zip",
-            ".pdf",
-            ".docx",
-            ".doc",
-            ".xlsx",
-            ".xls",
-            ".csv",
-          ];
-          if (!allowedExtensions.includes(ext)) continue;
-
-          if (ext === ".docx" || ext === ".doc") {
-            const docxPdfPath = path.join(deliverablesDir, `${attSeqName}.pdf`);
-            await processDocxToPdf(
-              contentBuf,
-              docxPdfPath,
-              filterCriteria,
-              attSeqName,
-            );
-          } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
-            const excelPdfPath = path.join(
-              deliverablesDir,
-              `${attSeqName}.pdf`,
-            );
-            await processExcelToPdf(
-              contentBuf,
-              excelPdfPath,
-              filterCriteria,
-              attSeqName,
-            );
-          } else if (ext === ".pdf") {
-            const pdfPath = path.join(deliverablesDir, `${attSeqName}${ext}`);
-            await processPdfAttachment(
-              contentBuf,
-              pdfPath,
-              filterCriteria,
-              attSeqName,
-            );
-          } else if (ext === ".zip") {
-            const zipPath = path.join(deliverablesDir, `${attSeqName}${ext}`);
-            fs.writeFileSync(zipPath, contentBuf);
-            const extractedDir = path.join(
-              deliverablesDir,
-              `${attSeqName}_unzipped`,
-            );
-            const extracted = await extractZipAttachment(zipPath, extractedDir);
-            if (!extracted) {
-              // Keep original zip when extraction tool is unavailable or archive is invalid.
-              fs.rmSync(extractedDir, { recursive: true, force: true });
+            if (!fs.existsSync(emailPdfPath)) {
+              const htmlContent = generateEmailHtml(
+                parsed,
+                fromText,
+                toText,
+                baseName,
+              );
+              const tempHtml = `${emailPdfPath}.tmp.html`;
+              fs.writeFileSync(tempHtml, htmlContent);
+              try {
+                await runWeasyPrint(tempHtml, emailPdfPath);
+              } finally {
+                fs.rmSync(tempHtml, { force: true });
+              }
             }
-          }
-        }
-      };
 
-      if (parsed.attachments && parsed.attachments.length > 0) {
-        await processNestedAttachments(parsed.attachments, baseName);
+            // Process Flattened Attachments
+            const processNestedAttachments = async (
+              attachments: Attachment[],
+              currentBaseName: string,
+            ) => {
+              let attachmentCounter = 1;
+              const padLen = Math.max(2, attachments.length.toString().length);
+
+              for (const att of attachments) {
+                if (!att || !att.content) continue;
+                const ext = path.extname(att.filename || "").toLowerCase();
+                const contentBuf = Buffer.isBuffer(att.content)
+                  ? att.content
+                  : Buffer.from(att.content);
+
+                const attSeqName = `${currentBaseName} Attachment ${String(attachmentCounter).padStart(padLen, "0")}`;
+                attachmentCounter++;
+
+                const allowedExtensions = [
+                  ".zip",
+                  ".pdf",
+                  ".docx",
+                  ".doc",
+                  ".xlsx",
+                  ".xls",
+                  ".csv",
+                ];
+                if (!allowedExtensions.includes(ext)) continue;
+
+                if (ext === ".docx" || ext === ".doc") {
+                  const docxPdfPath = path.join(
+                    deliverablesDir,
+                    `${attSeqName}.pdf`,
+                  );
+                  await processDocxToPdf(
+                    contentBuf,
+                    docxPdfPath,
+                    filterCriteria,
+                    attSeqName,
+                  );
+                } else if (
+                  ext === ".xlsx" ||
+                  ext === ".xls" ||
+                  ext === ".csv"
+                ) {
+                  const excelPdfPath = path.join(
+                    deliverablesDir,
+                    `${attSeqName}.pdf`,
+                  );
+                  await processExcelToPdf(
+                    contentBuf,
+                    excelPdfPath,
+                    filterCriteria,
+                    attSeqName,
+                  );
+                } else if (ext === ".pdf") {
+                  const pdfPath = path.join(
+                    deliverablesDir,
+                    `${attSeqName}${ext}`,
+                  );
+                  await processPdfAttachment(
+                    contentBuf,
+                    pdfPath,
+                    filterCriteria,
+                    attSeqName,
+                  );
+                } else if (ext === ".zip") {
+                  const zipPath = path.join(
+                    deliverablesDir,
+                    `${attSeqName}${ext}`,
+                  );
+                  fs.writeFileSync(zipPath, contentBuf);
+                  const extractedDir = path.join(
+                    deliverablesDir,
+                    `${attSeqName}_unzipped`,
+                  );
+                  const extracted = await extractZipAttachment(
+                    zipPath,
+                    extractedDir,
+                  );
+                  if (!extracted) {
+                    // Keep original zip when extraction tool is unavailable or archive is invalid.
+                    fs.rmSync(extractedDir, { recursive: true, force: true });
+                  }
+                }
+              }
+            };
+
+            if (parsed.attachments && parsed.attachments.length > 0) {
+              await processNestedAttachments(parsed.attachments, baseName);
+            }
+          })(),
+          PER_EMAIL_TIMEOUT_MS,
+          `Email render (${filename})`,
+        );
+      } catch (err) {
+        console.error(
+          `Skipping ${filename}: ${err instanceof Error ? err.message : String(err)}`,
+        );
       }
 
       // Keep the API server responsive while processing large batches.

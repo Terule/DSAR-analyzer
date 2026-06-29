@@ -200,6 +200,8 @@ export default function Dashboard() {
       (f) => f.ai_status === "processing" || f.ai_status === "batch_ready",
     );
 
+    const isGlobalPdfBusy = files.some((f) => f.pdf_status === "processing");
+
     Object.entries(activeCaseSequence).forEach(([caseName, action]) => {
       const caseFiles = groupedCases[caseName];
       if (!caseFiles) return;
@@ -214,7 +216,12 @@ export default function Dashboard() {
           (action === "ai" && f.ai_status === "batch_ready"),
       );
 
-      if (caseIsBusy || (action === "ai" && isGlobalAiBusy)) return;
+      if (
+        caseIsBusy ||
+        (action === "ai" && isGlobalAiBusy) ||
+        (action === "pdf" && isGlobalPdfBusy)
+      )
+        return;
 
       const nextFile = caseFiles.find((f) => {
         if (action === "metadata") return f.status === "pending";

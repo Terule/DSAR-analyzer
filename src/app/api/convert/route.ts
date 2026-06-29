@@ -1,5 +1,6 @@
+import { spawn } from "node:child_process";
+import path from "node:path";
 import { NextResponse } from "next/server";
-import { convertToPdfBatch } from "@/lib/converter";
 import { db } from "@/lib/db";
 
 // Prevent Vercel/Next.js from caching this route statically
@@ -48,22 +49,29 @@ export async function POST(request: Request) {
       );
     }
 
-    // Mark processing immediately so orchestrator and UI stop re-triggering this file.
+    // Enqueue this file. The worker will claim it when it's its turn.
     db.prepare(
-      "UPDATE processed_files SET pdf_status = 'processing', pdf_duration_ms = 0 WHERE id = ?",
+      "UPDATE processed_files SET pdf_status = 'pending', pdf_duration_ms = 0 WHERE id = ?",
     ).run(fileId);
 
-    console.log(`Received request to start PDF conversion for file: ${fileId}`);
+    console.log(`Queued PDF conversion for file: ${fileId}`);
 
-    // Run conversion in background to avoid blocking request/stream handling.
-    setTimeout(() => {
-      convertToPdfBatch(fileId).catch((err) => {
-        console.error(`PDF conversion crashed for file ${fileId}:`, err);
-        db.prepare(
-          "UPDATE processed_files SET pdf_status = 'failed' WHERE id = ?",
-        ).run(fileId);
+    // Only spawn a worker if one isn't already running.
+    // A running worker is identified by any file having pdf_status = 'processing'.
+    const workerAlreadyRunning = db
+      .prepare(
+        "SELECT 1 FROM processed_files WHERE pdf_status = 'processing' LIMIT 1",
+      )
+      .get();
+
+    if (!workerAlreadyRunning) {
+      const workerPath = path.resolve(process.cwd(), "convert-worker.ts");
+      const child = spawn("bun", [workerPath], {
+        detached: true,
+        stdio: "ignore",
       });
-    }, 50);
+      child.unref();
+    }
 
     return NextResponse.json(
       { success: true, message: "PDF conversion job initiated." },

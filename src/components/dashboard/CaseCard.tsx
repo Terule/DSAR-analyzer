@@ -125,7 +125,7 @@ function CaseCardComponent({
     );
 
   let btnConfig = {
-    text: "Launch Audit",
+    text: hasAiConfig ? "Run Pipeline" : "Configure Case Settings",
     action: "launch_audit",
     icon: Play,
     color: "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-900/20",
@@ -168,26 +168,6 @@ function CaseCardComponent({
         "bg-amber-900/30 text-amber-400 border border-amber-500/30 cursor-wait",
       spin: true,
     };
-  } else if (extractDone && !aiDone && !isAiPhase) {
-    if (hasAiConfig) {
-      btnConfig = {
-        text: "Preparing AI Audit...",
-        action: "",
-        icon: Loader2,
-        color:
-          "bg-amber-900/30 text-amber-400 border border-amber-500/30 cursor-wait",
-        spin: true,
-      };
-    } else {
-      btnConfig = {
-        text: "Configuration Missing",
-        action: "",
-        icon: AlertCircle,
-        color:
-          "bg-rose-900/50 text-rose-400 border border-rose-500/30 cursor-not-allowed",
-        spin: false,
-      };
-    }
   } else if (isAiPhase || filesToSync.length > 0) {
     btnConfig = {
       text: "AI Auditing Process...",
