@@ -67,25 +67,17 @@ export async function POST(request: Request) {
     // 🚨 Instantly lock the file status to 'processing'
     // This tells the React Master Orchestrator to stop and wait before firing the next file.
     db.prepare(
-      "UPDATE processed_files SET ai_status = 'processing' WHERE id = ?",
-    ).run(fileId);
-
-    // ⏱ Start Clock for AI Task Generation
-    const startTime = Date.now();
+      "UPDATE processed_files SET ai_status = 'processing', ai_started_at = ?, ai_duration_ms = 0 WHERE id = ?",
+    ).run(Date.now(), fileId);
 
     // Trigger the Batch generation process safely in the background
     setTimeout(() => {
       generateBatchFile(fileId, finalCriteria)
-        .then(() => {
-          const durationMs = Date.now() - startTime;
-          db.prepare(
-            "UPDATE processed_files SET ai_duration_ms = COALESCE(ai_duration_ms, 0) + ? WHERE id = ?",
-          ).run(durationMs, fileId);
-        })
+        .then(() => {})
         .catch((err) => {
           console.error(`Batch generation crashed for file ${fileId}:`, err);
           db.prepare(
-            "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
+            "UPDATE processed_files SET ai_status = 'failed', ai_started_at = NULL WHERE id = ?",
           ).run(fileId);
         });
     }, 50);

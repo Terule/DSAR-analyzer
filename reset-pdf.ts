@@ -10,7 +10,9 @@ const stagingPath =
 console.log("Rebuilding Unified Export folder...");
 
 // 1. Reset Dashboard Button
-db.prepare("UPDATE processed_files SET pdf_status = 'pending'").run();
+db.prepare(
+  "UPDATE processed_files SET pdf_status = 'pending', pdf_duration_ms = 0",
+).run();
 
 const files = db.prepare("SELECT id, filepath FROM processed_files").all() as {
   id: string;
@@ -39,20 +41,29 @@ for (const file of files) {
 // Process each Case as a Unified Batch
 for (const [caseName, fileIds] of Object.entries(cases)) {
   const targetFolder = path.join(extractedPath, caseName);
-  const exportDir = path.join(targetFolder, "export");
-  const deliverablesDir = path.join(targetFolder, "Deliverables");
+  const uniqueEmailsDir = path.join(targetFolder, ".unique-emails");
+  const rawDir = path.join(uniqueEmailsDir, "raw-emails");
+  const selectedDir = path.join(uniqueEmailsDir, "selected");
+  const discardedDir = path.join(uniqueEmailsDir, "discarded");
+  const emailsDir = path.join(targetFolder, "Emails");
+  const logsDir = path.join(targetFolder, ".logs");
 
-  // WIPE EVERYTHING CLEAN to remove ghost files from old runs!
-  if (fs.existsSync(exportDir))
-    fs.rmSync(exportDir, { recursive: true, force: true });
-  if (fs.existsSync(deliverablesDir))
-    fs.rmSync(deliverablesDir, { recursive: true, force: true });
+  // Wipe only folders tied to PDF compilation and AI selection buckets.
+  if (fs.existsSync(selectedDir))
+    fs.rmSync(selectedDir, { recursive: true, force: true });
+  if (fs.existsSync(discardedDir))
+    fs.rmSync(discardedDir, { recursive: true, force: true });
+  if (fs.existsSync(emailsDir))
+    fs.rmSync(emailsDir, { recursive: true, force: true });
+  if (fs.existsSync(logsDir))
+    fs.rmSync(logsDir, { recursive: true, force: true });
 
-  fs.mkdirSync(exportDir, { recursive: true });
+  fs.mkdirSync(selectedDir, { recursive: true });
+  fs.mkdirSync(discardedDir, { recursive: true });
 
-  // Get ALL approved emails for ALL PST files in this specific case combined
+  // Rebuild selection buckets from DB decisions across all PSTs in this case.
   const placeholders = fileIds.map(() => "?").join(",");
-  const approvedEmails = db
+  const selectedEmails = db
     .prepare(`
     SELECT email_hash, sent_date 
     FROM emails 
@@ -60,27 +71,44 @@ for (const [caseName, fileIds] of Object.entries(cases)) {
   `)
     .all(...fileIds) as { email_hash: string; sent_date: string }[];
 
-  // Sort ALL emails chronologically to create a single master timeline
-  approvedEmails.sort((a, b) => a.sent_date.localeCompare(b.sent_date));
-  const padLength = Math.max(4, approvedEmails.length.toString().length);
+  const discardedEmails = db
+    .prepare(`
+    SELECT email_hash, sent_date 
+    FROM emails 
+    WHERE file_id IN (${placeholders}) AND ai_decision = 'discard' AND is_duplicate = 0
+  `)
+    .all(...fileIds) as { email_hash: string; sent_date: string }[];
+
+  selectedEmails.sort((a, b) => a.sent_date.localeCompare(b.sent_date));
+  discardedEmails.sort((a, b) => a.sent_date.localeCompare(b.sent_date));
 
   console.log(
-    `[Case: ${caseName}] Found ${approvedEmails.length} unified approved emails. Copying to export...`,
+    `[Case: ${caseName}] Rebuilding selected (${selectedEmails.length}) and discarded (${discardedEmails.length}) buckets...`,
   );
 
-  for (let i = 0; i < approvedEmails.length; i++) {
-    const item = approvedEmails[i];
-    const newSeqName = `Email ${String(i + 1).padStart(padLength, "0")}`;
+  for (const item of selectedEmails) {
+    const sourceEmlPath = path.join(rawDir, `${item.email_hash}.eml`);
+    const legacySourcePath = path.join(targetFolder, `${item.email_hash}.eml`);
+    const destEmlPath = path.join(selectedDir, `${item.email_hash}.eml`);
 
-    const sourceEmlPath = path.join(targetFolder, `${item.email_hash}.eml`);
-    const destEmlPath = path.join(exportDir, `${newSeqName}.eml`);
-
-    if (fs.existsSync(sourceEmlPath)) {
+    if (fs.existsSync(sourceEmlPath))
       fs.copyFileSync(sourceEmlPath, destEmlPath);
-    }
+    else if (fs.existsSync(legacySourcePath))
+      fs.copyFileSync(legacySourcePath, destEmlPath);
+  }
+
+  for (const item of discardedEmails) {
+    const sourceEmlPath = path.join(rawDir, `${item.email_hash}.eml`);
+    const legacySourcePath = path.join(targetFolder, `${item.email_hash}.eml`);
+    const destEmlPath = path.join(discardedDir, `${item.email_hash}.eml`);
+
+    if (fs.existsSync(sourceEmlPath))
+      fs.copyFileSync(sourceEmlPath, destEmlPath);
+    else if (fs.existsSync(legacySourcePath))
+      fs.copyFileSync(legacySourcePath, destEmlPath);
   }
 }
 
 console.log(
-  "Database and folders reset! You can now click Compile PDFs in the UI.",
+  "PDF state and selection folders rebuilt. You can now click Compile PDFs in the UI.",
 );

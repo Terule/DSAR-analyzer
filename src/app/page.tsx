@@ -19,6 +19,7 @@ export default function Dashboard() {
 
   const [activeTab, setActiveTab] = useState<TabKey>("pst");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [isHydrated, setIsHydrated] = useState(false);
 
   const [activeCaseSequence, setActiveCaseSequence] = useState<
     Record<string, string>
@@ -87,9 +88,14 @@ export default function Dashboard() {
     async (fileId: string, config: AiConfig) => {
       try {
         await api.runAiAudit(fileId, config);
-      } catch (_e) {}
+      } catch (_e) {
+        setNotification({
+          type: "error",
+          message: "Failed to start AI audit. Please retry Launch AI Audit.",
+        });
+      }
     },
-    [],
+    [setNotification],
   );
 
   const handleConvertToPdf = useCallback(async (fileId: string) => {
@@ -155,11 +161,27 @@ export default function Dashboard() {
       try {
         const ok = await api.wipeCase(caseName, fileIds);
         if (!ok) throw new Error("Wipe failed");
+
         setActiveCaseSequence((prev) => {
           const next = { ...prev };
           delete next[caseName];
           return next;
         });
+
+        setPendingAiConfigs((prev) => {
+          const next = { ...prev };
+          delete next[caseName];
+          return next;
+        });
+
+        setOpenMetrics((prev) => {
+          const next = { ...prev };
+          delete next[caseName];
+          return next;
+        });
+
+        setActiveConfigCase((prev) => (prev === caseName ? null : prev));
+
         setNotification({
           type: "success",
           message: "Case reset successfully.",
@@ -223,6 +245,8 @@ export default function Dashboard() {
           setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "analyze" }));
         else if (action === "analyze")
           setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "extract" }));
+        else if (action === "extract")
+          setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "ai" }));
         else if (action === "ai")
           setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "pdf" }));
         else
@@ -253,12 +277,16 @@ export default function Dashboard() {
     (caseName: string, config: AiConfig) => {
       setPendingAiConfigs((prev) => ({ ...prev, [caseName]: config }));
       setActiveConfigCase(null);
-      startSequence(caseName, "ai");
+      startSequence(caseName, "metadata");
     },
     [startSequence],
   );
 
   const isGlobalScanDisabled = loading || isRefreshing || isSequenceLocked;
+
+  useEffect(() => {
+    setIsHydrated(true);
+  }, []);
 
   return (
     <main className="min-h-screen bg-slate-900 text-slate-100 p-4 sm:p-8 font-sans">
@@ -268,7 +296,7 @@ export default function Dashboard() {
         <DashboardHeader
           showScanButton={activeTab === "pst"}
           isRefreshing={isRefreshing}
-          scanDisabled={isGlobalScanDisabled}
+          scanDisabled={isHydrated ? isGlobalScanDisabled : false}
           onScan={handleScanDirectory}
         />
 
@@ -287,6 +315,7 @@ export default function Dashboard() {
                   key={caseName}
                   caseName={caseName}
                   caseFiles={caseFiles}
+                  hasAiConfig={!!pendingAiConfigs[caseName]}
                   isSequenceLocked={isSequenceLocked}
                   isSyncing={!!syncingCases[caseName]}
                   isResetting={!!resettingCases[caseName]}

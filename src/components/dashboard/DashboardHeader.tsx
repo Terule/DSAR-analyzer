@@ -29,7 +29,7 @@ export function DashboardHeader({
         {showScanButton && (
           <button
             type="button"
-            disabled={scanDisabled ? true : undefined}
+            disabled={scanDisabled}
             onClick={onScan}
             className="w-full sm:w-auto inline-flex items-center justify-center gap-2 bg-slate-800 hover:bg-slate-700 text-slate-200 px-5 py-2.5 rounded-xl font-semibold text-sm border border-slate-700 shadow-sm transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
           >

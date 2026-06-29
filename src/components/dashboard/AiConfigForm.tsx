@@ -18,11 +18,13 @@ export function AiConfigForm({
   const [email, setEmail] = useState("");
   const [aliases, setAliases] = useState("");
 
+  const canLaunch = name.trim().length > 0 && email.trim().length > 0;
+
   const handleLaunch = () => {
-    if (!name || !email) return;
+    if (!canLaunch) return;
     onSubmit({
-      name,
-      email,
+      name: name.trim(),
+      email: email.trim(),
       aliases: aliases
         .split(",")
         .map((a) => a.trim())
@@ -41,13 +43,13 @@ export function AiConfigForm({
             htmlFor={`name-${caseName}`}
             className="block text-xs font-bold text-slate-400 uppercase mb-1.5"
           >
-            Full Name
+            Full Name (Required)
           </label>
           <input
             id={`name-${caseName}`}
             value={name}
             onChange={(e) => setName(e.target.value)}
-            placeholder="e.g. Michael Burke"
+            placeholder="e.g. Jhon Doe"
             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:border-indigo-500 outline-none transition-colors"
           />
         </div>
@@ -56,14 +58,14 @@ export function AiConfigForm({
             htmlFor={`email-${caseName}`}
             className="block text-xs font-bold text-slate-400 uppercase mb-1.5"
           >
-            Primary Email
+            Primary Email (Required)
           </label>
           <input
             id={`email-${caseName}`}
             type="email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
-            placeholder="e.g. mburke@company.com"
+            placeholder="e.g. jhon.doe@example.com"
             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:border-indigo-500 outline-none transition-colors"
           />
         </div>
@@ -78,7 +80,7 @@ export function AiConfigForm({
             id={`aliases-${caseName}`}
             value={aliases}
             onChange={(e) => setAliases(e.target.value)}
-            placeholder="e.g. Mike, M. Burke"
+            placeholder="e.g. J. Doe, Johnny Doe"
             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:border-indigo-500 outline-none transition-colors"
           />
         </div>
@@ -93,7 +95,8 @@ export function AiConfigForm({
           <button
             type="button"
             onClick={handleLaunch}
-            className="flex-1 bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-indigo-900/20"
+            disabled={!canLaunch}
+            className="flex-1 bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold py-3 rounded-xl transition-colors shadow-lg shadow-indigo-900/20"
           >
             Launch Audit
           </button>

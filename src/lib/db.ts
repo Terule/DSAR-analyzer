@@ -41,6 +41,7 @@ db.exec(`
     metadata_duration_ms INTEGER DEFAULT 0,
     analyze_duration_ms INTEGER DEFAULT 0,
     extract_duration_ms INTEGER DEFAULT 0,
+    ai_started_at INTEGER,
     ai_duration_ms INTEGER DEFAULT 0,
     pdf_duration_ms INTEGER DEFAULT 0
   );
@@ -87,6 +88,9 @@ try {
   db.exec(
     "ALTER TABLE processed_files ADD COLUMN extract_duration_ms INTEGER DEFAULT 0",
   );
+} catch (_e) {}
+try {
+  db.exec("ALTER TABLE processed_files ADD COLUMN ai_started_at INTEGER");
 } catch (_e) {}
 try {
   db.exec(

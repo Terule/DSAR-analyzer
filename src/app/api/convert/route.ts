@@ -48,15 +48,26 @@ export async function POST(request: Request) {
       );
     }
 
+    // Mark processing immediately so orchestrator and UI stop re-triggering this file.
+    db.prepare(
+      "UPDATE processed_files SET pdf_status = 'processing', pdf_duration_ms = 0 WHERE id = ?",
+    ).run(fileId);
+
     console.log(`Received request to start PDF conversion for file: ${fileId}`);
 
-    // MUST AWAIT THIS: Otherwise Next.js will kill the Puppeteer process silently!
-    await convertToPdfBatch(fileId);
+    // Run conversion in background to avoid blocking request/stream handling.
+    setTimeout(() => {
+      convertToPdfBatch(fileId).catch((err) => {
+        console.error(`PDF conversion crashed for file ${fileId}:`, err);
+        db.prepare(
+          "UPDATE processed_files SET pdf_status = 'failed' WHERE id = ?",
+        ).run(fileId);
+      });
+    }, 50);
 
-    // Return 200 OK indicating the job has finished safely
     return NextResponse.json(
-      { success: true, message: "PDF conversion completed successfully." },
-      { status: 200 },
+      { success: true, message: "PDF conversion job initiated." },
+      { status: 202 },
     );
   } catch (error) {
     console.error("API route /api/convert encountered an error:", error);

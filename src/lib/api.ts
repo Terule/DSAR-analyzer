@@ -30,11 +30,19 @@ export async function runAiAudit(
   fileId: string,
   subjectCriteria: AiConfig,
 ): Promise<void> {
-  await postJson("/api/filter", { fileId, subjectCriteria });
+  const res = await postJson("/api/filter", { fileId, subjectCriteria });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error || "Failed to start AI audit.");
+  }
 }
 
 export async function convertToPdf(fileId: string): Promise<void> {
-  await postJson("/api/convert", { fileId });
+  const res = await postJson("/api/convert", { fileId });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error || "Failed to start PDF conversion.");
+  }
 }
 
 export interface BatchPollResult {

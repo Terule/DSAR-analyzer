@@ -6,13 +6,21 @@ export async function GET(req: Request) {
   const stream = new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
+      let lastSnapshot = "";
 
       // Função que envia o estado do banco para o frontend
       const sendUpdate = () => {
         try {
-          const files = db.prepare("SELECT * FROM processed_files ORDER BY created_at DESC").all();
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(files)}\n\n`));
-        } catch (err) {
+          const files = db
+            .prepare("SELECT * FROM processed_files ORDER BY created_at DESC")
+            .all();
+          const snapshot = JSON.stringify(files);
+
+          if (snapshot === lastSnapshot) return;
+
+          lastSnapshot = snapshot;
+          controller.enqueue(encoder.encode(`data: ${snapshot}\n\n`));
+        } catch (err: unknown) {
           console.error("SSE Streaming error:", err);
         }
       };
@@ -35,7 +43,7 @@ export async function GET(req: Request) {
     headers: {
       "Content-Type": "text/event-stream", // Transforma a rota em um fluxo contínuo
       "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
+      Connection: "keep-alive",
     },
   });
 }

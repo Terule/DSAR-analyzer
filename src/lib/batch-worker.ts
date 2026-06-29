@@ -207,12 +207,9 @@ Return JSON only: {"decision":"keep"|"discard","reason":"brief"}`;
 }
 
 export async function pollBatchStatus(fileId: string) {
-  // ⏱ Start Tracking Download & DB Processing Time
-  const startTime = Date.now();
-
   const row = db
     .prepare(
-      "SELECT filepath, batch_id, subject_name, subject_email, subject_aliases FROM processed_files WHERE id = ?",
+      "SELECT filepath, batch_id, subject_name, subject_email, subject_aliases, ai_started_at FROM processed_files WHERE id = ?",
     )
     .get(fileId) as
     | {
@@ -221,6 +218,7 @@ export async function pollBatchStatus(fileId: string) {
         subject_name?: string;
         subject_email?: string;
         subject_aliases?: string;
+        ai_started_at?: number | null;
       }
     | undefined;
 
@@ -274,8 +272,13 @@ export async function pollBatchStatus(fileId: string) {
         }
       }
       db.prepare(
-        "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
-      ).run(fileId);
+        "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
+      ).run(
+        typeof row.ai_started_at === "number"
+          ? Math.max(0, Date.now() - row.ai_started_at)
+          : 0,
+        fileId,
+      );
       return batch.status;
     }
 
@@ -449,11 +452,9 @@ export async function pollBatchStatus(fileId: string) {
         `[Batch Worker] Chunk complete. ${remaining.c} items remaining. Generating next chunk immediately...`,
       );
 
-      // ⏱ Save Duration for this Chunk before generating next
-      const durationMs = Date.now() - startTime;
       db.prepare(
-        "UPDATE processed_files SET ai_status = 'processing', batch_id = NULL, ai_duration_ms = COALESCE(ai_duration_ms, 0) + ? WHERE id = ?",
-      ).run(durationMs, fileId);
+        "UPDATE processed_files SET ai_status = 'processing', batch_id = NULL WHERE id = ?",
+      ).run(fileId);
 
       // 🔥 FIRE THE NEXT CHUNK INSTANTLY 🔥
       generateBatchFile(fileId, {
@@ -471,19 +472,27 @@ export async function pollBatchStatus(fileId: string) {
           err,
         );
         db.prepare(
-          "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
-        ).run(fileId);
+          "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
+        ).run(
+          typeof row.ai_started_at === "number"
+            ? Math.max(0, Date.now() - row.ai_started_at)
+            : 0,
+          fileId,
+        );
       });
     } else {
       console.log(
         `[Batch Worker] All AI chunks completed successfully for file ${fileId}.`,
       );
 
-      // ⏱ Save Final Duration
-      const durationMs = Date.now() - startTime;
       db.prepare(
-        "UPDATE processed_files SET ai_status = 'completed', batch_id = NULL, ai_duration_ms = COALESCE(ai_duration_ms, 0) + ? WHERE id = ?",
-      ).run(durationMs, fileId);
+        "UPDATE processed_files SET ai_status = 'completed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
+      ).run(
+        typeof row.ai_started_at === "number"
+          ? Math.max(0, Date.now() - row.ai_started_at)
+          : 0,
+        fileId,
+      );
     }
   } else if (
     batch.status === "failed" ||
@@ -494,8 +503,13 @@ export async function pollBatchStatus(fileId: string) {
       `[Batch Worker] OpenAI batch execution failed/cancelled. Status: ${batch.status}`,
     );
     db.prepare(
-      "UPDATE processed_files SET ai_status = 'failed' WHERE id = ?",
-    ).run(fileId);
+      "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
+    ).run(
+      typeof row.ai_started_at === "number"
+        ? Math.max(0, Date.now() - row.ai_started_at)
+        : 0,
+      fileId,
+    );
   }
 
   return batch.status;

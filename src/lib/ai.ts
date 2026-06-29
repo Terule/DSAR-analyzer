@@ -14,8 +14,10 @@ export async function generateBatchFile(
   subjectCriteria: { name: string; email: string; aliases: string[] },
 ) {
   const row = db
-    .prepare("SELECT filepath FROM processed_files WHERE id = ?")
-    .get(fileId) as { filepath: string } | undefined;
+    .prepare("SELECT filepath, ai_started_at FROM processed_files WHERE id = ?")
+    .get(fileId) as
+    | { filepath: string; ai_started_at?: number | null }
+    | undefined;
   if (!row) throw new Error("File not found");
 
   // Save criteria configuration securely to disk
@@ -188,9 +190,13 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
   await new Promise<void>((resolve) => writer.on("finish", () => resolve()));
 
   if (addedCount === 0) {
+    const totalAiMs =
+      typeof row.ai_started_at === "number"
+        ? Math.max(0, Date.now() - row.ai_started_at)
+        : 0;
     db.prepare(
-      "UPDATE processed_files SET ai_status = 'completed' WHERE id = ?",
-    ).run(fileId);
+      "UPDATE processed_files SET ai_status = 'completed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
+    ).run(totalAiMs, fileId);
     if (fs.existsSync(batchFilePath)) fs.unlinkSync(batchFilePath);
     return;
   }

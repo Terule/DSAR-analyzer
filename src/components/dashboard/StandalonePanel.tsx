@@ -116,7 +116,7 @@ export function StandalonePanel() {
                 type="text"
                 value={subjectName}
                 onChange={(e) => setSubjectName(e.target.value)}
-                placeholder="e.g., Rafael Gomes"
+                placeholder="e.g., Jhon Doe"
                 className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-emerald-500 transition-colors"
               />
             </div>
@@ -134,7 +134,7 @@ export function StandalonePanel() {
               type="text"
               value={subjectAliases}
               onChange={(e) => setSubjectAliases(e.target.value)}
-              placeholder="e.g., Rafael G., RGomes"
+              placeholder="e.g., J. Doe, Johnny Doe"
               className="w-full bg-slate-900 border border-slate-700 rounded-lg px-4 py-3 text-sm text-white focus:outline-none focus:border-emerald-500 transition-colors"
             />
           </div>

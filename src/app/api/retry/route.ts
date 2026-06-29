@@ -44,7 +44,7 @@ export async function POST(request: Request) {
     // 2. Reset AI Batch processing failures
     else if (row.ai_status === "failed") {
       db.prepare(
-        "UPDATE processed_files SET ai_status = 'pending' WHERE id = ?",
+        "UPDATE processed_files SET ai_status = 'pending', ai_started_at = NULL WHERE id = ?",
       ).run(fileId);
     }
     // 3. Reset standard pipeline failures (metadata, analyze, extract)

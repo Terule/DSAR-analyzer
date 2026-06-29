@@ -41,6 +41,10 @@ export async function POST(request: Request) {
       SET status = 'pending', 
           ai_status = 'pending', 
           pdf_status = 'pending',
+          file_size_bytes = 0,
+          subject_name = NULL,
+          subject_email = NULL,
+          subject_aliases = NULL,
           total_emails = 0,
           total_attachments = 0,
           unique_emails = 0,
@@ -48,6 +52,12 @@ export async function POST(request: Request) {
           estimated_tokens = 0,
           ai_approved_count = 0,
           ai_discarded_count = 0,
+          metadata_duration_ms = 0,
+          analyze_duration_ms = 0,
+          extract_duration_ms = 0,
+          ai_duration_ms = 0,
+          pdf_duration_ms = 0,
+          ai_started_at = NULL,
           batch_id = NULL
       WHERE id IN (${placeholders})
     `).run(...fileIds);

@@ -7,10 +7,9 @@ import {
   Mail,
   Play,
   RefreshCw,
-  Settings,
   Trash2,
 } from "lucide-react";
-import { useMemo } from "react";
+import { memo, useMemo } from "react";
 import type { AiConfig, CaseStats, StagedFile } from "@/lib/types";
 import { AiConfigForm } from "./AiConfigForm";
 import { CaseMetrics } from "./CaseMetrics";
@@ -19,6 +18,7 @@ import { PhaseIndicators } from "./PhaseIndicators";
 interface CaseCardProps {
   caseName: string;
   caseFiles: StagedFile[];
+  hasAiConfig: boolean;
   isSequenceLocked: boolean;
   isSyncing: boolean;
   isResetting: boolean;
@@ -67,9 +67,10 @@ function computeStats(caseFiles: StagedFile[]): CaseStats {
   );
 }
 
-export function CaseCard({
+function CaseCardComponent({
   caseName,
   caseFiles,
+  hasAiConfig,
   isSequenceLocked,
   isSyncing,
   isResetting,
@@ -124,8 +125,8 @@ export function CaseCard({
     );
 
   let btnConfig = {
-    text: "Start Parsing Sequence",
-    action: "metadata",
+    text: "Launch Audit",
+    action: "launch_audit",
     icon: Play,
     color: "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-900/20",
     spin: false,
@@ -168,14 +169,25 @@ export function CaseCard({
       spin: true,
     };
   } else if (extractDone && !aiDone && !isAiPhase) {
-    btnConfig = {
-      text: "Configure Target Subject",
-      action: "configure_ai",
-      icon: Settings,
-      color:
-        "bg-purple-600 hover:bg-purple-500 text-white shadow-purple-900/20",
-      spin: false,
-    };
+    if (hasAiConfig) {
+      btnConfig = {
+        text: "Preparing AI Audit...",
+        action: "",
+        icon: Loader2,
+        color:
+          "bg-amber-900/30 text-amber-400 border border-amber-500/30 cursor-wait",
+        spin: true,
+      };
+    } else {
+      btnConfig = {
+        text: "Configuration Missing",
+        action: "",
+        icon: AlertCircle,
+        color:
+          "bg-rose-900/50 text-rose-400 border border-rose-500/30 cursor-not-allowed",
+        spin: false,
+      };
+    }
   } else if (isAiPhase || filesToSync.length > 0) {
     btnConfig = {
       text: "AI Auditing Process...",
@@ -208,8 +220,9 @@ export function CaseCard({
   const ActionIcon = btnConfig.icon;
 
   const handleMainAction = () => {
-    if (btnConfig.action === "configure_ai") {
-      if (isConfigOpen) onCloseConfig();
+    if (btnConfig.action === "launch_audit") {
+      if (hasAiConfig) onStartSequence("metadata");
+      else if (isConfigOpen) onCloseConfig();
       else onOpenConfig();
     } else if (btnConfig.action) {
       onStartSequence(btnConfig.action);
@@ -305,3 +318,16 @@ export function CaseCard({
     </div>
   );
 }
+
+export const CaseCard = memo(CaseCardComponent, (prev, next) => {
+  return (
+    prev.caseName === next.caseName &&
+    prev.caseFiles === next.caseFiles &&
+    prev.hasAiConfig === next.hasAiConfig &&
+    prev.isSequenceLocked === next.isSequenceLocked &&
+    prev.isSyncing === next.isSyncing &&
+    prev.isResetting === next.isResetting &&
+    prev.isMetricsOpen === next.isMetricsOpen &&
+    prev.isConfigOpen === next.isConfigOpen
+  );
+});
