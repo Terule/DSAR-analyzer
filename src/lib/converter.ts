@@ -162,6 +162,10 @@ function sanitizeFontsForPdf(html: string): string {
   return sanitized;
 }
 
+export function normalizeHtmlForPdf(html: string): string {
+  return sanitizeFontsForPdf(html);
+}
+
 // 🔥 Pure WeasyPrint CLI Exec Wrapper (Zero Puppeteer)
 const MAX_CONCURRENT_SUBPROCESSES = 2;
 let activeSubprocesses = 0;

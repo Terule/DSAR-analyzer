@@ -3,9 +3,11 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { simpleParser } from "mailparser";
 import { NextResponse } from "next/server";
 import {
   extractPdfText,
+  normalizeHtmlForPdf,
   processDocxToPdf,
   processExcelToPdf,
 } from "@/lib/converter";
@@ -25,6 +27,32 @@ function getAllFiles(dirPath: string, arrayOfFiles: string[] = []) {
   });
 
   return arrayOfFiles;
+}
+
+function escapeHtml(text: string): string {
+  return text
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function buildEmailHtml(rawBody: string, sourceName: string): string {
+  const safeBody = escapeHtml(rawBody || "(No body content)");
+  return normalizeHtmlForPdf(`
+    <!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="utf-8" />
+        <title>${escapeHtml(sourceName)}</title>
+      </head>
+      <body>
+        <h2 style="margin: 0 0 12px;">${escapeHtml(sourceName)}</h2>
+        <pre style="white-space: pre-wrap; word-break: break-word; margin: 0;">${safeBody}</pre>
+      </body>
+    </html>
+  `);
 }
 
 // Native WeasyPrint renderer to replace Puppeteer
@@ -264,7 +292,7 @@ export async function POST(request: Request) {
         // simultaneously, and strip out null bytes to ensure pure text matching!
         const rawUtf8 = buffer.toString("utf-8").toLowerCase();
         const rawUtf16 = buffer.toString("utf16le").toLowerCase();
-        const rawText = (`${rawUtf8} ${rawUtf16}`).replace(/\0/g, "");
+        const rawText = `${rawUtf8} ${rawUtf16}`.replace(/\0/g, "");
 
         if (exclusionsRegex.test(rawText)) {
           console.log(
@@ -275,9 +303,37 @@ export async function POST(request: Request) {
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Data subject not mentioned.`,
           );
         } else {
-          const outputFilePath = path.join(targetDir, `${seqName}${ext}`);
-          fs.copyFileSync(filePath, outputFilePath);
-          success = true;
+          const pdfOutput = path.join(targetDir, `${seqName}.pdf`);
+
+          if (ext === ".eml") {
+            try {
+              const parsed = await simpleParser(buffer);
+              const emailBody =
+                parsed.html || parsed.textAsHtml || parsed.text || rawText;
+              await renderHtmlToPdfWeasyPrint(
+                normalizeHtmlForPdf(String(emailBody)),
+                pdfOutput,
+                seqName,
+              );
+              success = true;
+            } catch (_e) {
+              // Fallback for malformed EML payloads.
+              await renderHtmlToPdfWeasyPrint(
+                buildEmailHtml(rawText, file),
+                pdfOutput,
+                seqName,
+              );
+              success = true;
+            }
+          } else {
+            // MSG parsing is inconsistent across archives, so render extracted text safely.
+            await renderHtmlToPdfWeasyPrint(
+              buildEmailHtml(rawText, file),
+              pdfOutput,
+              seqName,
+            );
+            success = true;
+          }
         }
       }
 
@@ -334,9 +390,7 @@ export async function POST(request: Request) {
         processedCount++;
         if (isMessage) messageCounter++;
         else documentCounter++;
-        console.log(
-          `[Standalone Engine] Exported: ${seqName}${ext === ".msg" || ext === ".eml" ? ext : ".pdf"}`,
-        );
+        console.log(`[Standalone Engine] Exported: ${seqName}.pdf`);
       } else {
         skippedCount++;
       }
