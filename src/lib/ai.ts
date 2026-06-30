@@ -1,13 +1,55 @@
 import fs from "node:fs";
 import path from "node:path";
+import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
 import { db } from "./db";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const MODEL_NAME = "gpt-4o-mini";
+const TOKENIZER = encodingForModel(MODEL_NAME);
 
 // Enforce max enqueued rate headroom
 const MAX_TOKENS_PER_BATCH = 900_000;
 const MAX_COMPLETION_TOKENS_PER_REQUEST = 150;
+const CHAT_MESSAGE_OVERHEAD_TOKENS = 12;
+const REQUEST_OVERHEAD_TOKENS = 24;
+const DISCARD_SUBJECT_RE =
+  /(?<![A-Za-z0-9])(Confidential|Confidentiality|Privileged|CROs?)(?![A-Za-z0-9])/i;
+const RESPONSE_FORMAT = {
+  type: "json_schema",
+  json_schema: {
+    name: "dsar_audit_decision",
+    strict: true,
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["decision", "reason", "needs_second_pass"],
+      properties: {
+        decision: { type: "string", enum: ["keep", "discard"] },
+        reason: { type: "string", maxLength: 240 },
+        needs_second_pass: { type: "boolean" },
+      },
+    },
+  },
+} as const;
+
+function countTokens(text: string): number {
+  return TOKENIZER.encode(text).length;
+}
+
+function estimateRequestTokens(
+  systemPrompt: string,
+  userContent: string,
+): number {
+  return (
+    countTokens(systemPrompt) +
+    countTokens(userContent) +
+    countTokens(JSON.stringify(RESPONSE_FORMAT)) +
+    CHAT_MESSAGE_OVERHEAD_TOKENS +
+    REQUEST_OVERHEAD_TOKENS +
+    MAX_COMPLETION_TOKENS_PER_REQUEST
+  );
+}
 
 export async function generateBatchFile(
   fileId: string,
@@ -115,12 +157,7 @@ Important: token boundary match only. Do NOT treat substrings like "MICROSOFT" a
   4. [DEFAULT]
   If no strong signal is present -> discard.
 
-OUTPUT FORMAT: You must return ONLY a raw JSON object. Do not wrap the output in markdown code blocks (\`\`\`json). Do not add conversational text.
-Format exactly like this: {"decision": "keep" | "discard", "reason": "Brief justification.", "needs_second_pass": true | false}
-
 Set needs_second_pass = true only when decision is "discard" and attachments may still contain relevant evidence (especially attached emails/documents).`;
-
-  const systemPromptTokens = Math.ceil(systemPrompt.length / 4);
   const batchFilePath = path.join(
     batchDir,
     `batch_${fileId}_${Date.now()}.jsonl`,
@@ -136,11 +173,22 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
     if (!unprocessedHashes.has(hash)) continue;
 
     const filePath = path.join(jsonFolder, file);
-    const content = JSON.parse(fs.readFileSync(filePath, "utf-8")); // Now reads { text: "..." }
+    const content = JSON.parse(fs.readFileSync(filePath, "utf-8"));
 
-    const userPromptTokens = Math.ceil(JSON.stringify(content).length / 4);
-    const estimatedTokens =
-      systemPromptTokens + userPromptTokens + MAX_COMPLETION_TOKENS_PER_REQUEST;
+    // Pre-filter: Rule 1 — subject-based immediate discard (no AI needed)
+    const subject: string = content?.first_email?.subject ?? "";
+    if (DISCARD_SUBJECT_RE.test(subject)) {
+      db.prepare(
+        "UPDATE emails SET ai_decision = 'discard', ai_reason = 'Pre-filter: Subject contains privileged/confidential keyword' WHERE email_hash = ? AND file_id = ?",
+      ).run(hash, fileId);
+      db.prepare(
+        "UPDATE processed_files SET ai_discarded_count = ai_discarded_count + 1 WHERE id = ?",
+      ).run(fileId);
+      continue;
+    }
+
+    const userContent = JSON.stringify(content);
+    const estimatedTokens = estimateRequestTokens(systemPrompt, userContent);
 
     if (estimatedTokens > MAX_TOKENS_PER_BATCH) {
       console.log(
@@ -171,13 +219,14 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
       method: "POST",
       url: "/v1/chat/completions",
       body: {
-        model: "gpt-4o-mini",
+        model: MODEL_NAME,
         messages: [
           { role: "system", content: systemPrompt },
-          { role: "user", content: JSON.stringify(content) },
+          { role: "user", content: userContent },
         ],
-        temperature: 0.0,
+        temperature: 0,
         max_completion_tokens: 150,
+        response_format: RESPONSE_FORMAT,
       },
     };
 

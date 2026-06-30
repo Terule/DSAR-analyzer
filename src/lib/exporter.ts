@@ -55,6 +55,30 @@ function extractHeaderValue(block: string, header: string): string {
   return (match?.[1] || "").trim();
 }
 
+const THREAD_BOUNDARY_RE =
+  /(?:\r?\n)(?=From:\s|On .*wrote:|_{10,}|-----Original Message-----|\s*>)/i;
+
+function extractVisibleBody(block: string): string {
+  const markers = [
+    /\r?\nOn .*wrote:/i,
+    /\r?\nFrom:\s/i,
+    /\r?\n_{10,}/i,
+    /\r?\n-----Original Message-----/i,
+    /\r?\n\s*>/,
+  ];
+
+  let cutIndex = block.length;
+
+  for (const marker of markers) {
+    const matchIndex = block.search(marker);
+    if (matchIndex !== -1) {
+      cutIndex = Math.min(cutIndex, matchIndex);
+    }
+  }
+
+  return block.slice(0, cutIndex).trim();
+}
+
 function stripQuotedHeaders(block: string): string {
   return block
     .replace(/^(from|to|cc|bcc|subject|date|sent):.*$/gim, "")
@@ -64,7 +88,7 @@ function stripQuotedHeaders(block: string): string {
 
 function splitThread(rawBody: string) {
   const blocks = rawBody
-    .split(/(?:\r?\n)(?=From:\s|_{10,}|-----Original Message-----)/i)
+    .split(THREAD_BOUNDARY_RE)
     .map((b) => b.trim())
     .filter(Boolean);
 
@@ -192,9 +216,7 @@ export async function extractUniqueEmails(
           parsed.html || "",
         );
 
-        const threadBlocks = fallbackText.split(
-          /(?:\r?\n)(?=From:\s|_{10,}|-----Original Message-----)/i,
-        );
+        const threadBlocks = fallbackText.split(THREAD_BOUNDARY_RE);
         let aiBodyText = fallbackText;
         if (threadBlocks.length > 2) {
           aiBodyText = threadBlocks.slice(0, 2).join("\n");
@@ -210,7 +232,10 @@ export async function extractUniqueEmails(
           from: fromFormatted,
           to: toFormatted,
           subject,
-          body: stripQuotedHeaders(firstBlock).substring(0, 12000),
+          body: extractVisibleBody(stripQuotedHeaders(firstBlock)).substring(
+            0,
+            12000,
+          ),
         };
 
         const secondEmail = secondBlock
@@ -219,7 +244,9 @@ export async function extractUniqueEmails(
               to: extractHeaderValue(secondBlock, "To") || "Unknown",
               subject:
                 extractHeaderValue(secondBlock, "Subject") || "(No Subject)",
-              body: stripQuotedHeaders(secondBlock).substring(0, 6000),
+              body: extractVisibleBody(
+                stripQuotedHeaders(secondBlock),
+              ).substring(0, 6000),
             }
           : null;
 

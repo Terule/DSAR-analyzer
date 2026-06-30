@@ -208,6 +208,33 @@ export async function analyzePstDuplicates(
       return; // Skip attachment parsing for duplicates
     }
 
+    // Pre-filter: Rule 1 — discard privileged/confidential subjects immediately after dedup
+    const DISCARD_SUBJECT_RE =
+      /(?<![A-Za-z0-9])(Confidential|Confidentiality|Privileged|CROs?)(?![A-Za-z0-9])/i;
+    if (DISCARD_SUBJECT_RE.test(subject)) {
+      const emailId = crypto.randomUUID();
+      const sentDate = parsed.date ? parsed.date.toISOString() : "no-date";
+      insertStmt.run(
+        emailId,
+        fileId,
+        messageId,
+        sentDate,
+        emailHash,
+        0,
+        parentHash,
+        parentHash ? 1 : 0,
+      );
+      db.prepare(
+        "UPDATE emails SET ai_decision = 'discard', ai_reason = 'Pre-filter: Subject contains privileged/confidential keyword' WHERE id = ?",
+      ).run(emailId);
+      db.prepare(
+        "UPDATE processed_files SET ai_discarded_count = ai_discarded_count + 1 WHERE id = ?",
+      ).run(fileId);
+      metrics.uniqueCount++;
+      fs.unlinkSync(filePath);
+      return;
+    }
+
     metrics.uniqueCount++;
     const emailId = crypto.randomUUID();
     const sentDate = parsed.date ? parsed.date.toISOString() : "no-date";

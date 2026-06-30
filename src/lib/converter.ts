@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import {
   type AddressObject,
   type Attachment,
@@ -11,6 +12,23 @@ import {
 import mammoth from "mammoth";
 import * as xlsx from "xlsx";
 import { db } from "./db";
+
+const FONT_FOLDER =
+  process.env.PDF_FONT_DIR || path.join(process.cwd(), "fonts");
+
+function toFontUrl(fileName: string): string {
+  return pathToFileURL(path.join(FONT_FOLDER, fileName)).toString();
+}
+
+function hasAptosCoreSet(): boolean {
+  const required = [
+    "Aptos.ttf",
+    "Aptos-Bold.ttf",
+    "Aptos-Italic.ttf",
+    "Aptos-Bold-Italic.ttf",
+  ];
+  return required.every((name) => fs.existsSync(path.join(FONT_FOLDER, name)));
+}
 
 function getAddressText(
   addr: AddressObject | AddressObject[] | undefined,
@@ -26,11 +44,36 @@ function getAddressText(
 function sanitizeFontsForPdf(html: string): string {
   let sanitized = html;
 
+  // Normalize PST/Outlook-heavy markup before font/layout sanitization.
+  sanitized = sanitized
+    // Remove VML/Office blocks that frequently create large invisible spacers.
+    .replace(/<v:[^>]*>[\s\S]*?<\/v:[^>]*>/gi, "")
+    .replace(/<o:[^>]*>[\s\S]*?<\/o:[^>]*>/gi, "")
+    .replace(/<w:[^>]*>[\s\S]*?<\/w:[^>]*>/gi, "")
+    .replace(/<xml[^>]*>[\s\S]*?<\/xml>/gi, "")
+    // Strip legacy font tags/attributes that can trigger bad font metadata embedding.
+    .replace(/<\/?font\b[^>]*>/gi, "")
+    .replace(/\sface\s*=\s*(["']).*?\1/gi, "")
+    // Remove top-level spacer rows/cells often exported by Outlook HTML.
+    .replace(
+      /<tr[^>]*>\s*<t[dh][^>]*(?:height|style="[^"]*(?:height|min-height|padding-top|margin-top)[^"]*")[^>]*>\s*(?:&nbsp;|<br\s*\/?>|\s)*<\/t[dh]>\s*<\/tr>/gi,
+      "",
+    )
+    .replace(/<img[^>]*(?:spacer|pixel|transparent|blank)[^>]*>/gi, "");
+
+  // Remove Outlook/MSO conditional blocks and generic HTML comments.
+  sanitized = sanitized
+    .replace(/<!--\[if [\s\S]*?\]>[\s\S]*?<!\[endif\]-->/gi, "")
+    .replace(/<!--[\s\S]*?-->/g, "");
+
   // Remove embedded font definitions that can produce invalid font metadata.
   sanitized = sanitized.replace(/@font-face\s*\{[\s\S]*?\}/gi, "");
 
   // Remove explicit font-family declarations from inline style attributes.
   sanitized = sanitized.replace(/font-family\s*:[^;"']*;?/gi, "");
+
+  // Remove Outlook mso-* directives known to affect pagination and spacing.
+  sanitized = sanitized.replace(/mso-[a-z-]+\s*:[^;"']*;?/gi, "");
 
   // Strip forced page breaks that can leave a near-empty first page.
   sanitized = sanitized.replace(
@@ -45,13 +88,56 @@ function sanitizeFontsForPdf(html: string): string {
   // Collapse runs of empty paragraphs / line breaks that push content down.
   sanitized = sanitized.replace(/(?:\s*<br\s*\/?>\s*){3,}/gi, "<br><br>");
   sanitized = sanitized.replace(/<p[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/p>/gi, "");
+  sanitized = sanitized.replace(
+    /<div[^>]*style="[^"]*margin[^"]*"[^>]*><\/div>/gi,
+    "",
+  );
+  sanitized = sanitized.replace(
+    /^(?:\s|&nbsp;|<br\s*\/?>|<p[^>]*>(?:\s|&nbsp;|<br\s*\/?>)*<\/p>){2,}/i,
+    "",
+  );
+
+  const aptosEnabled = hasAptosCoreSet();
+  const fontFaceCss = aptosEnabled
+    ? `
+      @font-face {
+        font-family: "AptosCustom";
+        src: url("${toFontUrl("Aptos.ttf")}") format("truetype");
+        font-weight: 400;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: "AptosCustom";
+        src: url("${toFontUrl("Aptos-Bold.ttf")}") format("truetype");
+        font-weight: 700;
+        font-style: normal;
+      }
+      @font-face {
+        font-family: "AptosCustom";
+        src: url("${toFontUrl("Aptos-Italic.ttf")}") format("truetype");
+        font-weight: 400;
+        font-style: italic;
+      }
+      @font-face {
+        font-family: "AptosCustom";
+        src: url("${toFontUrl("Aptos-Bold-Italic.ttf")}") format("truetype");
+        font-weight: 700;
+        font-style: italic;
+      }
+    `
+    : "";
+
+  const baseFontStack = aptosEnabled
+    ? '"AptosCustom", "Helvetica Neue", Helvetica, Arial, sans-serif'
+    : '"Helvetica Neue", Helvetica, Arial, sans-serif';
 
   // Force a stable font stack and neutralize layout-inflating styles.
   const fontOverride = `
     <style>
+      ${fontFaceCss}
       @page { size: A4; margin: 18mm; }
       html, body, * {
-        font-family: "Helvetica Neue", Helvetica, Arial, sans-serif !important;
+        font-family: ${baseFontStack} !important;
         min-height: 0 !important;
         page-break-before: auto !important;
         page-break-after: auto !important;
