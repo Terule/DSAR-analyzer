@@ -67,6 +67,34 @@ function computeStats(caseFiles: StagedFile[]): CaseStats {
   );
 }
 
+function computePipelineProgress(caseFiles: StagedFile[]): number {
+  if (caseFiles.length === 0) return 0;
+
+  const total = caseFiles.length;
+
+  const parseDone =
+    caseFiles.filter((f) =>
+      ["analyzed", "extracting", "completed", "failed"].includes(f.status),
+    ).length / total;
+
+  const extractDone =
+    caseFiles.filter((f) => ["completed", "failed"].includes(f.status)).length /
+    total;
+
+  const aiDone =
+    caseFiles.filter((f) => ["completed", "failed"].includes(f.ai_status || ""))
+      .length / total;
+
+  const renderDone =
+    caseFiles.filter((f) =>
+      ["completed", "failed"].includes(f.pdf_status || ""),
+    ).length / total;
+
+  return Math.round(
+    ((parseDone + extractDone + aiDone + renderDone) / 4) * 100,
+  );
+}
+
 function CaseCardComponent({
   caseName,
   caseFiles,
@@ -85,6 +113,50 @@ function CaseCardComponent({
   onSubmitAiConfig,
 }: CaseCardProps) {
   const stats = useMemo(() => computeStats(caseFiles), [caseFiles]);
+  const progressPct = useMemo(
+    () => computePipelineProgress(caseFiles),
+    [caseFiles],
+  );
+  const phaseProgress = useMemo(() => {
+    if (caseFiles.length === 0) {
+      return { parse: 0, extract: 0, ai: 0, render: 0 };
+    }
+
+    const total = caseFiles.length;
+
+    const parse = Math.round(
+      (caseFiles.filter((f) =>
+        ["analyzed", "extracting", "completed", "failed"].includes(f.status),
+      ).length /
+        total) *
+        100,
+    );
+
+    const extract = Math.round(
+      (caseFiles.filter((f) => ["completed", "failed"].includes(f.status))
+        .length /
+        total) *
+        100,
+    );
+
+    const ai = Math.round(
+      (caseFiles.filter((f) =>
+        ["completed", "failed"].includes(f.ai_status || ""),
+      ).length /
+        total) *
+        100,
+    );
+
+    const render = Math.round(
+      (caseFiles.filter((f) =>
+        ["completed", "failed"].includes(f.pdf_status || ""),
+      ).length /
+        total) *
+        100,
+    );
+
+    return { parse, extract, ai, render };
+  }, [caseFiles]);
 
   const filesToSync = caseFiles
     .filter((f) => f.ai_status === "batch_ready")
@@ -210,7 +282,7 @@ function CaseCardComponent({
   };
 
   return (
-    <div className="relative bg-slate-800 rounded-4xl shadow-xl border border-slate-700 p-8 flex flex-col items-center">
+    <div className="relative overflow-hidden bg-slate-800 rounded-4xl shadow-xl border border-slate-700 p-8 flex flex-col items-center">
       {/* Top Right Mini Tools */}
       <div className="absolute top-6 right-6 flex items-center gap-2">
         {filesToSync.length > 0 && (
@@ -279,13 +351,26 @@ function CaseCardComponent({
 
       {/* 4-Step Technical Phase Indicators */}
       <PhaseIndicators
-        parse={{ isProcessing: isParsePhase, isDone: parseDone }}
-        extract={{ isProcessing: isExtractPhase, isDone: extractDone }}
+        parse={{
+          isProcessing: isParsePhase,
+          isDone: parseDone,
+          progressPct: phaseProgress.parse,
+        }}
+        extract={{
+          isProcessing: isExtractPhase,
+          isDone: extractDone,
+          progressPct: phaseProgress.extract,
+        }}
         ai={{
           isProcessing: isAiPhase || filesToSync.length > 0,
           isDone: aiDone,
+          progressPct: phaseProgress.ai,
         }}
-        render={{ isProcessing: isPdfPhase, isDone: pdfDone }}
+        render={{
+          isProcessing: isPdfPhase,
+          isDone: pdfDone,
+          progressPct: phaseProgress.render,
+        }}
       />
 
       {/* Metrics Accordion */}
@@ -295,6 +380,14 @@ function CaseCardComponent({
         isOpen={isMetricsOpen}
         onToggle={onToggleMetrics}
       />
+
+      {/* Integrated progress border */}
+      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1 bg-slate-700/70">
+        <div
+          className="h-full rounded-br-4xl rounded-bl-4xl bg-linear-to-r from-cyan-400 via-teal-400 to-emerald-400 transition-all duration-500"
+          style={{ width: `${progressPct}%` }}
+        />
+      </div>
     </div>
   );
 }

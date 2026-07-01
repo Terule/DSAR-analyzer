@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import OpenAI from "openai";
@@ -203,6 +204,29 @@ Return JSON only: {"decision":"keep"|"discard","reason":"brief"}`;
     };
   } catch (_err) {
     return { decision: "discard", reason: "Invalid second-pass AI output." };
+  }
+}
+
+function queuePdfWorker(fileId: string): void {
+  // Queue render immediately after AI completion so the pipeline continues even
+  // when the UI is not actively orchestrating the case.
+  db.prepare(
+    "UPDATE processed_files SET pdf_status = 'pending', pdf_duration_ms = 0 WHERE id = ?",
+  ).run(fileId);
+
+  const workerAlreadyRunning = db
+    .prepare(
+      "SELECT 1 FROM processed_files WHERE pdf_status = 'processing' LIMIT 1",
+    )
+    .get();
+
+  if (!workerAlreadyRunning) {
+    const workerPath = path.resolve(process.cwd(), "convert-worker.ts");
+    const child = spawn("bun", [workerPath], {
+      detached: true,
+      stdio: "ignore",
+    });
+    child.unref();
   }
 }
 
@@ -493,6 +517,8 @@ export async function pollBatchStatus(fileId: string) {
           : 0,
         fileId,
       );
+
+      queuePdfWorker(fileId);
     }
   } else if (
     batch.status === "failed" ||

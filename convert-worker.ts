@@ -8,6 +8,19 @@
 import { convertToPdfBatch } from "./src/lib/converter";
 import { db } from "./src/lib/db";
 
+let shouldStop = false;
+
+function requestShutdown(signal: string) {
+  if (shouldStop) return;
+  shouldStop = true;
+  console.log(
+    `[convert-worker] Received ${signal}. Will stop after current job completes.`,
+  );
+}
+
+process.on("SIGINT", () => requestShutdown("SIGINT"));
+process.on("SIGTERM", () => requestShutdown("SIGTERM"));
+
 function pickNext():
   | { id: string; ai_status: string; pdf_status: string }
   | undefined {
@@ -23,7 +36,7 @@ function pickNext():
 async function run() {
   let file = pickNext();
 
-  while (file) {
+  while (file && !shouldStop) {
     const { id } = file;
 
     // Atomically claim this file so no other worker picks it up.
@@ -55,10 +68,15 @@ async function run() {
       ).run(id);
     }
 
+    if (shouldStop) break;
     file = pickNext();
   }
 
-  console.log("[convert-worker] No more pending files. Exiting.");
+  if (shouldStop) {
+    console.log("[convert-worker] Shutdown complete. Exiting.");
+  } else {
+    console.log("[convert-worker] No more pending files. Exiting.");
+  }
 }
 
 run()

@@ -55,6 +55,76 @@ function buildEmailHtml(rawBody: string, sourceName: string): string {
   `);
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildSubjectNameTokens(
+  subjectName: string,
+  aliases: string[] = [],
+): string[] {
+  const cleanedName = subjectName.trim().replace(/\s+/g, " ");
+  const parts = cleanedName.split(" ").filter(Boolean);
+
+  const tokens = new Set<string>();
+  if (cleanedName) tokens.add(cleanedName.toLowerCase());
+
+  if (parts.length > 0) {
+    tokens.add(parts[0].toLowerCase()); // first name
+    tokens.add(parts[parts.length - 1].toLowerCase()); // surname
+    const initials = parts.map((p) => p[0]).join("");
+    if (initials.length > 0) tokens.add(initials.toLowerCase());
+  }
+
+  for (const alias of aliases) {
+    const cleanAlias = alias.trim().replace(/\s+/g, " ").toLowerCase();
+    if (cleanAlias) tokens.add(cleanAlias);
+  }
+
+  return Array.from(tokens).filter(Boolean);
+}
+
+function textContainsAnyToken(text: string, tokens: string[]): boolean {
+  return tokens.some((token) => {
+    const pattern = new RegExp(
+      `(^|[^a-z0-9])${escapeRegExp(token)}($|[^a-z0-9])`,
+      "i",
+    );
+    return pattern.test(text);
+  });
+}
+
+function isAuthoredBySubject(
+  plainText: string,
+  subjectTokens: string[],
+): boolean {
+  return subjectTokens.some((token) => {
+    const t = escapeRegExp(token);
+    const authoredPatterns = [
+      new RegExp(`\\b(from|sender|author|by)\\s*[:\\-]?\\s*${t}\\b`, "i"),
+      new RegExp(`\\b${t}\\b\\s*(said|posted|sent|wrote)\\b`, "i"),
+      new RegExp(`\\bmessage from\\s+${t}\\b`, "i"),
+    ];
+    return authoredPatterns.some((re) => re.test(plainText));
+  });
+}
+
+function isDirectReplyToSubject(
+  plainText: string,
+  subjectTokens: string[],
+): boolean {
+  return subjectTokens.some((token) => {
+    const t = escapeRegExp(token);
+    const replyPatterns = [
+      new RegExp(`\\brepl(?:y|ied|ying)\\s+to\\s+${t}\\b`, "i"),
+      new RegExp(`\\bin\\s+reply\\s+to\\s+${t}\\b`, "i"),
+      new RegExp(`\\brespond(?:ed|ing)?\\s+to\\s+${t}\\b`, "i"),
+      new RegExp(`\\bto\\s+${t}\\b.*\\brepl(?:y|ied|ying)\\b`, "i"),
+    ];
+    return replyPatterns.some((re) => re.test(plainText));
+  });
+}
+
 // Native WeasyPrint renderer to replace Puppeteer
 async function renderHtmlToPdfWeasyPrint(
   htmlContent: string,
@@ -128,6 +198,10 @@ export async function POST(request: Request) {
     const criteria = [subjectCriteria.name, ...aliases]
       .map((c) => c.trim().toLowerCase())
       .filter(Boolean);
+    const subjectNameTokens = buildSubjectNameTokens(
+      subjectCriteria.name,
+      aliases,
+    );
 
     const exclusions = ["confidential", "privileged", "cro", "cros"];
 
@@ -259,19 +333,36 @@ export async function POST(request: Request) {
       // --- HANDLER 3: Teams Chats (HTML) ---
       else if (ext === ".html" || ext === ".htm") {
         const rawHtml = buffer.toString("utf-8");
-        const rawText = rawHtml.replace(/<[^>]*>?/gm, " ").toLowerCase();
+        const plainText = rawHtml.replace(/<[^>]*>?/gm, " ").toLowerCase();
+        const containsSubjectName = textContainsAnyToken(
+          plainText,
+          subjectNameTokens,
+        );
+        const replyToSubject = isDirectReplyToSubject(
+          plainText,
+          subjectNameTokens,
+        );
+        const fromSubject = isAuthoredBySubject(plainText, subjectNameTokens);
 
-        if (exclusionsRegex.test(rawText)) {
+        if (exclusionsRegex.test(plainText)) {
           console.log(
             `[Standalone Filter] Discarded HTML ${file}: Contains excluded keyword.`,
           );
-        } else if (!criteria.some((c) => rawText.includes(c))) {
+        } else if (fromSubject) {
           console.log(
-            `[Standalone Filter] Discarded HTML ${file}: Data subject not mentioned.`,
+            `[Standalone Filter] Discarded HTML ${file}: Message appears authored by subject.`,
+          );
+        } else if (!containsSubjectName && !replyToSubject) {
+          console.log(
+            `[Standalone Filter] Discarded HTML ${file}: No subject-name match or direct reply signal.`,
           );
         } else {
           try {
-            await renderHtmlToPdfWeasyPrint(rawHtml, pdfOutputPath, seqName);
+            await renderHtmlToPdfWeasyPrint(
+              normalizeHtmlForPdf(rawHtml),
+              pdfOutputPath,
+              seqName,
+            );
             success = true;
           } catch (_e) {
             console.warn(
