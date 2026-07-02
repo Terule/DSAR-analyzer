@@ -1,3 +1,5 @@
+import { spawn } from "node:child_process";
+import path from "node:path";
 import { NextResponse } from "next/server";
 import { pollBatchStatus } from "@/lib/batch-worker";
 import { db } from "@/lib/db";
@@ -16,7 +18,30 @@ export async function GET(request: Request) {
       return new NextResponse("Unauthorized", { status: 401 });
     }
 
-    // 2. Find ALL files that have been sent to OpenAI but are waiting for sync
+    // 2. Safety net: if AI is complete but rendering is still pending, trigger PDF worker.
+    const hasPendingRender = db
+      .prepare(
+        `SELECT 1 FROM processed_files
+         WHERE ai_status = 'completed' AND pdf_status = 'pending'
+         LIMIT 1`,
+      )
+      .get();
+
+    let renderWorkerStarted = false;
+    if (hasPendingRender) {
+      const workerPath = path.resolve(process.cwd(), "convert-worker.ts");
+      const child = spawn("bun", [workerPath], {
+        detached: true,
+        stdio: "ignore",
+      });
+      child.unref();
+      renderWorkerStarted = true;
+      console.log(
+        "[Cron Engine] Triggered PDF worker for pending render jobs.",
+      );
+    }
+
+    // 3. Find all files that were sent to OpenAI but are waiting for sync.
     const pendingFiles = db
       .prepare(`
       SELECT id FROM processed_files 
@@ -27,7 +52,10 @@ export async function GET(request: Request) {
     if (pendingFiles.length === 0) {
       return NextResponse.json({
         success: true,
-        message: "No pending batches to sync.",
+        message: renderWorkerStarted
+          ? "No pending batches to sync. Render worker triggered."
+          : "No pending batches to sync.",
+        render_worker_started: renderWorkerStarted,
       });
     }
 
@@ -35,7 +63,7 @@ export async function GET(request: Request) {
       `[Cron Engine] Waking up. Found ${pendingFiles.length} pending batches.`,
     );
 
-    // 3. Loop through and poll each one safely
+    // 4. Loop through and poll each one safely.
     for (const file of pendingFiles) {
       try {
         await pollBatchStatus(file.id);
@@ -48,6 +76,7 @@ export async function GET(request: Request) {
       success: true,
       message: "Cron sweep completed successfully.",
       processed_count: pendingFiles.length,
+      render_worker_started: renderWorkerStarted,
     });
   } catch (error) {
     console.error("[Cron Engine] Fatal error:", error);

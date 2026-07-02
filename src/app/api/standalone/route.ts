@@ -59,6 +59,30 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+async function withTimeout<T>(
+  operation: Promise<T>,
+  label: string,
+  timeoutMs = 180_000,
+): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => {
+          reject(
+            new Error(
+              `Timed out after ${timeoutMs}ms while processing ${label}`,
+            ),
+          );
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 function buildSubjectNameTokens(
   subjectName: string,
   aliases: string[] = [],
@@ -70,10 +94,10 @@ function buildSubjectNameTokens(
   if (cleanedName) tokens.add(cleanedName.toLowerCase());
 
   if (parts.length > 0) {
-    tokens.add(parts[0].toLowerCase()); // first name
-    tokens.add(parts[parts.length - 1].toLowerCase()); // surname
-    const initials = parts.map((p) => p[0]).join("");
-    if (initials.length > 0) tokens.add(initials.toLowerCase());
+    const firstName = parts[0].toLowerCase();
+    const surname = parts[parts.length - 1].toLowerCase();
+    if (firstName.length >= 4) tokens.add(firstName);
+    if (surname.length >= 4) tokens.add(surname);
   }
 
   for (const alias of aliases) {
@@ -119,10 +143,47 @@ function isDirectReplyToSubject(
       new RegExp(`\\brepl(?:y|ied|ying)\\s+to\\s+${t}\\b`, "i"),
       new RegExp(`\\bin\\s+reply\\s+to\\s+${t}\\b`, "i"),
       new RegExp(`\\brespond(?:ed|ing)?\\s+to\\s+${t}\\b`, "i"),
-      new RegExp(`\\bto\\s+${t}\\b.*\\brepl(?:y|ied|ying)\\b`, "i"),
+      new RegExp(`\\b(replying\\s+to|replied\\s+to)\\s+${t}\\b`, "i"),
     ];
     return replyPatterns.some((re) => re.test(plainText));
   });
+}
+
+function stripLikelyHeaderMentions(
+  plainText: string,
+  subjectTokens: string[],
+): string {
+  let sanitized = plainText;
+  for (const token of subjectTokens) {
+    const t = escapeRegExp(token);
+    sanitized = sanitized.replace(
+      new RegExp(
+        `\\b(from|sender|author|by|to|cc|bcc)\\s*[:\\-]?\\s*${t}\\b`,
+        "gi",
+      ),
+      " ",
+    );
+    sanitized = sanitized.replace(
+      new RegExp(`\\bmessage\\s+from\\s+${t}\\b`, "gi"),
+      " ",
+    );
+    sanitized = sanitized.replace(
+      new RegExp(`\\b${t}\\b\\s*(said|posted|sent|wrote)\\b`, "gi"),
+      " ",
+    );
+  }
+  return sanitized.replace(/\s+/g, " ").trim();
+}
+
+function toPlainTextFromHtml(rawHtml: string): string {
+  const noScripts = rawHtml
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ");
+  return noScripts
+    .replace(/<[^>]*>?/gm, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
 }
 
 // Native WeasyPrint renderer to replace Puppeteer
@@ -271,218 +332,268 @@ export async function POST(request: Request) {
       if (file.startsWith(".") || file.toLowerCase().endsWith(".json"))
         continue;
 
-      const ext = path.extname(file).toLowerCase();
-      const buffer = fs.readFileSync(filePath);
+      try {
+        const ext = path.extname(file).toLowerCase();
+        const buffer = fs.readFileSync(filePath);
 
-      // --- CRYPTOGRAPHIC DEDUPLICATION CHECK ---
-      const fileHash = crypto.createHash("sha256").update(buffer).digest("hex");
-      if (processedHashes.has(fileHash)) {
-        console.log(
-          `[Standalone Filter] Discarded Duplicate ${file} (Hash: ${fileHash.substring(0, 8)})`,
-        );
-        duplicatesCount++;
-        skippedCount++; // Count as skipped for the UI
-        continue;
-      }
-
-      let success = false;
-      let targetDir = deliverablesDirDocuments;
-      let isMessage = false;
-
-      // Route files to appropriate folders
-      if (
-        ext === ".html" ||
-        ext === ".htm" ||
-        ext === ".eml" ||
-        ext === ".msg"
-      ) {
-        targetDir = deliverablesDirMessages;
-        isMessage = true;
-      }
-
-      // Generate clean sequential names
-      const padLen = 4;
-      const seqName = isMessage
-        ? `Message ${String(messageCounter).padStart(padLen, "0")}`
-        : `Document ${String(documentCounter).padStart(padLen, "0")}`;
-
-      const pdfOutputPath = path.join(targetDir, `${seqName}.pdf`);
-
-      // --- HANDLER 1: Word Documents ---
-      if (ext === ".docx" || ext === ".doc") {
-        success = await processDocxToPdf(
-          buffer,
-          pdfOutputPath,
-          criteria,
-          seqName,
-          processedHashes,
-        );
-      }
-
-      // --- HANDLER 2: Excel Spreadsheets ---
-      else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
-        success = await processExcelToPdf(
-          buffer,
-          pdfOutputPath,
-          criteria,
-          seqName,
-          processedHashes,
-        );
-      }
-
-      // --- HANDLER 3: Teams Chats (HTML) ---
-      else if (ext === ".html" || ext === ".htm") {
-        const rawHtml = buffer.toString("utf-8");
-        const plainText = rawHtml.replace(/<[^>]*>?/gm, " ").toLowerCase();
-        const containsSubjectName = textContainsAnyToken(
-          plainText,
-          subjectNameTokens,
-        );
-        const replyToSubject = isDirectReplyToSubject(
-          plainText,
-          subjectNameTokens,
-        );
-        const fromSubject = isAuthoredBySubject(plainText, subjectNameTokens);
-
-        if (exclusionsRegex.test(plainText)) {
+        // --- CRYPTOGRAPHIC DEDUPLICATION CHECK ---
+        const fileHash = crypto
+          .createHash("sha256")
+          .update(buffer)
+          .digest("hex");
+        if (processedHashes.has(fileHash)) {
           console.log(
-            `[Standalone Filter] Discarded HTML ${file}: Contains excluded keyword.`,
+            `[Standalone Filter] Discarded Duplicate ${file} (Hash: ${fileHash.substring(0, 8)})`,
           );
-        } else if (fromSubject) {
-          console.log(
-            `[Standalone Filter] Discarded HTML ${file}: Message appears authored by subject.`,
-          );
-        } else if (!containsSubjectName && !replyToSubject) {
-          console.log(
-            `[Standalone Filter] Discarded HTML ${file}: No subject-name match or direct reply signal.`,
-          );
-        } else {
-          try {
-            await renderHtmlToPdfWeasyPrint(
-              normalizeHtmlForPdf(rawHtml),
-              pdfOutputPath,
-              seqName,
-            );
-            success = true;
-          } catch (_e) {
-            console.warn(
-              `[Standalone Filter] Failed to render HTML to PDF: ${file}. Saving raw HTML instead as fallback.`,
-            );
-
-            // 🔥 The Fallback Fix: Save the raw HTML directly if WeasyPrint crashes!
-            const fallbackPath = path.join(targetDir, `${seqName}${ext}`);
-            fs.copyFileSync(filePath, fallbackPath);
-            success = true;
-          }
+          duplicatesCount++;
+          skippedCount++; // Count as skipped for the UI
+          continue;
         }
-      }
 
-      // --- HANDLER 4: Outlook MSG & EML Files ---
-      else if (ext === ".msg" || ext === ".eml") {
-        // 🔥 The UTF-16LE Fix: Read both UTF-8 (for EML) and UTF-16 (for MSG blobs)
-        // simultaneously, and strip out null bytes to ensure pure text matching!
-        const rawUtf8 = buffer.toString("utf-8").toLowerCase();
-        const rawUtf16 = buffer.toString("utf16le").toLowerCase();
-        const rawText = `${rawUtf8} ${rawUtf16}`.replace(/\0/g, "");
+        let success = false;
+        let targetDir = deliverablesDirDocuments;
+        let isMessage = false;
 
-        if (exclusionsRegex.test(rawText)) {
-          console.log(
-            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword.`,
+        // Route files to appropriate folders
+        if (
+          ext === ".html" ||
+          ext === ".htm" ||
+          ext === ".eml" ||
+          ext === ".msg"
+        ) {
+          targetDir = deliverablesDirMessages;
+          isMessage = true;
+        }
+
+        // Generate clean sequential names
+        const padLen = 4;
+        const seqName = isMessage
+          ? `Message ${String(messageCounter).padStart(padLen, "0")}`
+          : `Document ${String(documentCounter).padStart(padLen, "0")}`;
+
+        const pdfOutputPath = path.join(targetDir, `${seqName}.pdf`);
+
+        // --- HANDLER 1: Word Documents ---
+        if (ext === ".docx" || ext === ".doc") {
+          success = await withTimeout(
+            processDocxToPdf(
+              buffer,
+              pdfOutputPath,
+              criteria,
+              seqName,
+              processedHashes,
+            ),
+            file,
           );
-        } else if (!criteria.some((c) => rawText.includes(c))) {
-          console.log(
-            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Data subject not mentioned.`,
-          );
-        } else {
-          const pdfOutput = path.join(targetDir, `${seqName}.pdf`);
+        }
 
-          if (ext === ".eml") {
+        // --- HANDLER 2: Excel Spreadsheets ---
+        else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
+          success = await withTimeout(
+            processExcelToPdf(
+              buffer,
+              pdfOutputPath,
+              criteria,
+              seqName,
+              processedHashes,
+            ),
+            file,
+          );
+        }
+
+        // --- HANDLER 3: Teams Chats (HTML) ---
+        else if (ext === ".html" || ext === ".htm") {
+          const rawHtml = buffer.toString("utf-8");
+          const plainText = toPlainTextFromHtml(rawHtml);
+          const plainTextWithoutHeaders = stripLikelyHeaderMentions(
+            plainText,
+            subjectNameTokens,
+          );
+          const containsSubjectNameInBody = textContainsAnyToken(
+            plainTextWithoutHeaders,
+            subjectNameTokens,
+          );
+          const replyToSubject = isDirectReplyToSubject(
+            plainText,
+            subjectNameTokens,
+          );
+          const fromSubject = isAuthoredBySubject(plainText, subjectNameTokens);
+
+          if (exclusionsRegex.test(plainText)) {
+            console.log(
+              `[Standalone Filter] Discarded HTML ${file}: Contains excluded keyword.`,
+            );
+          } else if (fromSubject) {
+            console.log(
+              `[Standalone Filter] Discarded HTML ${file}: Message appears authored by subject.`,
+            );
+          } else if (!containsSubjectNameInBody && !replyToSubject) {
+            console.log(
+              `[Standalone Filter] Discarded HTML ${file}: Missing subject name in body and no direct reply signal.`,
+            );
+          } else {
             try {
-              const parsed = await simpleParser(buffer);
-              const emailBody =
-                parsed.html || parsed.textAsHtml || parsed.text || rawText;
-              await renderHtmlToPdfWeasyPrint(
-                normalizeHtmlForPdf(String(emailBody)),
-                pdfOutput,
-                seqName,
+              await withTimeout(
+                renderHtmlToPdfWeasyPrint(
+                  normalizeHtmlForPdf(rawHtml),
+                  pdfOutputPath,
+                  seqName,
+                ),
+                file,
               );
               success = true;
             } catch (_e) {
-              // Fallback for malformed EML payloads.
-              await renderHtmlToPdfWeasyPrint(
-                buildEmailHtml(rawText, file),
-                pdfOutput,
-                seqName,
+              console.warn(
+                `[Standalone Filter] Failed to render HTML to PDF: ${file}. Saving raw HTML instead as fallback.`,
               );
+
+              // Preserve the source HTML when rendering fails.
+              const fallbackPath = path.join(targetDir, `${seqName}${ext}`);
+              fs.copyFileSync(filePath, fallbackPath);
               success = true;
             }
-          } else {
-            // MSG parsing is inconsistent across archives, so render extracted text safely.
-            await renderHtmlToPdfWeasyPrint(
-              buildEmailHtml(rawText, file),
-              pdfOutput,
-              seqName,
-            );
-            success = true;
           }
         }
-      }
 
-      // --- HANDLER 5: Raw PDFs ---
-      else if (ext === ".pdf") {
-        try {
-          const rawText = (await extractPdfText(buffer)).toLowerCase();
+        // --- HANDLER 4: Outlook MSG & EML Files ---
+        else if (ext === ".msg" || ext === ".eml") {
+          // Read both UTF-8 (for EML) and UTF-16 (for MSG blobs), then strip null bytes.
+          const rawUtf8 = buffer.toString("utf-8").toLowerCase();
+          const rawUtf16 = buffer.toString("utf16le").toLowerCase();
+          const rawText = `${rawUtf8} ${rawUtf16}`.replace(/\0/g, " ");
+
+          const fromSubject = isAuthoredBySubject(rawText, subjectNameTokens);
+          const replyToSubject = isDirectReplyToSubject(
+            rawText,
+            subjectNameTokens,
+          );
+          const containsSubjectName = textContainsAnyToken(
+            rawText,
+            subjectNameTokens,
+          );
 
           if (exclusionsRegex.test(rawText)) {
             console.log(
-              `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
+              `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword.`,
             );
-          } else if (!criteria.some((c) => rawText.includes(c))) {
+          } else if (fromSubject) {
             console.log(
-              `[Standalone Filter] Discarded PDF ${file}: Data subject not mentioned.`,
+              `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Message appears authored by subject.`,
+            );
+          } else if (!containsSubjectName && !replyToSubject) {
+            console.log(
+              `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Missing subject-name signal.`,
             );
           } else {
-            // ADD SEMANTIC HASH CHECK HERE
-            const textHash = crypto
-              .createHash("sha256")
-              .update(rawText)
-              .digest("hex");
-            if (processedHashes.has(textHash)) {
-              console.log(
-                `[Standalone Filter] Discarded Duplicate PDF ${file} (Content Match).`,
-              );
-              duplicatesCount++;
-              skippedCount++;
-              continue;
-            }
-            processedHashes.add(textHash);
+            const pdfOutput = path.join(targetDir, `${seqName}.pdf`);
 
+            if (ext === ".eml") {
+              try {
+                const parsed = await withTimeout(simpleParser(buffer), file);
+                const emailBody =
+                  parsed.html || parsed.textAsHtml || parsed.text || rawText;
+                await withTimeout(
+                  renderHtmlToPdfWeasyPrint(
+                    normalizeHtmlForPdf(String(emailBody)),
+                    pdfOutput,
+                    seqName,
+                  ),
+                  file,
+                );
+                success = true;
+              } catch (_e) {
+                // Fallback for malformed EML payloads.
+                await withTimeout(
+                  renderHtmlToPdfWeasyPrint(
+                    buildEmailHtml(rawText, file),
+                    pdfOutput,
+                    seqName,
+                  ),
+                  file,
+                );
+                success = true;
+              }
+            } else {
+              // MSG parsing is inconsistent across archives, so render extracted text safely.
+              await withTimeout(
+                renderHtmlToPdfWeasyPrint(
+                  buildEmailHtml(rawText, file),
+                  pdfOutput,
+                  seqName,
+                ),
+                file,
+              );
+              success = true;
+            }
+          }
+        }
+
+        // --- HANDLER 5: Raw PDFs ---
+        else if (ext === ".pdf") {
+          try {
+            const rawText = (
+              await withTimeout(extractPdfText(buffer), file)
+            ).toLowerCase();
+
+            if (exclusionsRegex.test(rawText)) {
+              console.log(
+                `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
+              );
+            } else if (!criteria.some((c) => rawText.includes(c))) {
+              console.log(
+                `[Standalone Filter] Discarded PDF ${file}: Data subject not mentioned.`,
+              );
+            } else {
+              // Additional semantic hash check for content-level duplicate PDFs.
+              const textHash = crypto
+                .createHash("sha256")
+                .update(rawText)
+                .digest("hex");
+              if (processedHashes.has(textHash)) {
+                console.log(
+                  `[Standalone Filter] Discarded Duplicate PDF ${file} (Content Match).`,
+                );
+                duplicatesCount++;
+                skippedCount++;
+                continue;
+              }
+              processedHashes.add(textHash);
+
+              fs.copyFileSync(filePath, pdfOutputPath);
+              success = true;
+            }
+          } catch (_e) {
+            console.warn(
+              `[Standalone Filter] Failed to parse PDF ${file}. Saving raw file as fallback.`,
+            );
             fs.copyFileSync(filePath, pdfOutputPath);
             success = true;
           }
-        } catch (_e) {
-          console.warn(
-            `[Standalone Filter] Failed to parse PDF ${file}. Saving raw file as fallback.`,
-          );
-          fs.copyFileSync(filePath, pdfOutputPath);
-          success = true;
         }
-      }
 
-      // --- Unsupported Files ---
-      else {
-        console.log(`[Standalone Engine] Skipping unsupported format: ${file}`);
-        continue;
-      }
+        // --- Unsupported Files ---
+        else {
+          console.log(
+            `[Standalone Engine] Skipping unsupported format: ${file}`,
+          );
+          continue;
+        }
 
-      // Tally results and increment counters only on success
-      if (success) {
-        processedHashes.add(fileHash); // Lock this hash so future duplicates are dropped
-        processedCount++;
-        if (isMessage) messageCounter++;
-        else documentCounter++;
-        console.log(`[Standalone Engine] Exported: ${seqName}.pdf`);
-      } else {
+        // Tally results and increment counters only on success
+        if (success) {
+          processedHashes.add(fileHash); // Lock this hash so future duplicates are dropped
+          processedCount++;
+          if (isMessage) messageCounter++;
+          else documentCounter++;
+          console.log(`[Standalone Engine] Exported: ${seqName}.pdf`);
+        } else {
+          skippedCount++;
+        }
+      } catch (fileError) {
+        console.error(
+          `[Standalone Engine] Failed file ${filePath}:`,
+          fileError,
+        );
         skippedCount++;
       }
     }

@@ -1,5 +1,5 @@
 import { db } from "@/lib/db";
-import { syncStagingArea } from "@/lib/staging";
+import { backfillMissingFileSizes, syncStagingArea } from "@/lib/staging";
 
 interface StagedFile {
   id: string;
@@ -37,6 +37,8 @@ export async function GET(request: Request) {
         },
       );
     }
+
+    await backfillMissingFileSizes();
 
     // Otimização: SELECT apenas os campos necessários e limitando a carga inicial
     // Adicionamos um limite para evitar sobrecarga no carregamento da página
