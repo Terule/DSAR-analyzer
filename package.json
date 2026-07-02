@@ -11,6 +11,7 @@
     "format": "biome format --write"
   },
   "dependencies": {
+    "@kenjiuno/msgreader": "^1.28.0",
     "@types/mailparser": "^3.4.6",
     "js-tiktoken": "^1.0.21",
     "letterparser": "^0.1.8",
