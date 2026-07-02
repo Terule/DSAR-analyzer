@@ -6,11 +6,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { simpleParser } from "mailparser";
-import {
-  normalizeHtmlForPdf,
-  processDocxToPdf,
-  processExcelToPdf,
-} from "./converter";
+import { normalizeHtmlForPdf } from "./converter";
 
 export interface StandaloneBatchParams {
   caseName: string;
@@ -73,11 +69,6 @@ function escapeRegExp(value: string): string {
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
-}
-
-function isLikelyPasswordProtectedOffice(buffer: Buffer): boolean {
-  // OOXML encrypted containers usually include this marker.
-  return buffer.includes(Buffer.from("EncryptedPackage", "utf-8"));
 }
 
 function isPasswordProtectionError(error: unknown): boolean {
@@ -242,6 +233,88 @@ async function extractPdfTextInWorker(
           new Error(
             `PDF extraction worker exited unexpectedly with code ${code}`,
           ),
+        );
+      });
+    });
+  });
+}
+
+interface OfficeConversionOutcome {
+  success: boolean;
+  passwordProtected: boolean;
+}
+
+// Runs Office (docx/xlsx) parsing in a worker thread. `xlsx.read()` is fully
+// synchronous and can block the main worker's event loop hard enough that
+// in-process timeouts never fire, so this offloads it to a separate thread we
+// can forcibly terminate on timeout.
+async function convertOfficeInWorker(
+  kind: "docx" | "excel",
+  filePath: string,
+  outputPath: string,
+  criteria: string[],
+  docTitle: string,
+  timeoutMs = 150_000,
+): Promise<OfficeConversionOutcome> {
+  const workerPath = path.resolve(process.cwd(), "office-worker.ts");
+
+  return await new Promise<OfficeConversionOutcome>((resolve, reject) => {
+    const worker = new Worker(workerPath, {
+      workerData: { kind, filePath, outputPath, criteria, docTitle },
+    });
+
+    let done = false;
+    const finish = (fn: () => void) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      worker.removeAllListeners();
+      worker.terminate().catch(() => {});
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      finish(() => {
+        reject(
+          new Error(
+            `Office conversion timed out after ${timeoutMs}ms for ${docTitle}`,
+          ),
+        );
+      });
+    }, timeoutMs);
+
+    worker.on(
+      "message",
+      (msg: {
+        ok?: boolean;
+        success?: boolean;
+        passwordProtected?: boolean;
+        error?: string;
+      }) => {
+        if (msg.ok) {
+          finish(() =>
+            resolve({
+              success: Boolean(msg.success),
+              passwordProtected: Boolean(msg.passwordProtected),
+            }),
+          );
+        } else {
+          finish(() =>
+            reject(new Error(msg.error || "Office conversion failed")),
+          );
+        }
+      },
+    );
+
+    worker.on("error", (error) => {
+      finish(() => reject(error));
+    });
+
+    worker.on("exit", (code) => {
+      if (done) return;
+      finish(() => {
+        reject(
+          new Error(`Office worker exited unexpectedly with code ${code}`),
         );
       });
     });
@@ -660,15 +733,24 @@ export async function runStandaloneBatch(
 
   // Retrieve all files recursively
   const allFiles = getAllFiles(standaloneStagingDir);
+  console.log(
+    `[Standalone Engine] Found ${allFiles.length} files to evaluate (recursively).`,
+  );
 
   // In-memory set to track hashes for deduplication
   const processedHashes = new Set<string>();
 
+  let fileIndex = 0;
   for (const filePath of allFiles) {
+    fileIndex++;
     const file = path.basename(filePath);
 
     // Skip hidden system files and JSON metadata files
     if (file.startsWith(".") || file.toLowerCase().endsWith(".json")) continue;
+
+    console.log(
+      `[Standalone Engine] (${fileIndex}/${allFiles.length}) Processing: ${file}`,
+    );
 
     try {
       // Yield between files so the worker process stays cooperative.
@@ -691,27 +773,17 @@ export async function runStandaloneBatch(
         continue;
       }
 
-      // Avoid loading full PDF bytes in the main thread; PDF parsing runs in a worker.
-      const buffer =
-        ext === ".pdf"
-          ? undefined
-          : await withTimeout(
-              fs.promises.readFile(filePath),
-              `${file} read`,
-              60_000,
-            );
-
-      if (
-        buffer &&
-        (ext === ".docx" || ext === ".xlsx") &&
-        isLikelyPasswordProtectedOffice(buffer)
-      ) {
-        console.log(
-          `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
-        );
-        skippedCount++;
-        continue;
-      }
+      // Only read the file into memory for handlers that run in-process
+      // (HTML/EML/MSG). PDFs and Office documents are parsed in separate worker
+      // threads so their heavy/synchronous parsing can't block this loop.
+      const inProcessExts = new Set([".html", ".htm", ".eml", ".msg"]);
+      const buffer = inProcessExts.has(ext)
+        ? await withTimeout(
+            fs.promises.readFile(filePath),
+            `${file} read`,
+            60_000,
+          )
+        : undefined;
 
       let success = false;
       let producedPath: string | null = null;
@@ -739,39 +811,41 @@ export async function runStandaloneBatch(
 
       // --- HANDLER 1: Word Documents ---
       if (ext === ".docx" || ext === ".doc") {
-        if (!buffer) {
+        const outcome = await convertOfficeInWorker(
+          "docx",
+          filePath,
+          pdfOutputPath,
+          criteria,
+          seqName,
+        );
+        if (outcome.passwordProtected) {
+          console.log(
+            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
+          );
           skippedCount++;
           continue;
         }
-        success = await withTimeout(
-          processDocxToPdf(
-            buffer,
-            pdfOutputPath,
-            criteria,
-            seqName,
-            processedHashes,
-          ),
-          file,
-        );
+        success = outcome.success;
         if (success) producedPath = pdfOutputPath;
       }
 
       // --- HANDLER 2: Excel Spreadsheets ---
       else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
-        if (!buffer) {
+        const outcome = await convertOfficeInWorker(
+          "excel",
+          filePath,
+          pdfOutputPath,
+          criteria,
+          seqName,
+        );
+        if (outcome.passwordProtected) {
+          console.log(
+            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
+          );
           skippedCount++;
           continue;
         }
-        success = await withTimeout(
-          processExcelToPdf(
-            buffer,
-            pdfOutputPath,
-            criteria,
-            seqName,
-            processedHashes,
-          ),
-          file,
-        );
+        success = outcome.success;
         if (success) producedPath = pdfOutputPath;
       }
 
