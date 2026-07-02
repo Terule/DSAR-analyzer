@@ -3,10 +3,10 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
 import { simpleParser } from "mailparser";
 import { NextResponse } from "next/server";
 import {
-  extractPdfText,
   normalizeHtmlForPdf,
   processDocxToPdf,
   processExcelToPdf,
@@ -59,6 +59,29 @@ function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
+function yieldToEventLoop(): Promise<void> {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+function isLikelyPasswordProtectedPdf(buffer: Buffer): boolean {
+  // Common encrypted PDF marker.
+  return buffer.includes(Buffer.from("/Encrypt", "utf-8"));
+}
+
+function isLikelyPasswordProtectedOffice(buffer: Buffer): boolean {
+  // OOXML encrypted containers usually include this marker.
+  return buffer.includes(Buffer.from("EncryptedPackage", "utf-8"));
+}
+
+function isPasswordProtectionError(error: unknown): boolean {
+  const msg = String(
+    error instanceof Error ? error.message : error,
+  ).toLowerCase();
+  return /(password|passphrase|encrypted|encryption|decrypt|protected)/.test(
+    msg,
+  );
+}
+
 async function withTimeout<T>(
   operation: Promise<T>,
   label: string,
@@ -81,6 +104,91 @@ async function withTimeout<T>(
   } finally {
     if (timer) clearTimeout(timer);
   }
+}
+
+async function extractPdfTextInWorker(
+  pdfFilePath: string,
+  label: string,
+  timeoutMs = 45_000,
+): Promise<string> {
+  const workerCode = `
+    const fs = require("node:fs");
+    const { parentPort, workerData } = require("node:worker_threads");
+
+    (async () => {
+      try {
+        const { PDFParse } = await import("pdf-parse");
+        const pdfBytes = fs.readFileSync(workerData.pdfFilePath);
+        const parser = new PDFParse({ data: pdfBytes });
+        try {
+          const parsed = await parser.getText();
+          parentPort?.postMessage({ ok: true, text: parsed?.text || "" });
+        } finally {
+          await parser.destroy().catch(() => {});
+        }
+      } catch (error) {
+        parentPort?.postMessage({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+  `;
+
+  return await new Promise<string>((resolve, reject) => {
+    const worker = new Worker(workerCode, {
+      eval: true,
+      workerData: { pdfFilePath },
+    });
+
+    let done = false;
+    const finish = (fn: () => void) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      worker.removeAllListeners();
+      worker.terminate().catch(() => {});
+      fn();
+    };
+
+    const timer = setTimeout(() => {
+      finish(() => {
+        reject(
+          new Error(
+            `PDF text extraction timed out after ${timeoutMs}ms for ${label}`,
+          ),
+        );
+      });
+    }, timeoutMs);
+
+    worker.on(
+      "message",
+      (msg: { ok?: boolean; text?: string; error?: string }) => {
+        if (msg.ok) {
+          finish(() => resolve(msg.text || ""));
+        } else {
+          finish(() =>
+            reject(new Error(msg.error || "Unknown PDF extraction error")),
+          );
+        }
+      },
+    );
+
+    worker.on("error", (error) => {
+      finish(() => reject(error));
+    });
+
+    worker.on("exit", (code) => {
+      if (done) return;
+      finish(() => {
+        reject(
+          new Error(
+            `PDF extraction worker exited unexpectedly with code ${code}`,
+          ),
+        );
+      });
+    });
+  });
 }
 
 function buildSubjectNameTokens(
@@ -128,6 +236,13 @@ function isAuthoredBySubject(
       new RegExp(`\\b(from|sender|author|by)\\s*[:\\-]?\\s*${t}\\b`, "i"),
       new RegExp(`\\b${t}\\b\\s*(said|posted|sent|wrote)\\b`, "i"),
       new RegExp(`\\bmessage from\\s+${t}\\b`, "i"),
+      // Teams export line style: "Full Name <email@domain> 3/12/2025 10:06 PM"
+      new RegExp(
+        `\\b${t}\\b\\s*<[^>\\n]{1,120}@[^>\\n]{1,120}>\\s+\\d{1,2}[/\\-]\\d{1,2}[/\\-]\\d{2,4}`,
+        "i",
+      ),
+      // Broader fallback for sender signatures in chat exports
+      new RegExp(`\\b${t}\\b\\s*<[^>\\n]{1,120}@[^>\\n]{1,120}>`, "i"),
     ];
     return authoredPatterns.some((re) => re.test(plainText));
   });
@@ -184,6 +299,56 @@ function toPlainTextFromHtml(rawHtml: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
+}
+
+function toStructuredPlainTextFromHtml(rawHtml: string): string {
+  const noScripts = rawHtml
+    .replace(/<script[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style[\s\S]*?<\/style>/gi, " ");
+
+  // Preserve likely line boundaries so sender headers remain detectable.
+  const withBreaks = noScripts.replace(
+    /<\s*\/?\s*(br|p|div|li|tr|h[1-6]|section|article|header|footer)\b[^>]*>/gi,
+    "\n",
+  );
+
+  return withBreaks
+    .replace(/<[^>]*>?/gm, " ")
+    .replace(/\r/g, "\n")
+    .replace(/[ \t]+/g, " ")
+    .replace(/\n{2,}/g, "\n")
+    .trim()
+    .toLowerCase();
+}
+
+function isTopMessageAuthoredBySubject(
+  rawHtml: string,
+  subjectTokens: string[],
+): boolean {
+  const structured = toStructuredPlainTextFromHtml(rawHtml);
+  const lines = structured
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .slice(0, 4);
+
+  if (lines.length === 0) return false;
+
+  const dateRe = /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/i;
+  const timeRe = /\b\d{1,2}:\d{2}\s*(am|pm)\b/i;
+
+  return lines.some((line) => {
+    const hasHeaderShape = dateRe.test(line) || timeRe.test(line);
+    if (!hasHeaderShape) return false;
+
+    return subjectTokens.some((token) => {
+      const tokenRe = new RegExp(
+        `(^|[^a-z0-9])${escapeRegExp(token)}($|[^a-z0-9])`,
+        "i",
+      );
+      return tokenRe.test(line);
+    });
+  });
 }
 
 // Native WeasyPrint renderer to replace Puppeteer
@@ -333,8 +498,30 @@ export async function POST(request: Request) {
         continue;
 
       try {
+        // Yield between files so the API server remains responsive.
+        await yieldToEventLoop();
+
         const ext = path.extname(file).toLowerCase();
-        const buffer = fs.readFileSync(filePath);
+        const buffer = await fs.promises.readFile(filePath);
+
+        if (ext === ".pdf" && isLikelyPasswordProtectedPdf(buffer)) {
+          console.log(
+            `[Standalone Filter] Discarded PDF ${file}: Password-protected/encrypted file.`,
+          );
+          skippedCount++;
+          continue;
+        }
+
+        if (
+          (ext === ".docx" || ext === ".xlsx") &&
+          isLikelyPasswordProtectedOffice(buffer)
+        ) {
+          console.log(
+            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
+          );
+          skippedCount++;
+          continue;
+        }
 
         // --- CRYPTOGRAPHIC DEDUPLICATION CHECK ---
         const fileHash = crypto
@@ -405,6 +592,10 @@ export async function POST(request: Request) {
         else if (ext === ".html" || ext === ".htm") {
           const rawHtml = buffer.toString("utf-8");
           const plainText = toPlainTextFromHtml(rawHtml);
+          const topMessageFromSubject = isTopMessageAuthoredBySubject(
+            rawHtml,
+            subjectNameTokens,
+          );
           const plainTextWithoutHeaders = stripLikelyHeaderMentions(
             plainText,
             subjectNameTokens,
@@ -417,7 +608,9 @@ export async function POST(request: Request) {
             plainText,
             subjectNameTokens,
           );
-          const fromSubject = isAuthoredBySubject(plainText, subjectNameTokens);
+          const fromSubject =
+            topMessageFromSubject ||
+            isAuthoredBySubject(plainText, subjectNameTokens);
 
           if (exclusionsRegex.test(plainText)) {
             console.log(
@@ -425,7 +618,7 @@ export async function POST(request: Request) {
             );
           } else if (fromSubject) {
             console.log(
-              `[Standalone Filter] Discarded HTML ${file}: Message appears authored by subject.`,
+              `[Standalone Filter] Discarded HTML ${file}: Top message is authored by subject.`,
             );
           } else if (!containsSubjectNameInBody && !replyToSubject) {
             console.log(
@@ -449,7 +642,7 @@ export async function POST(request: Request) {
 
               // Preserve the source HTML when rendering fails.
               const fallbackPath = path.join(targetDir, `${seqName}${ext}`);
-              fs.copyFileSync(filePath, fallbackPath);
+              await fs.promises.copyFile(filePath, fallbackPath);
               success = true;
             }
           }
@@ -532,7 +725,7 @@ export async function POST(request: Request) {
         else if (ext === ".pdf") {
           try {
             const rawText = (
-              await withTimeout(extractPdfText(buffer), file)
+              await extractPdfTextInWorker(filePath, file, 45_000)
             ).toLowerCase();
 
             if (exclusionsRegex.test(rawText)) {
@@ -559,14 +752,21 @@ export async function POST(request: Request) {
               }
               processedHashes.add(textHash);
 
-              fs.copyFileSync(filePath, pdfOutputPath);
+              await fs.promises.copyFile(filePath, pdfOutputPath);
               success = true;
             }
-          } catch (_e) {
+          } catch (pdfError) {
+            if (isPasswordProtectionError(pdfError)) {
+              console.log(
+                `[Standalone Filter] Discarded PDF ${file}: Password-protected/encrypted file.`,
+              );
+              skippedCount++;
+              continue;
+            }
             console.warn(
-              `[Standalone Filter] Failed to parse PDF ${file}. Saving raw file as fallback.`,
+              `[Standalone Filter] Failed/timed out parsing PDF ${file}. Saving raw file as fallback.`,
             );
-            fs.copyFileSync(filePath, pdfOutputPath);
+            await fs.promises.copyFile(filePath, pdfOutputPath);
             success = true;
           }
         }
