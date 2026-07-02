@@ -9,7 +9,7 @@ const MODEL_NAME = "gpt-4o-mini";
 const TOKENIZER = encodingForModel(MODEL_NAME);
 
 // Enforce max enqueued rate headroom
-const MAX_TOKENS_PER_BATCH = 900_000;
+export const DEFAULT_MAX_TOKENS_PER_BATCH = 900_000;
 const MAX_COMPLETION_TOKENS_PER_REQUEST = 150;
 const CHAT_MESSAGE_OVERHEAD_TOKENS = 12;
 const REQUEST_OVERHEAD_TOKENS = 24;
@@ -54,7 +54,13 @@ function estimateRequestTokens(
 export async function generateBatchFile(
   fileId: string,
   subjectCriteria: { name: string; email: string; aliases: string[] },
+  options?: { maxTokensPerBatch?: number },
 ) {
+  const maxTokensPerBatch =
+    options?.maxTokensPerBatch && options.maxTokensPerBatch > 0
+      ? Math.floor(options.maxTokensPerBatch)
+      : DEFAULT_MAX_TOKENS_PER_BATCH;
+
   const row = db
     .prepare("SELECT filepath, ai_started_at FROM processed_files WHERE id = ?")
     .get(fileId) as
@@ -190,9 +196,9 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
     const userContent = JSON.stringify(content);
     const estimatedTokens = estimateRequestTokens(systemPrompt, userContent);
 
-    if (estimatedTokens > MAX_TOKENS_PER_BATCH) {
+    if (estimatedTokens > maxTokensPerBatch) {
       console.log(
-        `[AI Engine] Warning: Email ${hash} exceeds max tokens on its own (${estimatedTokens} tokens). Discarding...`,
+        `[AI Engine] Warning: Email ${hash} exceeds max tokens on its own (${estimatedTokens} > ${maxTokensPerBatch}). Discarding...`,
       );
 
       // 🚨 CRITICAL FIX: Ensure skipped oversized files are marked as discarded so they don't infinite-loop!
@@ -207,9 +213,9 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
       continue;
     }
 
-    if (currentTokenCount + estimatedTokens > MAX_TOKENS_PER_BATCH) {
+    if (currentTokenCount + estimatedTokens > maxTokensPerBatch) {
       console.log(
-        `[AI Chunking] Reached safety limit (${currentTokenCount} tokens). Splitting batch...`,
+        `[AI Chunking] Reached safety limit (${currentTokenCount}/${maxTokensPerBatch} tokens). Splitting batch...`,
       );
       break;
     }

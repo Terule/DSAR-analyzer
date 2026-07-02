@@ -2,10 +2,13 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import OpenAI from "openai";
-import { generateBatchFile } from "./ai";
+import { DEFAULT_MAX_TOKENS_PER_BATCH, generateBatchFile } from "./ai";
 import { db } from "./db";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+const adaptiveTokenCapByFile = new Map<string, number>();
+const MIN_RETRY_BATCH_TOKENS = 25_000;
+const TOKEN_BACKOFF_FACTOR = 0.8;
 
 interface AiPayloadSection {
   from?: string;
@@ -34,6 +37,61 @@ interface SubjectCriteria {
   name?: string;
   email?: string;
   aliases?: string[];
+}
+
+function getBatchErrorText(batch: OpenAI.Batches.Batch): string {
+  const data = batch.errors?.data;
+  if (!data || data.length === 0) return "";
+
+  return data
+    .map((item) => `${item.code || ""} ${item.message || ""}`.trim())
+    .join(" ")
+    .toLowerCase();
+}
+
+function isExpiredBatchFailure(batch: OpenAI.Batches.Batch): boolean {
+  if (batch.status === "expired") return true;
+  if (batch.status !== "failed") return false;
+
+  const errorText = getBatchErrorText(batch);
+  return /expired|expiration|completion_window/.test(errorText);
+}
+
+function isTokenLimitBatchFailure(batch: OpenAI.Batches.Batch): boolean {
+  if (batch.status !== "failed") return false;
+  const errorText = getBatchErrorText(batch);
+  return /token|enqueued|rate.?limit|max.*tokens|too many tokens/.test(
+    errorText,
+  );
+}
+
+function parseLimitTokens(errorText: string): number | null {
+  const patterns = [
+    /limit[^\d]*(\d[\d,]*)/i,
+    /max(?:imum)?[^\d]*(\d[\d,]*)\s*tokens?/i,
+    /allowed[^\d]*(\d[\d,]*)\s*tokens?/i,
+  ];
+
+  for (const pattern of patterns) {
+    const match = errorText.match(pattern);
+    if (!match?.[1]) continue;
+    const parsed = Number(match[1].replaceAll(",", ""));
+    if (Number.isFinite(parsed) && parsed > 0) return parsed;
+  }
+
+  return null;
+}
+
+function nextRetryTokenCap(fileId: string, errorText: string): number {
+  const previousCap =
+    adaptiveTokenCapByFile.get(fileId) || DEFAULT_MAX_TOKENS_PER_BATCH;
+
+  const explicitLimit = parseLimitTokens(errorText);
+  const limitedCap = explicitLimit
+    ? Math.floor(explicitLimit * TOKEN_BACKOFF_FACTOR)
+    : Math.floor(previousCap * TOKEN_BACKOFF_FACTOR);
+
+  return Math.max(MIN_RETRY_BATCH_TOKENS, limitedCap);
 }
 
 function escapeRegExp(value: string): string {
@@ -214,20 +272,15 @@ function queuePdfWorker(fileId: string): void {
     "UPDATE processed_files SET pdf_status = 'pending', pdf_duration_ms = 0 WHERE id = ?",
   ).run(fileId);
 
-  const workerAlreadyRunning = db
-    .prepare(
-      "SELECT 1 FROM processed_files WHERE pdf_status = 'processing' LIMIT 1",
-    )
-    .get();
-
-  if (!workerAlreadyRunning) {
-    const workerPath = path.resolve(process.cwd(), "convert-worker.ts");
-    const child = spawn("bun", [workerPath], {
-      detached: true,
-      stdio: "ignore",
-    });
-    child.unref();
-  }
+  // Always trigger a worker start. Claiming in convert-worker is atomic
+  // (pending -> processing), so concurrent workers are safe; this avoids a
+  // deadlock when a stale `processing` row exists without an active worker.
+  const workerPath = path.resolve(process.cwd(), "convert-worker.ts");
+  const child = spawn("bun", [workerPath], {
+    detached: true,
+    stdio: "ignore",
+  });
+  child.unref();
 }
 
 export async function pollBatchStatus(fileId: string) {
@@ -481,16 +534,21 @@ export async function pollBatchStatus(fileId: string) {
       ).run(fileId);
 
       // 🔥 FIRE THE NEXT CHUNK INSTANTLY 🔥
-      generateBatchFile(fileId, {
-        name: row.subject_name || "",
-        email: row.subject_email || "",
-        aliases: row.subject_aliases
-          ? row.subject_aliases
-              .split(",")
-              .map((a) => a.trim())
-              .filter(Boolean)
-          : [],
-      }).catch((err) => {
+      const adaptiveCap = adaptiveTokenCapByFile.get(fileId);
+      generateBatchFile(
+        fileId,
+        {
+          name: row.subject_name || "",
+          email: row.subject_email || "",
+          aliases: row.subject_aliases
+            ? row.subject_aliases
+                .split(",")
+                .map((a) => a.trim())
+                .filter(Boolean)
+            : [],
+        },
+        adaptiveCap ? { maxTokensPerBatch: adaptiveCap } : undefined,
+      ).catch((err) => {
         console.error(
           `[Batch Worker] Fatal error generating next chunk for ${fileId}:`,
           err,
@@ -518,16 +576,103 @@ export async function pollBatchStatus(fileId: string) {
         fileId,
       );
 
+      adaptiveTokenCapByFile.delete(fileId);
+
       queuePdfWorker(fileId);
     }
-  } else if (
-    batch.status === "failed" ||
-    batch.status === "expired" ||
-    batch.status === "cancelled"
-  ) {
+  } else if (isTokenLimitBatchFailure(batch)) {
+    const errorText = getBatchErrorText(batch);
+    const retryCap = nextRetryTokenCap(fileId, errorText);
+    adaptiveTokenCapByFile.set(fileId, retryCap);
+
+    console.error(
+      `[Batch Worker] Batch ${batch.id} failed due to token limits. Retrying with reduced chunk cap ${retryCap} tokens for file ${fileId}.`,
+    );
+
+    db.prepare(
+      "UPDATE processed_files SET ai_status = 'processing', batch_id = NULL WHERE id = ?",
+    ).run(fileId);
+
+    try {
+      await generateBatchFile(
+        fileId,
+        {
+          name: row.subject_name || "",
+          email: row.subject_email || "",
+          aliases: row.subject_aliases
+            ? row.subject_aliases
+                .split(",")
+                .map((a) => a.trim())
+                .filter(Boolean)
+            : [],
+        },
+        { maxTokensPerBatch: retryCap },
+      );
+      return "retrying_token_limited";
+    } catch (err) {
+      console.error(
+        `[Batch Worker] Failed to regenerate token-limited batch for ${fileId}:`,
+        err,
+      );
+      adaptiveTokenCapByFile.delete(fileId);
+      db.prepare(
+        "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
+      ).run(
+        typeof row.ai_started_at === "number"
+          ? Math.max(0, Date.now() - row.ai_started_at)
+          : 0,
+        fileId,
+      );
+      return "failed";
+    }
+  } else if (isExpiredBatchFailure(batch)) {
+    console.error(
+      `[Batch Worker] Batch ${batch.id} expired. Re-uploading a fresh batch for file ${fileId}...`,
+    );
+
+    db.prepare(
+      "UPDATE processed_files SET ai_status = 'processing', batch_id = NULL WHERE id = ?",
+    ).run(fileId);
+
+    try {
+      await generateBatchFile(
+        fileId,
+        {
+          name: row.subject_name || "",
+          email: row.subject_email || "",
+          aliases: row.subject_aliases
+            ? row.subject_aliases
+                .split(",")
+                .map((a) => a.trim())
+                .filter(Boolean)
+            : [],
+        },
+        adaptiveTokenCapByFile.has(fileId)
+          ? { maxTokensPerBatch: adaptiveTokenCapByFile.get(fileId) }
+          : undefined,
+      );
+      return "retrying_expired";
+    } catch (err) {
+      console.error(
+        `[Batch Worker] Failed to regenerate expired batch for ${fileId}:`,
+        err,
+      );
+      adaptiveTokenCapByFile.delete(fileId);
+      db.prepare(
+        "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
+      ).run(
+        typeof row.ai_started_at === "number"
+          ? Math.max(0, Date.now() - row.ai_started_at)
+          : 0,
+        fileId,
+      );
+      return "failed";
+    }
+  } else if (batch.status === "failed" || batch.status === "cancelled") {
     console.error(
       `[Batch Worker] OpenAI batch execution failed/cancelled. Status: ${batch.status}`,
     );
+    adaptiveTokenCapByFile.delete(fileId);
     db.prepare(
       "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
     ).run(

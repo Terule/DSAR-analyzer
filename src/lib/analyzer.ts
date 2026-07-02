@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import type { FieldsData } from "@kenjiuno/msgreader";
+import MsgReader from "@kenjiuno/msgreader";
 import { type ParsedMail, simpleParser } from "mailparser";
 import { db } from "./db";
 
@@ -162,10 +164,143 @@ export async function analyzePstDuplicates(
     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
   `);
 
+  function msgDataToEml(data: {
+    headers?: string;
+    senderEmail?: string;
+    senderName?: string;
+    recipients?: Array<{ email?: string; name?: string }>;
+    subject?: string;
+    messageDeliveryTime?: string;
+    clientSubmitTime?: string;
+    creationTime?: string;
+    body?: string;
+  }): string {
+    const normalizedHeaders = (data.headers || "").trim();
+    if (
+      /^from:/im.test(normalizedHeaders) &&
+      /^subject:/im.test(normalizedHeaders)
+    ) {
+      return `${normalizedHeaders}\n\n${data.body || ""}`;
+    }
+
+    const sender =
+      data.senderEmail || data.senderName || "unknown@example.invalid";
+    const recipients = (data.recipients || [])
+      .map((r) => r.email || r.name || "")
+      .filter(Boolean)
+      .join(", ");
+    const sentAt =
+      data.messageDeliveryTime || data.clientSubmitTime || data.creationTime;
+
+    const lines = [
+      `From: ${sender}`,
+      `To: ${recipients || "undisclosed-recipients:;"}`,
+      `Subject: ${data.subject || "(no subject)"}`,
+      ...(sentAt ? [`Date: ${sentAt}`] : []),
+      "MIME-Version: 1.0",
+      'Content-Type: text/plain; charset="utf-8"',
+      "",
+      data.body || "",
+    ];
+
+    return lines.join("\n");
+  }
+
+  async function processMsgFile(
+    msgPath: string,
+    parentHash: string | null = null,
+  ): Promise<void> {
+    try {
+      const msgBuffer = fs.readFileSync(msgPath);
+      const reader = new MsgReader(
+        new DataView(
+          msgBuffer.buffer,
+          msgBuffer.byteOffset,
+          msgBuffer.byteLength,
+        ),
+      );
+      const msgData = reader.getFileData() as {
+        headers?: string;
+        senderEmail?: string;
+        senderName?: string;
+        recipients?: Array<{ email?: string; name?: string }>;
+        subject?: string;
+        messageDeliveryTime?: string;
+        clientSubmitTime?: string;
+        creationTime?: string;
+        body?: string;
+        attachments?: FieldsData[];
+      };
+
+      const synthesizedEmlPath = path.join(
+        tempDir,
+        `msg_${crypto.randomUUID()}.eml`,
+      );
+      fs.writeFileSync(synthesizedEmlPath, msgDataToEml(msgData));
+
+      const msgEmailHash = await processEmlFile(synthesizedEmlPath, parentHash);
+      const nestedParentHash = msgEmailHash || parentHash;
+
+      if (!msgData.attachments || msgData.attachments.length === 0) return;
+
+      metrics.totalAttachments += msgData.attachments.length;
+
+      for (const msgAttachment of msgData.attachments) {
+        let extracted:
+          | { fileName?: string; content?: Uint8Array | Buffer | string }
+          | undefined;
+
+        try {
+          extracted = reader.getAttachment(msgAttachment) as {
+            fileName?: string;
+            content?: Uint8Array | Buffer | string;
+          };
+        } catch (_err) {
+          continue;
+        }
+
+        const content = extracted?.content;
+        if (!content) continue;
+
+        const attachmentName =
+          extracted?.fileName ||
+          msgAttachment.fileName ||
+          msgAttachment.fileNameShort ||
+          `msg_att_${crypto.randomUUID()}`;
+        const attachmentExt = path.extname(attachmentName).toLowerCase();
+        if (attachmentExt !== ".eml" && attachmentExt !== ".msg") continue;
+
+        const nestedTempPath = path.join(
+          tempDir,
+          `nested_${crypto.randomUUID()}${attachmentExt}`,
+        );
+
+        const nestedBuffer = Buffer.isBuffer(content)
+          ? content
+          : typeof content === "string"
+            ? Buffer.from(content)
+            : Buffer.from(content);
+
+        fs.writeFileSync(nestedTempPath, nestedBuffer);
+
+        if (attachmentExt === ".msg") {
+          await processMsgFile(nestedTempPath, nestedParentHash);
+        } else {
+          await processEmlFile(nestedTempPath, nestedParentHash);
+        }
+      }
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[Analyzer] Failed to parse MSG file ${msgPath}: ${message}`,
+      );
+    }
+  }
+
   async function processEmlFile(
     filePath: string,
     parentHash: string | null = null,
-  ) {
+  ): Promise<string | null> {
     metrics.totalProcessed++;
     const rawEml = fs.readFileSync(filePath);
 
@@ -176,7 +311,7 @@ export async function analyzePstDuplicates(
     } catch (_err) {
       // Biome Fix: Prefix unused error with underscore
       console.warn(`[Analyzer] Failed to parse EML: ${filePath}`);
-      return;
+      return null;
     }
 
     let messageId = (parsed.messageId || "").replace(/[<>]/g, "").trim();
@@ -205,7 +340,7 @@ export async function analyzePstDuplicates(
     if (isDuplicate === 1) {
       metrics.duplicateCount++;
       fs.unlinkSync(filePath); // Destroy the duplicate file instantly to free disk space!
-      return; // Skip attachment parsing for duplicates
+      return null; // Skip attachment parsing for duplicates
     }
 
     // Pre-filter: Rule 1 — discard privileged/confidential subjects immediately after dedup
@@ -232,7 +367,7 @@ export async function analyzePstDuplicates(
       ).run(fileId);
       metrics.uniqueCount++;
       fs.unlinkSync(filePath);
-      return;
+      return emailHash;
     }
 
     metrics.uniqueCount++;
@@ -274,17 +409,16 @@ export async function analyzePstDuplicates(
             : Buffer.from(att.content);
           fs.writeFileSync(nestedTempPath, contentBuf);
 
-          // Note: MSG files require `@kenjiuno/msgreader`. For now, `readpst` usually converts them to EML.
           if (ext !== ".msg") {
             await processEmlFile(nestedTempPath, emailHash);
           } else {
-            console.log(
-              `[Analyzer] Warning: MSG attachment detected. You will need msgreader installed to crack this open on Linux/Mac.`,
-            );
+            await processMsgFile(nestedTempPath, emailHash);
           }
         }
       }
     }
+
+    return emailHash;
   }
 
   // Start the Walker on all top-level EMLs created by readpst

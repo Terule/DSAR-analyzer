@@ -25,8 +25,10 @@ export interface StagedFile {
   metadata_duration_ms?: number;
   analyze_duration_ms?: number;
   extract_duration_ms?: number;
+  ai_started_at?: number;
   ai_duration_ms?: number;
   pdf_duration_ms?: number;
+  created_at?: string;
 }
 
 export interface AiConfig {

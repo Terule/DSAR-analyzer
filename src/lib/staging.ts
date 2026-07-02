@@ -43,9 +43,13 @@ export async function syncStagingArea(
 
   // 3. Prepare fresh inserts using INSERT OR IGNORE
   // If the file hash already exists in the database, SQLite will simply ignore it and move on!
-  const insertStmt = db.prepare(`
-    INSERT OR IGNORE INTO processed_files (id, filename, filepath, file_size_bytes, status)
+  const upsertStmt = db.prepare(`
+    INSERT INTO processed_files (id, filename, filepath, file_size_bytes, status)
     VALUES (?, ?, ?, ?, 'pending')
+    ON CONFLICT(id) DO UPDATE SET
+      filename = excluded.filename,
+      filepath = excluded.filepath,
+      file_size_bytes = excluded.file_size_bytes
   `);
 
   // Wrapped in a transaction to execute disk operations instantly
@@ -60,14 +64,55 @@ export async function syncStagingArea(
         .digest("hex")
         .substring(0, 12);
 
-      const result = insertStmt.run(fileId, filename, fullPath, stats.size);
-      if (result.changes > 0) newFilesAdded++;
+      const existed = db
+        .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
+        .get(fileId);
+      upsertStmt.run(fileId, filename, fullPath, stats.size);
+      if (!existed) newFilesAdded++;
     }
     console.log(
       `[Scanner] Sync complete. Added ${newFilesAdded} new files. Ignored existing files.`,
     );
   });
   insertTransaction(); // Execute transaction
+}
+
+/**
+ * Backfills missing file sizes without reprocessing cases.
+ * Returns number of rows updated.
+ */
+export async function backfillMissingFileSizes(limit = 500): Promise<number> {
+  const rows = db
+    .prepare(
+      `SELECT id, filepath FROM processed_files
+       WHERE COALESCE(file_size_bytes, 0) <= 0
+       LIMIT ?`,
+    )
+    .all(limit) as { id: string; filepath: string }[];
+
+  if (rows.length === 0) return 0;
+
+  const updateStmt = db.prepare(
+    "UPDATE processed_files SET file_size_bytes = ? WHERE id = ?",
+  );
+
+  const tx = db.transaction((items: { id: string; filepath: string }[]) => {
+    let updated = 0;
+    for (const item of items) {
+      if (!item.filepath || !fs.existsSync(item.filepath)) continue;
+      const size = fs.statSync(item.filepath).size;
+      if (size <= 0) continue;
+      updateStmt.run(size, item.id);
+      updated++;
+    }
+    return updated;
+  });
+
+  const updatedCount = tx(rows);
+  if (updatedCount > 0) {
+    console.log(`[Scanner] Backfilled file sizes for ${updatedCount} rows.`);
+  }
+  return updatedCount;
 }
 
 /**
