@@ -1,6 +1,7 @@
 import { Archive, Cpu, Database, FileText, Loader2 } from "lucide-react";
 
 interface PhaseState {
+  hasStarted: boolean;
   isProcessing: boolean;
   isDone: boolean;
   progressPct: number;
@@ -54,15 +55,19 @@ export function PhaseIndicators({
             <span className="text-[10px] font-bold tracking-widest text-center">
               {item.label}
             </span>
-            <div className="mt-1 w-full h-1 rounded-full bg-slate-700/70 overflow-hidden">
-              <div
-                className={`h-full ${progressStyle} transition-all duration-500`}
-                style={{ width: `${clampedProgress}%` }}
-              />
-            </div>
-            <span className="text-[10px] font-semibold tabular-nums">
-              {clampedProgress}%
-            </span>
+            {item.hasStarted && (
+              <>
+                <div className="mt-1 w-full h-1 rounded-full bg-slate-700/70 overflow-hidden">
+                  <div
+                    className={`h-full ${progressStyle} transition-all duration-500`}
+                    style={{ width: `${clampedProgress}%` }}
+                  />
+                </div>
+                <span className="text-[10px] font-semibold tabular-nums">
+                  {clampedProgress}%
+                </span>
+              </>
+            )}
           </div>
         );
       })}

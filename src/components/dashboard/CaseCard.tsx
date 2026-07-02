@@ -9,11 +9,20 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { memo, useMemo } from "react";
+import { memo, useEffect, useMemo, useState } from "react";
 import type { AiConfig, CaseStats, StagedFile } from "@/lib/types";
 import { AiConfigForm } from "./AiConfigForm";
 import { CaseMetrics } from "./CaseMetrics";
 import { PhaseIndicators } from "./PhaseIndicators";
+
+const DEFAULT_PARSE_MS = 120_000;
+const DEFAULT_EXTRACT_MS = 90_000;
+const DEFAULT_AI_MS = 480_000;
+const DEFAULT_RENDER_MS = 120_000;
+const ACTIVE_MAX_PROGRESS = 0.96;
+const ACTIVE_MIN_PROGRESS_PARSE_EXTRACT = 0;
+const ACTIVE_MIN_PROGRESS_AI_RENDER = 0.04;
+const PHASE_PROGRESS_SMOOTH_STEP = 8;
 
 interface CaseCardProps {
   caseName: string;
@@ -67,32 +76,55 @@ function computeStats(caseFiles: StagedFile[]): CaseStats {
   );
 }
 
-function computePipelineProgress(caseFiles: StagedFile[]): number {
-  if (caseFiles.length === 0) return 0;
+function clampUnit(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
 
-  const total = caseFiles.length;
+function averageDuration(values: number[], fallbackMs: number): number {
+  if (values.length === 0) return fallbackMs;
+  const total = values.reduce((sum, current) => sum + current, 0);
+  return Math.max(1, total / values.length);
+}
 
-  const parseDone =
-    caseFiles.filter((f) =>
-      ["analyzed", "extracting", "completed", "failed"].includes(f.status),
-    ).length / total;
+function tunedDuration(
+  values: number[],
+  fallbackMs: number,
+  minFactor: number,
+  maxFactor: number,
+): number {
+  const avg = averageDuration(values, fallbackMs);
+  const minMs = fallbackMs * minFactor;
+  const maxMs = fallbackMs * maxFactor;
+  return Math.max(minMs, Math.min(maxMs, avg));
+}
 
-  const extractDone =
-    caseFiles.filter((f) => ["completed", "failed"].includes(f.status)).length /
-    total;
+function activeProgress(
+  elapsedMs: number,
+  targetMs: number,
+  minProgress: number,
+): number {
+  const unit = clampUnit(elapsedMs / Math.max(1, targetMs));
+  return minProgress + unit * (ACTIVE_MAX_PROGRESS - minProgress);
+}
 
-  const aiDone =
-    caseFiles.filter((f) => ["completed", "failed"].includes(f.ai_status || ""))
-      .length / total;
+function smoothProgress(prev: number, next: number): number {
+  if (next <= prev) return next;
+  if (next === 100) return 100;
+  return Math.min(prev + PHASE_PROGRESS_SMOOTH_STEP, next);
+}
 
-  const renderDone =
-    caseFiles.filter((f) =>
-      ["completed", "failed"].includes(f.pdf_status || ""),
-    ).length / total;
+function toTimestampMs(value?: string): number | null {
+  if (!value) return null;
 
-  return Math.round(
-    ((parseDone + extractDone + aiDone + renderDone) / 4) * 100,
-  );
+  // SQLite CURRENT_TIMESTAMP is typically "YYYY-MM-DD HH:MM:SS" in UTC.
+  // Browsers can interpret this as local time, causing future timestamps.
+  const sqliteUtcPattern = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
+  const normalized = sqliteUtcPattern.test(value)
+    ? `${value.replace(" ", "T")}Z`
+    : value;
+
+  const parsed = Date.parse(normalized);
+  return Number.isNaN(parsed) ? null : parsed;
 }
 
 function CaseCardComponent({
@@ -113,10 +145,38 @@ function CaseCardComponent({
   onSubmitAiConfig,
 }: CaseCardProps) {
   const stats = useMemo(() => computeStats(caseFiles), [caseFiles]);
-  const progressPct = useMemo(
-    () => computePipelineProgress(caseFiles),
+  const [nowMs, setNowMs] = useState(() => Date.now());
+  const [displayedPhaseProgress, setDisplayedPhaseProgress] = useState({
+    parse: 0,
+    extract: 0,
+    ai: 0,
+    render: 0,
+  });
+
+  const hasActiveWork = useMemo(
+    () =>
+      caseFiles.some(
+        (f) =>
+          ["scanning_metadata", "pending_analysis", "processing"].includes(
+            f.status,
+          ) ||
+          f.status === "extracting" ||
+          ["processing", "batch_ready"].includes(f.ai_status || "") ||
+          f.pdf_status === "processing",
+      ),
     [caseFiles],
   );
+
+  useEffect(() => {
+    if (!hasActiveWork) return;
+
+    const timer = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+
+    return () => clearInterval(timer);
+  }, [hasActiveWork]);
+
   const phaseProgress = useMemo(() => {
     if (caseFiles.length === 0) {
       return { parse: 0, extract: 0, ai: 0, render: 0 };
@@ -124,39 +184,165 @@ function CaseCardComponent({
 
     const total = caseFiles.length;
 
-    const parse = Math.round(
-      (caseFiles.filter((f) =>
-        ["analyzed", "extracting", "completed", "failed"].includes(f.status),
-      ).length /
-        total) *
-        100,
+    const parseSamples = caseFiles
+      .map((f) => (f.metadata_duration_ms || 0) + (f.analyze_duration_ms || 0))
+      .filter((ms) => ms > 0);
+    const extractSamples = caseFiles
+      .map((f) => f.extract_duration_ms || 0)
+      .filter((ms) => ms > 0);
+    const aiSamples = caseFiles
+      .map((f) => f.ai_duration_ms || 0)
+      .filter((ms) => ms > 0);
+    const renderSamples = caseFiles
+      .map((f) => f.pdf_duration_ms || 0)
+      .filter((ms) => ms > 0);
+
+    const parseTargetMs = tunedDuration(parseSamples, DEFAULT_PARSE_MS, 0.5, 3);
+    const extractTargetMs = tunedDuration(
+      extractSamples,
+      DEFAULT_EXTRACT_MS,
+      0.5,
+      3,
+    );
+    const aiTargetMs = tunedDuration(aiSamples, DEFAULT_AI_MS, 0.5, 4);
+    const renderTargetMs = tunedDuration(
+      renderSamples,
+      DEFAULT_RENDER_MS,
+      0.5,
+      3,
     );
 
-    const extract = Math.round(
-      (caseFiles.filter((f) => ["completed", "failed"].includes(f.status))
-        .length /
-        total) *
-        100,
-    );
+    const parseSum = caseFiles.reduce((sum, file) => {
+      if (
+        ["analyzed", "extracting", "completed", "failed"].includes(file.status)
+      ) {
+        return sum + 1;
+      }
 
-    const ai = Math.round(
-      (caseFiles.filter((f) =>
-        ["completed", "failed"].includes(f.ai_status || ""),
-      ).length /
-        total) *
-        100,
-    );
+      if (
+        ["scanning_metadata", "pending_analysis", "processing"].includes(
+          file.status,
+        )
+      ) {
+        const createdAtMs = toTimestampMs(file.created_at);
+        const parseStartEstimate =
+          createdAtMs || nowMs - Math.floor(parseTargetMs * 0.2);
+        const parseStartMs = Math.min(parseStartEstimate, nowMs);
+        const elapsedMs = Math.max(0, nowMs - parseStartMs);
+        return (
+          sum +
+          activeProgress(
+            elapsedMs,
+            parseTargetMs,
+            ACTIVE_MIN_PROGRESS_PARSE_EXTRACT,
+          )
+        );
+      }
 
-    const render = Math.round(
-      (caseFiles.filter((f) =>
-        ["completed", "failed"].includes(f.pdf_status || ""),
-      ).length /
-        total) *
-        100,
-    );
+      return sum;
+    }, 0);
+
+    const extractSum = caseFiles.reduce((sum, file) => {
+      if (["completed", "failed"].includes(file.status)) {
+        return sum + 1;
+      }
+
+      if (file.status === "extracting") {
+        const createdAtMs = toTimestampMs(file.created_at);
+
+        const knownParseMs =
+          (file.metadata_duration_ms || 0) + (file.analyze_duration_ms || 0);
+        const parseMsForOffset =
+          knownParseMs > 0 ? knownParseMs : parseTargetMs;
+        const extractStartEstimate = createdAtMs
+          ? createdAtMs + parseMsForOffset
+          : nowMs - Math.floor(extractTargetMs * 0.2);
+        const extractStartMs = Math.min(extractStartEstimate, nowMs);
+        const elapsedMs = Math.max(0, nowMs - extractStartMs);
+
+        return (
+          sum +
+          activeProgress(
+            elapsedMs,
+            extractTargetMs,
+            ACTIVE_MIN_PROGRESS_PARSE_EXTRACT,
+          )
+        );
+      }
+
+      return sum;
+    }, 0);
+
+    const aiSum = caseFiles.reduce((sum, file) => {
+      if (["completed", "failed"].includes(file.ai_status || "")) {
+        return sum + 1;
+      }
+
+      if (["processing", "batch_ready"].includes(file.ai_status || "")) {
+        const createdAtMs = toTimestampMs(file.created_at);
+        const aiStartEstimate =
+          file.ai_started_at ||
+          createdAtMs ||
+          nowMs - Math.floor(aiTargetMs * 0.2);
+        const aiStartMs = Math.min(aiStartEstimate, nowMs);
+
+        const elapsedMs = Math.max(0, nowMs - aiStartMs);
+        return (
+          sum +
+          activeProgress(elapsedMs, aiTargetMs, ACTIVE_MIN_PROGRESS_AI_RENDER)
+        );
+      }
+
+      return sum;
+    }, 0);
+
+    const renderSum = caseFiles.reduce((sum, file) => {
+      if (["completed", "failed"].includes(file.pdf_status || "")) {
+        return sum + 1;
+      }
+
+      if (file.pdf_status === "processing") {
+        const createdAtMs = toTimestampMs(file.created_at);
+        const parseMs =
+          (file.metadata_duration_ms || 0) + (file.analyze_duration_ms || 0) ||
+          parseTargetMs;
+        const extractMs = file.extract_duration_ms || extractTargetMs;
+        const aiMs = file.ai_duration_ms || aiTargetMs;
+
+        const renderStartEstimate = createdAtMs
+          ? createdAtMs + parseMs + extractMs + aiMs
+          : nowMs - Math.floor(renderTargetMs * 0.2);
+        const renderStartMs = Math.min(renderStartEstimate, nowMs);
+        const elapsedMs = Math.max(0, nowMs - renderStartMs);
+        return (
+          sum +
+          activeProgress(
+            elapsedMs,
+            renderTargetMs,
+            ACTIVE_MIN_PROGRESS_AI_RENDER,
+          )
+        );
+      }
+
+      return sum;
+    }, 0);
+
+    const parse = Math.round((parseSum / total) * 100);
+    const extract = Math.round((extractSum / total) * 100);
+    const ai = Math.round((aiSum / total) * 100);
+    const render = Math.round((renderSum / total) * 100);
 
     return { parse, extract, ai, render };
-  }, [caseFiles]);
+  }, [caseFiles, nowMs]);
+
+  useEffect(() => {
+    setDisplayedPhaseProgress((prev) => ({
+      parse: smoothProgress(prev.parse, phaseProgress.parse),
+      extract: smoothProgress(prev.extract, phaseProgress.extract),
+      ai: smoothProgress(prev.ai, phaseProgress.ai),
+      render: smoothProgress(prev.render, phaseProgress.render),
+    }));
+  }, [phaseProgress]);
 
   const filesToSync = caseFiles
     .filter((f) => f.ai_status === "batch_ready")
@@ -173,11 +359,15 @@ function CaseCardComponent({
   const isParsePhase = caseFiles.some((f) =>
     ["scanning_metadata", "pending_analysis", "processing"].includes(f.status),
   );
+  const parseStarted = caseFiles.some((f) => f.status !== "pending");
   const parseDone = caseFiles.every((f) =>
     ["analyzed", "extracting", "completed", "failed"].includes(f.status),
   );
 
   const isExtractPhase = caseFiles.some((f) => f.status === "extracting");
+  const extractStarted = caseFiles.some((f) =>
+    ["extracting", "completed", "failed"].includes(f.status),
+  );
   const extractDone = caseFiles.every((f) =>
     ["completed", "failed"].includes(f.status),
   );
@@ -185,11 +375,19 @@ function CaseCardComponent({
   const isAiPhase = caseFiles.some((f) =>
     ["batch_ready", "processing"].includes(f.ai_status || ""),
   );
+  const aiStarted = caseFiles.some((f) =>
+    ["batch_ready", "processing", "completed", "failed"].includes(
+      f.ai_status || "",
+    ),
+  );
   const aiDone =
     extractDone &&
     caseFiles.every((f) => ["completed", "failed"].includes(f.ai_status || ""));
 
   const isPdfPhase = caseFiles.some((f) => f.pdf_status === "processing");
+  const pdfStarted = caseFiles.some((f) =>
+    ["processing", "completed", "failed"].includes(f.pdf_status || ""),
+  );
   const pdfDone =
     aiDone &&
     caseFiles.every((f) =>
@@ -352,24 +550,28 @@ function CaseCardComponent({
       {/* 4-Step Technical Phase Indicators */}
       <PhaseIndicators
         parse={{
+          hasStarted: parseStarted,
           isProcessing: isParsePhase,
           isDone: parseDone,
-          progressPct: phaseProgress.parse,
+          progressPct: displayedPhaseProgress.parse,
         }}
         extract={{
+          hasStarted: extractStarted,
           isProcessing: isExtractPhase,
           isDone: extractDone,
-          progressPct: phaseProgress.extract,
+          progressPct: displayedPhaseProgress.extract,
         }}
         ai={{
+          hasStarted: aiStarted,
           isProcessing: isAiPhase || filesToSync.length > 0,
           isDone: aiDone,
-          progressPct: phaseProgress.ai,
+          progressPct: displayedPhaseProgress.ai,
         }}
         render={{
+          hasStarted: pdfStarted,
           isProcessing: isPdfPhase,
           isDone: pdfDone,
-          progressPct: phaseProgress.render,
+          progressPct: displayedPhaseProgress.render,
         }}
       />
 
@@ -380,14 +582,6 @@ function CaseCardComponent({
         isOpen={isMetricsOpen}
         onToggle={onToggleMetrics}
       />
-
-      {/* Integrated progress border */}
-      <div className="pointer-events-none absolute inset-x-0 bottom-0 h-1 bg-slate-700/70">
-        <div
-          className="h-full rounded-br-4xl rounded-bl-4xl bg-linear-to-r from-cyan-400 via-teal-400 to-emerald-400 transition-all duration-500"
-          style={{ width: `${progressPct}%` }}
-        />
-      </div>
     </div>
   );
 }
