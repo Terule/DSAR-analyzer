@@ -250,6 +250,24 @@ async function runWeasyPrint(htmlPath: string, pdfPath: string) {
     120_000,
     "WeasyPrint execution",
   );
+
+  // WeasyPrint can exit 0 yet leave an empty file when killed mid-write or on
+  // certain edge cases. Reject empty output so callers don't ship 0-byte PDFs.
+  let sizeOk = false;
+  try {
+    sizeOk = fs.existsSync(pdfPath) && fs.statSync(pdfPath).size > 0;
+  } catch {
+    sizeOk = false;
+  }
+
+  if (!sizeOk) {
+    try {
+      fs.rmSync(pdfPath, { force: true });
+    } catch {
+      // Ignore cleanup races.
+    }
+    throw new Error("WeasyPrint produced an empty PDF");
+  }
 }
 
 async function extractZipAttachment(zipPath: string, outputDir: string) {
