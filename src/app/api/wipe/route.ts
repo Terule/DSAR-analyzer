@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
@@ -5,6 +6,13 @@ import { db } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
+// Kill any running files-worker for a given files row so a wipe/reset never
+// leaves an orphaned detached worker writing progress counters to the DB.
+function killFilesWorker(fileId: string): void {
+  execFile("pkill", ["-9", "-f", `files-worker.ts ${fileId}`], () => {
+    // pkill exits non-zero when no process matches — safe to ignore.
+  });
+}
 export async function POST(request: Request) {
   try {
     const { caseName, fileIds } = await request.json();
@@ -35,7 +43,13 @@ export async function POST(request: Request) {
       ...fileIds,
     );
 
-    // 2. Reset the parent files completely back to zero
+    // 1b. Kill any running Files worker for these rows before resetting, so it
+    // can't keep writing progress counters after the wipe (orphan prevention).
+    for (const file of filesToReset) {
+      killFilesWorker(file.id);
+    }
+
+    // 2a. Reset PST rows completely back to zero.
     db.prepare(`
       UPDATE processed_files 
       SET status = 'pending', 
@@ -52,6 +66,8 @@ export async function POST(request: Request) {
           estimated_tokens = 0,
           ai_approved_count = 0,
           ai_discarded_count = 0,
+          ai_batches_total = 0,
+          ai_batches_done = 0,
           metadata_duration_ms = 0,
           analyze_duration_ms = 0,
           extract_duration_ms = 0,
@@ -59,7 +75,26 @@ export async function POST(request: Request) {
           pdf_duration_ms = 0,
           ai_started_at = NULL,
           batch_id = NULL
-      WHERE id IN (${placeholders})
+      WHERE id IN (${placeholders}) AND kind != 'files'
+    `).run(...fileIds);
+
+    // 2b. Reset Files rows: keep them inert to the email phases (all email
+    // columns 'completed') and reset only the Files-phase status/metrics.
+    db.prepare(`
+      UPDATE processed_files
+      SET status = 'completed',
+          ai_status = 'completed',
+          pdf_status = 'completed',
+          subject_name = NULL,
+          subject_email = NULL,
+          subject_aliases = NULL,
+          files_status = 'pending',
+          files_processed = 0,
+          files_skipped = 0,
+          files_duplicates = 0,
+          files_duration_ms = 0,
+          files_started_at = NULL
+      WHERE id IN (${placeholders}) AND kind = 'files'
     `).run(...fileIds);
 
     // 3. Wipe the hard drive working folders for these specific files
@@ -75,6 +110,12 @@ export async function POST(request: Request) {
       let cleanRelativePath = path.dirname(relativeSystemPath);
       if (cleanRelativePath === "." || cleanRelativePath === "") {
         cleanRelativePath = path.parse(relativeSystemPath).name;
+      }
+
+      // Normalize to the [case]/[request] deliverables root regardless of
+      // whether the row is a PST file (.../PST/x.pst) or a Files batch (.../Files).
+      if (path.basename(cleanRelativePath).toLowerCase() === "pst") {
+        cleanRelativePath = path.dirname(cleanRelativePath);
       }
 
       const targetFolder = path.join(extractedPath, cleanRelativePath);
