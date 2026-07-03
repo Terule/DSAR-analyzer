@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
+import { getCasePstFileIds, markCaseAiCompleted } from "./case-utils";
 import { db } from "./db";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -13,8 +14,6 @@ export const DEFAULT_MAX_TOKENS_PER_BATCH = 900_000;
 const MAX_COMPLETION_TOKENS_PER_REQUEST = 150;
 const CHAT_MESSAGE_OVERHEAD_TOKENS = 12;
 const REQUEST_OVERHEAD_TOKENS = 24;
-const DISCARD_SUBJECT_RE =
-  /(?<![A-Za-z0-9])(Confidential|Confidentiality|Privileged|CROs?)(?![A-Za-z0-9])/i;
 const RESPONSE_FORMAT = {
   type: "json_schema",
   json_schema: {
@@ -37,18 +36,47 @@ function countTokens(text: string): number {
   return TOKENIZER.encode(text).length;
 }
 
-function estimateRequestTokens(
-  systemPrompt: string,
-  userContent: string,
-): number {
-  return (
-    countTokens(systemPrompt) +
-    countTokens(userContent) +
-    countTokens(JSON.stringify(RESPONSE_FORMAT)) +
-    CHAT_MESSAGE_OVERHEAD_TOKENS +
-    REQUEST_OVERHEAD_TOKENS +
-    MAX_COMPLETION_TOKENS_PER_REQUEST
-  );
+// Cache of per-email userContent token counts, keyed by email hash. A payload's
+// token count is content-stable, so this avoids re-encoding the same payload
+// across successive batch chunks within a run.
+const userContentTokenCache = new Map<string, number>();
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+// Broad "is the subject mentioned at all" token set: full name, first/last name
+// parts, aliases, email and its local-part. Used only to skip emails that don't
+// reference the subject ANYWHERE (headers, body or chain) — a guaranteed discard
+// that GPT would also reject, so we save the API call.
+function buildSubjectSearchTokens(criteria: {
+  name: string;
+  email: string;
+  aliases: string[];
+}): string[] {
+  const tokens = new Set<string>();
+  const name = (criteria.name || "").trim().toLowerCase();
+  if (name) {
+    tokens.add(name);
+    const parts = name.split(/\s+/).filter(Boolean);
+    if (parts.length > 0) {
+      const first = parts[0];
+      const last = parts[parts.length - 1];
+      if (first.length >= 3) tokens.add(first);
+      if (last.length >= 3) tokens.add(last);
+    }
+  }
+  for (const alias of criteria.aliases || []) {
+    const a = alias.trim().toLowerCase();
+    if (a) tokens.add(a);
+  }
+  const email = (criteria.email || "").trim().toLowerCase();
+  if (email) {
+    tokens.add(email);
+    const local = email.split("@")[0];
+    if (local && local.length >= 3) tokens.add(local);
+  }
+  return Array.from(tokens).filter(Boolean);
 }
 
 export async function generateBatchFile(
@@ -109,6 +137,11 @@ export async function generateBatchFile(
   const batchDir = path.join(process.cwd(), "batches");
   if (!fs.existsSync(batchDir)) fs.mkdirSync(batchDir, { recursive: true });
 
+  // AI is case-level: audit the emails of EVERY PST file in this request in one
+  // run (the JSON folder is shared). `fileId` is the coordinator row that holds
+  // the live batch state and aggregate AI counters.
+  const casePstIds = getCasePstFileIds(fileId);
+
   const allFiles = fs
     .readdirSync(jsonFolder)
     .filter((f) => f.endsWith(".json"));
@@ -116,9 +149,9 @@ export async function generateBatchFile(
   const unprocessedRecords = db
     .prepare(`
     SELECT email_hash FROM emails 
-    WHERE file_id = ? AND is_duplicate = 0 AND ai_decision IS NULL
+    WHERE file_id IN (${casePstIds.map(() => "?").join(",")}) AND is_duplicate = 0 AND ai_decision IS NULL
   `)
-    .all(fileId) as { email_hash: string }[];
+    .all(...casePstIds) as { email_hash: string }[];
 
   const unprocessedHashes = new Set(
     unprocessedRecords.map((r) => r.email_hash),
@@ -164,6 +197,22 @@ Important: token boundary match only. Do NOT treat substrings like "MICROSOFT" a
   If no strong signal is present -> discard.
 
 Set needs_second_pass = true only when decision is "discard" and attachments may still contain relevant evidence (especially attached emails/documents).`;
+
+  // Precompute the constant per-request token overhead ONCE (previously the
+  // system prompt was re-encoded for every email) and the subject mention
+  // patterns used by the cheap pre-AI filter.
+  const fixedOverheadTokens =
+    countTokens(systemPrompt) +
+    countTokens(JSON.stringify(RESPONSE_FORMAT)) +
+    CHAT_MESSAGE_OVERHEAD_TOKENS +
+    REQUEST_OVERHEAD_TOKENS +
+    MAX_COMPLETION_TOKENS_PER_REQUEST;
+
+  const subjectTokens = buildSubjectSearchTokens(subjectCriteria);
+  const subjectPatterns = subjectTokens.map(
+    (t) => new RegExp(`(^|[^a-z0-9])${escapeRegExp(t)}($|[^a-z0-9])`, "i"),
+  );
+
   const batchFilePath = path.join(
     batchDir,
     `batch_${fileId}_${Date.now()}.jsonl`,
@@ -180,21 +229,30 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
 
     const filePath = path.join(jsonFolder, file);
     const content = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    const userContent = JSON.stringify(content);
 
-    // Pre-filter: Rule 1 — subject-based immediate discard (no AI needed)
-    const subject: string = content?.first_email?.subject ?? "";
-    if (DISCARD_SUBJECT_RE.test(subject)) {
+    // Pre-filter: skip the AI call entirely when the subject is not referenced
+    // ANYWHERE in the payload (headers, body or chain). GPT would discard these
+    // anyway, so this saves the API cost with no change in outcome.
+    if (
+      subjectPatterns.length > 0 &&
+      !subjectPatterns.some((re) => re.test(userContent))
+    ) {
       db.prepare(
-        "UPDATE emails SET ai_decision = 'discard', ai_reason = 'Pre-filter: Subject contains privileged/confidential keyword' WHERE email_hash = ? AND file_id = ?",
-      ).run(hash, fileId);
+        "UPDATE emails SET ai_decision = 'discard', ai_reason = 'System Discard: Data subject not mentioned' WHERE email_hash = ?",
+      ).run(hash);
       db.prepare(
         "UPDATE processed_files SET ai_discarded_count = ai_discarded_count + 1 WHERE id = ?",
       ).run(fileId);
       continue;
     }
 
-    const userContent = JSON.stringify(content);
-    const estimatedTokens = estimateRequestTokens(systemPrompt, userContent);
+    let userTokens = userContentTokenCache.get(hash);
+    if (userTokens === undefined) {
+      userTokens = countTokens(userContent);
+      userContentTokenCache.set(hash, userTokens);
+    }
+    const estimatedTokens = fixedOverheadTokens + userTokens;
 
     if (estimatedTokens > maxTokensPerBatch) {
       console.log(
@@ -203,8 +261,8 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
 
       // 🚨 CRITICAL FIX: Ensure skipped oversized files are marked as discarded so they don't infinite-loop!
       db.prepare(
-        "UPDATE emails SET ai_decision = 'discard', ai_reason = 'System Discard: Exceeded max batch token limit' WHERE email_hash = ? AND file_id = ?",
-      ).run(hash, fileId);
+        "UPDATE emails SET ai_decision = 'discard', ai_reason = 'System Discard: Exceeded max batch token limit' WHERE email_hash = ?",
+      ).run(hash);
 
       db.prepare(
         "UPDATE processed_files SET ai_discarded_count = ai_discarded_count + 1 WHERE id = ?",
@@ -249,9 +307,7 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
       typeof row.ai_started_at === "number"
         ? Math.max(0, Date.now() - row.ai_started_at)
         : 0;
-    db.prepare(
-      "UPDATE processed_files SET ai_status = 'completed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
-    ).run(totalAiMs, fileId);
+    markCaseAiCompleted(fileId, totalAiMs);
     if (fs.existsSync(batchFilePath)) fs.unlinkSync(batchFilePath);
     return;
   }

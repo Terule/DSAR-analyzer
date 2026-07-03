@@ -20,6 +20,8 @@ export interface StagedFile {
   ai_status?: "pending" | "processing" | "completed" | "failed" | "batch_ready";
   ai_approved_count?: number;
   ai_discarded_count?: number;
+  ai_batches_total?: number;
+  ai_batches_done?: number;
   pdf_status?: "pending" | "processing" | "completed" | "failed";
 
   metadata_duration_ms?: number;
@@ -29,6 +31,17 @@ export interface StagedFile {
   ai_duration_ms?: number;
   pdf_duration_ms?: number;
   created_at?: string;
+
+  // Merged pipeline: 'pst' rows go through the email phases; 'files' rows are a
+  // single Files (Teams/docs) batch processed by the standalone processor.
+  kind?: "pst" | "files";
+  files_status?: "pending" | "processing" | "completed" | "failed";
+  files_total?: number;
+  files_processed?: number;
+  files_skipped?: number;
+  files_duplicates?: number;
+  files_duration_ms?: number;
+  files_started_at?: number;
 }
 
 export interface AiConfig {
@@ -51,8 +64,6 @@ export interface CaseStats {
   aiTime: number;
   pdfTime: number;
 }
-
-export type TabKey = "pst" | "standalone";
 
 export type NotificationType = "info" | "success" | "error";
 

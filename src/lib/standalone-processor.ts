@@ -7,9 +7,12 @@ import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { simpleParser } from "mailparser";
 import { normalizeHtmlForPdf } from "./converter";
+import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
 
 export interface StandaloneBatchParams {
-  caseName: string;
+  inputDir: string;
+  messagesDir: string;
+  documentsDir: string;
   subjectCriteria: { name: string; aliases?: string[] };
 }
 
@@ -356,6 +359,33 @@ function textContainsAnyToken(text: string, tokens: string[]): boolean {
   });
 }
 
+// Normalizes visible text to a stable dedup key by dropping everything except
+// letters and digits, so re-exports that differ only in markup, whitespace,
+// punctuation, or element ids collapse to the same key.
+function normalizedContentKey(text: string): string {
+  return text.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// Content-level dedup shared by message handlers. Returns true (and does not
+// record) when the content is too short to be a reliable signal or when it has
+// already been seen; records and returns false for new content. The floor is
+// deliberately low so short, byte-identical chat acks ("thanks", "approved")
+// re-exported many times collapse to a single deliverable.
+function isDuplicateContent(
+  text: string,
+  processedHashes: Set<string>,
+  minLength = 8,
+): boolean {
+  const key = normalizedContentKey(text);
+  if (key.length < minLength) return false;
+
+  const hash = crypto.createHash("sha256").update(key).digest("hex");
+  if (processedHashes.has(hash)) return true;
+
+  processedHashes.add(hash);
+  return false;
+}
+
 function isAuthoredBySubject(
   plainText: string,
   subjectTokens: string[],
@@ -657,15 +687,24 @@ async function renderHtmlToPdfWeasyPrint(
   });
 }
 
+export interface StandaloneBatchProgress {
+  processed: number;
+  skipped: number;
+  duplicates: number;
+  index: number;
+  total: number;
+}
+
 export async function runStandaloneBatch(
   params: StandaloneBatchParams,
+  onProgress?: (progress: StandaloneBatchProgress) => void,
 ): Promise<StandaloneBatchResult> {
-  const { caseName, subjectCriteria } = params;
+  const { inputDir, messagesDir, documentsDir, subjectCriteria } = params;
 
-  if (!caseName || !subjectCriteria?.name) {
+  if (!inputDir || !subjectCriteria?.name) {
     return {
       success: false,
-      error: "Missing caseName or subjectCriteria.name",
+      error: "Missing inputDir or subjectCriteria.name",
     };
   }
 
@@ -679,34 +718,18 @@ export async function runStandaloneBatch(
     aliases,
   );
 
-  const exclusions = ["confidential", "privileged", "cro", "cros"];
+  // Shared privileged/confidential keyword filter (see src/lib/exclusions.ts)
+  // so the Files pipeline stays in lockstep with the PST pipeline.
+  const exclusionsRegex = PRIVILEGED_KEYWORDS_RE;
 
-  // Strict word boundaries prevent "Microsoft" from triggering the "cro" exclusion!
-  const exclusionsRegex = new RegExp(`\\b(${exclusions.join("|")})\\b`, "i");
-
-  // 2. Define Paths
-  const stagingBase =
-    process.env.STAGING_PATH || "/Users/rgomes/Projects/staging-area";
-  const standaloneStagingDir = path.join(stagingBase, "standalone", caseName);
-
-  // Output paths flattened cleanly into Messages and Documents
-  const outputBaseDir =
-    process.env.EXTRACTED_PATH || "/Users/rgomes/Projects/extracted_emails";
-  const deliverablesDirMessages = path.join(
-    outputBaseDir,
-    caseName,
-    "Messages",
-  );
-  const deliverablesDirDocuments = path.join(
-    outputBaseDir,
-    caseName,
-    "Documents",
-  );
+  const standaloneStagingDir = inputDir;
+  const deliverablesDirMessages = messagesDir;
+  const deliverablesDirDocuments = documentsDir;
 
   if (!fs.existsSync(standaloneStagingDir)) {
     return {
       success: false,
-      error: `No standalone directory found at ${standaloneStagingDir}`,
+      error: `No input directory found at ${standaloneStagingDir}`,
     };
   }
 
@@ -751,6 +774,14 @@ export async function runStandaloneBatch(
     console.log(
       `[Standalone Engine] (${fileIndex}/${allFiles.length}) Processing: ${file}`,
     );
+
+    onProgress?.({
+      processed: processedCount,
+      skipped: skippedCount,
+      duplicates: duplicatesCount,
+      index: fileIndex,
+      total: allFiles.length,
+    });
 
     try {
       // Yield between files so the worker process stays cooperative.
@@ -909,6 +940,18 @@ export async function runStandaloneBatch(
             `[Standalone Filter] Discarded HTML ${file}: Missing subject name in body and no direct reply signal.`,
           );
         } else {
+          // Content-level dedup for Teams messages. Byte-identical files are
+          // already caught by the SHA256 file hash, but re-exports of the same
+          // message usually differ only in markup/whitespace/ids.
+          if (isDuplicateContent(plainText, processedHashes)) {
+            console.log(
+              `[Standalone Filter] Discarded Duplicate HTML ${file} (Content Match).`,
+            );
+            duplicatesCount++;
+            skippedCount++;
+            continue;
+          }
+
           try {
             await withTimeout(
               renderHtmlToPdfWeasyPrint(
@@ -979,10 +1022,31 @@ export async function runStandaloneBatch(
           const pdfOutput = path.join(targetDir, `${seqName}.pdf`);
 
           if (ext === ".eml") {
+            let parsed: Awaited<ReturnType<typeof simpleParser>> | null = null;
             try {
-              const parsed = await withTimeout(simpleParser(buffer), file);
-              const emailBody =
-                parsed.html || parsed.textAsHtml || parsed.text || rawText;
+              parsed = await withTimeout(simpleParser(buffer), file);
+            } catch {
+              parsed = null;
+            }
+
+            // Dedup on a clean key built from the envelope + body text so that
+            // re-exports of the same email collapse even if raw bytes differ.
+            const dedupSource = parsed
+              ? `${parsed.subject || ""} ${parsed.from?.text || ""} ${parsed.text || parsed.html || ""}`
+              : rawText;
+            if (isDuplicateContent(dedupSource, processedHashes)) {
+              console.log(
+                `[Standalone Filter] Discarded Duplicate EML ${file} (Content Match).`,
+              );
+              duplicatesCount++;
+              skippedCount++;
+              continue;
+            }
+
+            try {
+              const emailBody = parsed
+                ? parsed.html || parsed.textAsHtml || parsed.text || rawText
+                : rawText;
               await withTimeout(
                 renderHtmlToPdfWeasyPrint(
                   normalizeHtmlForPdf(String(emailBody)),
@@ -991,8 +1055,6 @@ export async function runStandaloneBatch(
                 ),
                 file,
               );
-              success = true;
-              producedPath = pdfOutput;
             } catch (_e) {
               // Fallback for malformed EML payloads.
               await withTimeout(
@@ -1003,11 +1065,20 @@ export async function runStandaloneBatch(
                 ),
                 file,
               );
-              success = true;
-              producedPath = pdfOutput;
             }
+            success = true;
+            producedPath = pdfOutput;
           } else {
-            // MSG parsing is inconsistent across archives, so render extracted text safely.
+            // MSG parsing is inconsistent across archives, so dedup and render
+            // from the extracted raw text.
+            if (isDuplicateContent(rawText, processedHashes)) {
+              console.log(
+                `[Standalone Filter] Discarded Duplicate MSG ${file} (Content Match).`,
+              );
+              duplicatesCount++;
+              skippedCount++;
+              continue;
+            }
             await withTimeout(
               renderHtmlToPdfWeasyPrint(
                 buildEmailHtml(rawText, file),

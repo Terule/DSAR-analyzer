@@ -11,7 +11,8 @@ import {
 } from "mailparser";
 import mammoth from "mammoth";
 import * as xlsx from "xlsx";
-import { db } from "./db";
+import { getCasePstFileIds } from "./case-utils";
+import { db, withSqliteBusyRetry } from "./db";
 
 const FONT_FOLDER =
   process.env.PDF_FONT_DIR || path.join(process.cwd(), "fonts");
@@ -630,17 +631,38 @@ export async function convertToPdfBatch(
   if (cleanRelativePath === "." || cleanRelativePath === "")
     cleanRelativePath = path.parse(relativeSystemPath).name;
 
-  const targetFolder = path.join(outputBaseDir, cleanRelativePath);
-  const uniqueEmailsFolder = path.join(targetFolder, ".unique-emails");
+  // The exporter, AI batch generator and batch worker all write working folders
+  // (.unique-emails/selected etc.) under the UN-stripped path
+  // [case]/[request]/PST/.unique-emails. Only the final deliverables (Emails)
+  // move up to [case]/[request]/Emails. Read selected from the working path,
+  // write PDFs to the deliverable path — otherwise the render silently fails
+  // because it can't find the selected emails.
+  const workingFolder = path.join(outputBaseDir, cleanRelativePath);
+
+  let deliverableRelativePath = cleanRelativePath;
+  if (path.basename(deliverableRelativePath).toLowerCase() === "pst")
+    deliverableRelativePath = path.dirname(deliverableRelativePath);
+  const targetFolder = path.join(outputBaseDir, deliverableRelativePath);
+
+  const uniqueEmailsFolder = path.join(workingFolder, ".unique-emails");
   const selectedDir = path.join(uniqueEmailsFolder, "selected");
   const deliverablesDir = path.join(targetFolder, "Emails");
   const logsDir = path.join(targetFolder, ".logs");
 
   if (!fs.existsSync(selectedDir)) {
+    console.error(
+      `[Converter] Render failed for ${fileId}: selected emails folder not found at ${selectedDir}`,
+    );
     const durationMs = Date.now() - startTime;
-    db.prepare(
-      "UPDATE processed_files SET pdf_status = 'failed', pdf_duration_ms = ? WHERE id = ?",
-    ).run(durationMs, fileId);
+    await withSqliteBusyRetry(
+      () =>
+        db
+          .prepare(
+            "UPDATE processed_files SET pdf_status = 'failed', pdf_duration_ms = ? WHERE id = ?",
+          )
+          .run(durationMs, fileId),
+      "mark pdf failed (no selected dir)",
+    );
     return;
   }
 
@@ -648,9 +670,15 @@ export async function convertToPdfBatch(
     fs.mkdirSync(deliverablesDir, { recursive: true });
   if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
 
-  db.prepare(
-    "UPDATE processed_files SET pdf_status = 'processing' WHERE id = ?",
-  ).run(fileId);
+  await withSqliteBusyRetry(
+    () =>
+      db
+        .prepare(
+          "UPDATE processed_files SET pdf_status = 'processing' WHERE id = ?",
+        )
+        .run(fileId),
+    "mark pdf processing",
+  );
 
   try {
     const emlFiles = fs
@@ -814,13 +842,39 @@ export async function convertToPdfBatch(
     }
 
     const durationMs = Date.now() - startTime;
-    db.prepare(
-      "UPDATE processed_files SET pdf_status = 'completed', pdf_duration_ms = ? WHERE id = ?",
-    ).run(durationMs, fileId);
-  } catch (_error) {
+    // Render covers the whole case's shared selected/ folder, so mark every PST
+    // row in the case completed in one pass. Record the real duration only on
+    // the row that actually rendered (0 on siblings) so the telemetry sum stays
+    // accurate.
+    const caseIds = getCasePstFileIds(fileId);
+    const placeholders = caseIds.map(() => "?").join(",");
+    await withSqliteBusyRetry(
+      () =>
+        db
+          .prepare(
+            `UPDATE processed_files
+             SET pdf_status = 'completed',
+                 pdf_duration_ms = CASE WHEN id = ? THEN ? ELSE 0 END
+             WHERE id IN (${placeholders})`,
+          )
+          .run(fileId, durationMs, ...caseIds),
+      "mark pdf completed (case)",
+    );
+  } catch (error) {
+    console.error(
+      `[Converter] Render failed for ${fileId}: ${
+        error instanceof Error ? (error.stack ?? error.message) : String(error)
+      }`,
+    );
     const durationMs = Date.now() - startTime;
-    db.prepare(
-      "UPDATE processed_files SET pdf_status = 'failed', pdf_duration_ms = ? WHERE id = ?",
-    ).run(durationMs, fileId);
+    await withSqliteBusyRetry(
+      () =>
+        db
+          .prepare(
+            "UPDATE processed_files SET pdf_status = 'failed', pdf_duration_ms = ? WHERE id = ?",
+          )
+          .run(durationMs, fileId),
+      "mark pdf failed",
+    );
   }
 }

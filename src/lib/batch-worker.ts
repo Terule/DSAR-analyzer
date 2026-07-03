@@ -3,6 +3,12 @@ import fs from "node:fs";
 import path from "node:path";
 import OpenAI from "openai";
 import { DEFAULT_MAX_TOKENS_PER_BATCH, generateBatchFile } from "./ai";
+import {
+  getCasePstFileIds,
+  isCaseAiSettled,
+  markCaseAiCompleted,
+  markCaseAiFailed,
+} from "./case-utils";
 import { db } from "./db";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
@@ -348,13 +354,11 @@ export async function pollBatchStatus(fileId: string) {
           console.error("Could not download error file", e);
         }
       }
-      db.prepare(
-        "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
-      ).run(
+      markCaseAiFailed(
+        fileId,
         typeof row.ai_started_at === "number"
           ? Math.max(0, Date.now() - row.ai_started_at)
           : 0,
-        fileId,
       );
       return batch.status;
     }
@@ -395,7 +399,7 @@ export async function pollBatchStatus(fileId: string) {
         : [],
     };
     const updateStmt = db.prepare(
-      "UPDATE emails SET ai_decision = ?, ai_reason = ? WHERE email_hash = ? AND file_id = ?",
+      "UPDATE emails SET ai_decision = ?, ai_reason = ? WHERE email_hash = ?",
     );
 
     const pendingUpdates: Array<{
@@ -501,7 +505,7 @@ export async function pollBatchStatus(fileId: string) {
 
     db.transaction(() => {
       for (const item of pendingUpdates) {
-        updateStmt.run(item.decision, item.reason, item.emailHash, fileId);
+        updateStmt.run(item.decision, item.reason, item.emailHash);
       }
     })();
 
@@ -514,15 +518,28 @@ export async function pollBatchStatus(fileId: string) {
       WHERE id = ?
     `).run(keepCount, discardCount, fileId);
 
+    // One OpenAI batch (chunk) has been fully processed. Advance the batch
+    // counter used for UI progress; keep the total >= done in case the initial
+    // estimate was too low.
+    db.prepare(`
+      UPDATE processed_files
+      SET ai_batches_done = ai_batches_done + 1,
+          ai_batches_total = MAX(ai_batches_total, ai_batches_done + 1)
+      WHERE id = ?
+    `).run(fileId);
+
     console.log(
       `[AI Audit] file=${fileId} first_pass_keep=${auditStats.firstPassKeep} first_pass_discard=${auditStats.firstPassDiscard} weak_signal_overrides=${auditStats.weakSignalOverrides} second_pass_requested=${auditStats.secondPassRequested} second_pass_executed=${auditStats.secondPassExecuted} second_pass_rescued=${auditStats.secondPassRescued} invalid_outputs=${auditStats.invalidOutput} final_keep=${keepCount} final_discard=${discardCount}`,
     );
 
+    const casePstIds = getCasePstFileIds(fileId);
     const remaining = db
       .prepare(
-        "SELECT count(*) as c FROM emails WHERE file_id = ? AND is_duplicate = 0 AND ai_decision IS NULL",
+        `SELECT count(*) as c FROM emails
+         WHERE file_id IN (${casePstIds.map(() => "?").join(",")})
+           AND is_duplicate = 0 AND ai_decision IS NULL`,
       )
-      .get(fileId) as { c: number };
+      .get(...casePstIds) as { c: number };
 
     if (remaining.c > 0) {
       console.log(
@@ -553,32 +570,36 @@ export async function pollBatchStatus(fileId: string) {
           `[Batch Worker] Fatal error generating next chunk for ${fileId}:`,
           err,
         );
-        db.prepare(
-          "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
-        ).run(
+        markCaseAiFailed(
+          fileId,
           typeof row.ai_started_at === "number"
             ? Math.max(0, Date.now() - row.ai_started_at)
             : 0,
-          fileId,
         );
       });
     } else {
       console.log(
-        `[Batch Worker] All AI chunks completed successfully for file ${fileId}.`,
+        `[Batch Worker] All AI chunks completed successfully for case (coordinator ${fileId}).`,
       );
 
-      db.prepare(
-        "UPDATE processed_files SET ai_status = 'completed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
-      ).run(
+      markCaseAiCompleted(
+        fileId,
         typeof row.ai_started_at === "number"
           ? Math.max(0, Date.now() - row.ai_started_at)
           : 0,
-        fileId,
       );
 
       adaptiveTokenCapByFile.delete(fileId);
 
-      queuePdfWorker(fileId);
+      // Render is case-level (all PST files in a request share the selected/
+      // folder). The case is now settled, so kick off a single render pass.
+      if (isCaseAiSettled(fileId)) {
+        queuePdfWorker(fileId);
+      } else {
+        console.log(
+          `[Batch Worker] AI done for ${fileId}; waiting for sibling PST files before rendering the case.`,
+        );
+      }
     }
   } else if (isTokenLimitBatchFailure(batch)) {
     const errorText = getBatchErrorText(batch);
@@ -615,13 +636,11 @@ export async function pollBatchStatus(fileId: string) {
         err,
       );
       adaptiveTokenCapByFile.delete(fileId);
-      db.prepare(
-        "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
-      ).run(
+      markCaseAiFailed(
+        fileId,
         typeof row.ai_started_at === "number"
           ? Math.max(0, Date.now() - row.ai_started_at)
           : 0,
-        fileId,
       );
       return "failed";
     }
@@ -658,13 +677,11 @@ export async function pollBatchStatus(fileId: string) {
         err,
       );
       adaptiveTokenCapByFile.delete(fileId);
-      db.prepare(
-        "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
-      ).run(
+      markCaseAiFailed(
+        fileId,
         typeof row.ai_started_at === "number"
           ? Math.max(0, Date.now() - row.ai_started_at)
           : 0,
-        fileId,
       );
       return "failed";
     }
@@ -673,13 +690,11 @@ export async function pollBatchStatus(fileId: string) {
       `[Batch Worker] OpenAI batch execution failed/cancelled. Status: ${batch.status}`,
     );
     adaptiveTokenCapByFile.delete(fileId);
-    db.prepare(
-      "UPDATE processed_files SET ai_status = 'failed', batch_id = NULL, ai_duration_ms = ?, ai_started_at = NULL WHERE id = ?",
-    ).run(
+    markCaseAiFailed(
+      fileId,
       typeof row.ai_started_at === "number"
         ? Math.max(0, Date.now() - row.ai_started_at)
         : 0,
-      fileId,
     );
   }
 

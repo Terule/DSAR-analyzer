@@ -62,23 +62,13 @@ export async function wipeCase(
   return res.ok;
 }
 
-export interface StandalonePayload {
-  caseName: string;
-  subjectCriteria: { name: string; aliases: string[] };
-}
-
-export interface StandaloneResponse {
-  success?: boolean;
-  processedCount?: number;
-  skippedCount?: number;
-  message?: string;
-  error?: string;
-}
-
-export async function runStandalone(
-  payload: StandalonePayload,
-): Promise<{ ok: boolean; data: StandaloneResponse }> {
-  const res = await postJson("/api/standalone", payload);
-  const data: StandaloneResponse = await res.json();
-  return { ok: res.ok, data };
+export async function processFiles(
+  fileId: string,
+  subjectCriteria: AiConfig,
+): Promise<void> {
+  const res = await postJson("/api/files-process", { fileId, subjectCriteria });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error || "Failed to start Files processing.");
+  }
 }

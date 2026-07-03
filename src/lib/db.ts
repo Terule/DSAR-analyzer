@@ -16,6 +16,52 @@ if (!fs.existsSync(dbDir)) {
 // 3. Connect using Bun's native driver
 export const db = new Database(dbPath);
 
+// Multi-process safety pragmas (API routes + detached workers).
+// WAL allows concurrent readers while a writer is active; busy_timeout makes
+// transient write contention wait instead of failing immediately.
+db.exec("PRAGMA journal_mode = WAL;");
+db.exec("PRAGMA synchronous = NORMAL;");
+db.exec("PRAGMA busy_timeout = 10000;");
+
+// Shared SQLITE_BUSY handling. Multiple processes (API routes + detached
+// workers) write concurrently; a transient lock should be retried, not fatal.
+export function isSqliteBusyError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("sqlite_busy") ||
+    message.includes("database is locked") ||
+    message.includes("database is busy")
+  );
+}
+
+export async function withSqliteBusyRetry<T>(
+  op: () => T,
+  label: string,
+  attempts = 8,
+): Promise<T> {
+  let delayMs = 50;
+  let lastError: unknown;
+
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return op();
+    } catch (error) {
+      if (!isSqliteBusyError(error) || attempt === attempts) throw error;
+      lastError = error;
+      console.warn(
+        `[DB] SQLITE_BUSY during ${label} (attempt ${attempt}/${attempts}). Retrying in ${delayMs}ms...`,
+      );
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(delayMs * 2, 800);
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error(`SQLITE_BUSY retries exhausted during ${label}`);
+}
+
 // 4. Create the final Architecture Schema
 db.exec(`
   CREATE TABLE IF NOT EXISTS processed_files (
@@ -33,6 +79,8 @@ db.exec(`
     ai_status TEXT DEFAULT 'pending',
     ai_approved_count INTEGER DEFAULT 0,
     ai_discarded_count INTEGER DEFAULT 0,
+    ai_batches_total INTEGER DEFAULT 0,
+    ai_batches_done INTEGER DEFAULT 0,
     pdf_status TEXT DEFAULT 'pending',
     batch_id TEXT,
     subject_name TEXT,
@@ -43,7 +91,15 @@ db.exec(`
     extract_duration_ms INTEGER DEFAULT 0,
     ai_started_at INTEGER,
     ai_duration_ms INTEGER DEFAULT 0,
-    pdf_duration_ms INTEGER DEFAULT 0
+    pdf_duration_ms INTEGER DEFAULT 0,
+    kind TEXT DEFAULT 'pst',
+    files_status TEXT DEFAULT 'pending',
+    files_total INTEGER DEFAULT 0,
+    files_processed INTEGER DEFAULT 0,
+    files_skipped INTEGER DEFAULT 0,
+    files_duplicates INTEGER DEFAULT 0,
+    files_duration_ms INTEGER DEFAULT 0,
+    files_started_at INTEGER
   );
 
   CREATE TABLE IF NOT EXISTS emails (
@@ -99,6 +155,55 @@ try {
 } catch (_e) {}
 try {
   db.exec(
+    "ALTER TABLE processed_files ADD COLUMN ai_batches_total INTEGER DEFAULT 0",
+  );
+} catch (_e) {}
+try {
+  db.exec(
+    "ALTER TABLE processed_files ADD COLUMN ai_batches_done INTEGER DEFAULT 0",
+  );
+} catch (_e) {}
+try {
+  db.exec(
     "ALTER TABLE processed_files ADD COLUMN pdf_duration_ms INTEGER DEFAULT 0",
   );
+} catch (_e) {}
+
+// Merged pipeline: distinguish PST rows from "Files" (Teams/docs) batch rows,
+// and track the Files phase status + metrics on the same table.
+try {
+  db.exec("ALTER TABLE processed_files ADD COLUMN kind TEXT DEFAULT 'pst'");
+} catch (_e) {}
+try {
+  db.exec(
+    "ALTER TABLE processed_files ADD COLUMN files_status TEXT DEFAULT 'pending'",
+  );
+} catch (_e) {}
+try {
+  db.exec(
+    "ALTER TABLE processed_files ADD COLUMN files_total INTEGER DEFAULT 0",
+  );
+} catch (_e) {}
+try {
+  db.exec(
+    "ALTER TABLE processed_files ADD COLUMN files_processed INTEGER DEFAULT 0",
+  );
+} catch (_e) {}
+try {
+  db.exec(
+    "ALTER TABLE processed_files ADD COLUMN files_skipped INTEGER DEFAULT 0",
+  );
+} catch (_e) {}
+try {
+  db.exec(
+    "ALTER TABLE processed_files ADD COLUMN files_duplicates INTEGER DEFAULT 0",
+  );
+} catch (_e) {}
+try {
+  db.exec(
+    "ALTER TABLE processed_files ADD COLUMN files_duration_ms INTEGER DEFAULT 0",
+  );
+} catch (_e) {}
+try {
+  db.exec("ALTER TABLE processed_files ADD COLUMN files_started_at INTEGER");
 } catch (_e) {}

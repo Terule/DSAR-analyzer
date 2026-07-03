@@ -23,6 +23,59 @@ async function getAllPstFiles(
   return arrayOfFiles;
 }
 
+// Finds every directory named "Files" (case-insensitive) anywhere under the root.
+// Each such folder is a "Files" batch for its [case]/[request].
+async function getAllFilesDirs(
+  dirPath: string,
+  found: string[] = [],
+): Promise<string[]> {
+  const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue;
+    const fullPath = path.resolve(dirPath, entry.name);
+
+    if (entry.name.toLowerCase() === "files") {
+      found.push(fullPath);
+      continue; // Do not descend into a Files batch folder.
+    }
+    found = await getAllFilesDirs(fullPath, found);
+  }
+
+  return found;
+}
+
+// Counts non-hidden, non-metadata files and sums their sizes within a Files dir.
+async function summarizeFilesDir(
+  dirPath: string,
+): Promise<{ count: number; totalBytes: number }> {
+  let count = 0;
+  let totalBytes = 0;
+
+  const walk = async (current: string) => {
+    const entries = await fs.promises.readdir(current, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.resolve(current, entry.name);
+      if (entry.isDirectory()) {
+        await walk(fullPath);
+      } else if (
+        !entry.name.startsWith(".") &&
+        !entry.name.toLowerCase().endsWith(".json")
+      ) {
+        count++;
+        try {
+          totalBytes += (await fs.promises.stat(fullPath)).size;
+        } catch {
+          // Ignore unreadable files.
+        }
+      }
+    }
+  };
+
+  await walk(dirPath);
+  return { count, totalBytes };
+}
+
 export async function syncStagingArea(
   directoryPath: string = process.env.STAGING_PATH ||
     "/Users/rgomes/Projects/staging-area",
@@ -34,47 +87,91 @@ export async function syncStagingArea(
     return;
   }
 
-  // 1. NO MORE GLOBAL WIPES!
-  // We removed the DELETE FROM emails and processed_files transactions here.
-  // The scanner is now 100% non-destructive.
+  const currentPstPaths = await getAllPstFiles(directoryPath);
+  const filesDirs = await getAllFilesDirs(directoryPath);
 
-  // 2. Get all current files asynchronously without freezing the server
-  const currentFilePaths = await getAllPstFiles(directoryPath);
-
-  // 3. Prepare fresh inserts using INSERT OR IGNORE
-  // If the file hash already exists in the database, SQLite will simply ignore it and move on!
-  const upsertStmt = db.prepare(`
-    INSERT INTO processed_files (id, filename, filepath, file_size_bytes, status)
-    VALUES (?, ?, ?, ?, 'pending')
+  const upsertPst = db.prepare(`
+    INSERT INTO processed_files (id, filename, filepath, file_size_bytes, status, kind)
+    VALUES (?, ?, ?, ?, 'pending', 'pst')
     ON CONFLICT(id) DO UPDATE SET
       filename = excluded.filename,
       filepath = excluded.filepath,
       file_size_bytes = excluded.file_size_bytes
   `);
 
-  // Wrapped in a transaction to execute disk operations instantly
-  const insertTransaction = db.transaction(() => {
-    let newFilesAdded = 0;
-    for (const fullPath of currentFilePaths) {
-      const stats = fs.statSync(fullPath);
-      const filename = path.basename(fullPath);
-      const fileId = crypto
-        .createHash("sha256")
-        .update(fullPath)
-        .digest("hex")
-        .substring(0, 12);
+  const upsertFiles = db.prepare(`
+    INSERT INTO processed_files (id, filename, filepath, file_size_bytes, status, ai_status, pdf_status, kind, files_total)
+    VALUES (?, 'Files', ?, ?, 'completed', 'completed', 'completed', 'files', ?)
+    ON CONFLICT(id) DO UPDATE SET
+      filepath = excluded.filepath,
+      file_size_bytes = excluded.file_size_bytes,
+      files_total = excluded.files_total
+  `);
 
-      const existed = db
-        .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
-        .get(fileId);
-      upsertStmt.run(fileId, filename, fullPath, stats.size);
-      if (!existed) newFilesAdded++;
+  const hashId = (value: string) =>
+    crypto.createHash("sha256").update(value).digest("hex").substring(0, 12);
+
+  let newPst = 0;
+  for (const fullPath of currentPstPaths) {
+    const stats = fs.statSync(fullPath);
+    const fileId = hashId(fullPath);
+    const existed = db
+      .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
+      .get(fileId);
+    upsertPst.run(fileId, path.basename(fullPath), fullPath, stats.size);
+    if (!existed) newPst++;
+  }
+
+  let newFiles = 0;
+  for (const filesDir of filesDirs) {
+    const { count, totalBytes } = await summarizeFilesDir(filesDir);
+    if (count === 0) continue; // Skip empty Files folders.
+
+    const fileId = hashId(filesDir);
+    const existed = db
+      .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
+      .get(fileId);
+    upsertFiles.run(fileId, filesDir, totalBytes, count);
+    if (!existed) newFiles++;
+  }
+
+  // Prune orphaned rows whose source no longer exists on disk. This happens
+  // when a PST/Files path is moved or renamed (the id is a hash of the path),
+  // leaving a stale record that would otherwise fail the pipeline (readpst
+  // "No such file or directory"). PST rows point at a file; Files rows point
+  // at a directory — both must still exist to be kept.
+  const pruned = pruneMissingRows();
+
+  console.log(
+    `[Scanner] Sync complete. Added ${newPst} PST files and ${newFiles} Files batches. Pruned ${pruned} stale rows.`,
+  );
+}
+
+/**
+ * Removes rows whose backing file/directory no longer exists on disk.
+ * Returns the number of rows deleted.
+ */
+export function pruneMissingRows(): number {
+  const rows = db.prepare("SELECT id, filepath FROM processed_files").all() as {
+    id: string;
+    filepath: string;
+  }[];
+
+  const deleteFile = db.prepare("DELETE FROM processed_files WHERE id = ?");
+  const deleteEmails = db.prepare("DELETE FROM emails WHERE file_id = ?");
+
+  const tx = db.transaction((items: { id: string; filepath: string }[]) => {
+    let deleted = 0;
+    for (const item of items) {
+      if (item.filepath && fs.existsSync(item.filepath)) continue;
+      deleteEmails.run(item.id);
+      deleteFile.run(item.id);
+      deleted++;
     }
-    console.log(
-      `[Scanner] Sync complete. Added ${newFilesAdded} new files. Ignored existing files.`,
-    );
+    return deleted;
   });
-  insertTransaction(); // Execute transaction
+
+  return tx(rows);
 }
 
 /**
