@@ -1,25 +1,27 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CaseCard } from "@/components/dashboard/CaseCard";
 import { DashboardHeader } from "@/components/dashboard/DashboardHeader";
 import { ConnectingState, EmptyState } from "@/components/dashboard/EmptyState";
 import { NotificationToast } from "@/components/dashboard/NotificationToast";
-import { StandalonePanel } from "@/components/dashboard/StandalonePanel";
-import { TabNavigation } from "@/components/dashboard/TabNavigation";
 import { useFileStream } from "@/hooks/useFileStream";
 import { useNotification } from "@/hooks/useNotification";
 import * as api from "@/lib/api";
-import { getRelativePath } from "@/lib/format";
-import type { AiConfig, StagedFile, TabKey } from "@/lib/types";
+import { getCaseKey } from "@/lib/format";
+import type { AiConfig, StagedFile } from "@/lib/types";
 
 export default function Dashboard() {
   const { files, loading } = useFileStream();
   const { notification, setNotification } = useNotification();
 
-  const [activeTab, setActiveTab] = useState<TabKey>("pst");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
+  const [privacyMode, setPrivacyMode] = useState(false);
+
+  // Tracks Files phases already kicked off so the orchestrator doesn't
+  // double-spawn a worker while the DB status catches up via SSE.
+  const filesStartedRef = useRef<Set<string>>(new Set());
 
   const [activeCaseSequence, setActiveCaseSequence] = useState<
     Record<string, string>
@@ -36,21 +38,38 @@ export default function Dashboard() {
 
   const isSequenceLocked = Object.keys(activeCaseSequence).length > 0;
 
+  // Cache of the previous grouping so we can preserve array reference identity
+  // for cases whose contents did not change. The SSE stream re-emits the full
+  // snapshot on every tick, so without this every memoized CaseCard would
+  // re-render each update (whole-page repaint/blink) instead of only the case
+  // that actually changed.
+  const prevGroupsRef = useRef<Record<string, StagedFile[]>>({});
+
   const groupedCases = useMemo(() => {
     const groups: Record<string, StagedFile[]> = {};
     files.forEach((f) => {
-      const relPath = getRelativePath(f.filepath);
-      let dirName = relPath.substring(0, relPath.lastIndexOf("/"));
-      if (!dirName) dirName = "Root Staging Area";
-
-      if (!groups[dirName]) groups[dirName] = [];
-      groups[dirName].push(f);
+      const caseKey = getCaseKey(f.filepath);
+      if (!groups[caseKey]) groups[caseKey] = [];
+      groups[caseKey].push(f);
     });
 
     Object.values(groups).forEach((group) => {
       group.sort((a, b) => a.filename.localeCompare(b.filename));
     });
-    return groups;
+
+    // Reuse the prior array reference for any case whose serialized contents are
+    // identical, so React.memo can skip re-rendering unchanged CaseCards.
+    const prev = prevGroupsRef.current;
+    const stable: Record<string, StagedFile[]> = {};
+    for (const [key, group] of Object.entries(groups)) {
+      const prevGroup = prev[key];
+      stable[key] =
+        prevGroup && JSON.stringify(prevGroup) === JSON.stringify(group)
+          ? prevGroup
+          : group;
+    }
+    prevGroupsRef.current = stable;
+    return stable;
   }, [files]);
 
   const toggleMetrics = (caseName: string) => {
@@ -103,6 +122,20 @@ export default function Dashboard() {
       await api.convertToPdf(fileId);
     } catch (_e) {}
   }, []);
+
+  const handleProcessFiles = useCallback(
+    async (fileId: string, config: AiConfig) => {
+      try {
+        await api.processFiles(fileId, config);
+      } catch (_e) {
+        setNotification({
+          type: "error",
+          message: "Failed to start Files processing.",
+        });
+      }
+    },
+    [setNotification],
+  );
 
   const handleSyncBatch = useCallback(
     async (caseName: string, filesToSync: string[]) => {
@@ -162,6 +195,8 @@ export default function Dashboard() {
         const ok = await api.wipeCase(caseName, fileIds);
         if (!ok) throw new Error("Wipe failed");
 
+        filesStartedRef.current.delete(caseName);
+
         setActiveCaseSequence((prev) => {
           const next = { ...prev };
           delete next[caseName];
@@ -205,6 +240,76 @@ export default function Dashboard() {
     Object.entries(activeCaseSequence).forEach(([caseName, action]) => {
       const caseFiles = groupedCases[caseName];
       if (!caseFiles) return;
+
+      // Files phase runs sequentially, AFTER the email pipeline (RENDER).
+      if (action === "files") {
+        const filesRow = caseFiles.find((f) => f.kind === "files");
+        const config = pendingAiConfigs[caseName];
+        const finish = () =>
+          setActiveCaseSequence((prev) => {
+            const next = { ...prev };
+            delete next[caseName];
+            return next;
+          });
+
+        if (!filesRow || !config) {
+          finish();
+          return;
+        }
+
+        const filesStatus = filesRow.files_status || "pending";
+        if (filesStatus === "processing") return;
+        if (filesStatus === "completed" || filesStatus === "failed") {
+          filesStartedRef.current.delete(caseName);
+          finish();
+          return;
+        }
+
+        // Pending: kick it off once.
+        if (!filesStartedRef.current.has(caseName)) {
+          filesStartedRef.current.add(caseName);
+          handleProcessFiles(filesRow.id, config);
+        }
+        return;
+      }
+
+      // AI is case-level: a single run audits the emails of EVERY PST file in
+      // the request (they share the .unique-emails folder). One deterministic
+      // "coordinator" row (smallest id) holds the live batch state; its status
+      // is mirrored to all PST rows on completion.
+      if (action === "ai") {
+        const pstOnly = caseFiles.filter((f) => f.kind !== "files");
+        if (pstOnly.length === 0) {
+          setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "pdf" }));
+          return;
+        }
+
+        const coordinator = [...pstOnly].sort((a, b) =>
+          a.id.localeCompare(b.id),
+        )[0];
+        const coordAi = coordinator.ai_status || "pending";
+
+        // Wait while this case's AI is running or another case holds the AI slot.
+        if (
+          coordAi === "processing" ||
+          coordAi === "batch_ready" ||
+          isGlobalAiBusy
+        ) {
+          return;
+        }
+
+        // Finished (all PST rows mirrored to completed/failed) -> render.
+        if (coordAi === "completed" || coordAi === "failed") {
+          setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "pdf" }));
+          return;
+        }
+
+        // Pending: start once every PST file has finished extraction.
+        if (pstOnly.every((f) => f.status === "completed")) {
+          handleRunAIAudit(coordinator.id, pendingAiConfigs[caseName]);
+        }
+        return;
+      }
 
       const caseIsBusy = caseFiles.some(
         (f) =>
@@ -256,6 +361,8 @@ export default function Dashboard() {
           setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "ai" }));
         else if (action === "ai")
           setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "pdf" }));
+        else if (action === "pdf")
+          setActiveCaseSequence((prev) => ({ ...prev, [caseName]: "files" }));
         else
           setActiveCaseSequence((prev) => {
             const next = { ...prev };
@@ -274,6 +381,7 @@ export default function Dashboard() {
     handleExtract,
     handleRunAIAudit,
     handleConvertToPdf,
+    handleProcessFiles,
   ]);
 
   const startSequence = useCallback((caseName: string, action: string) => {
@@ -291,8 +399,21 @@ export default function Dashboard() {
 
   const isGlobalScanDisabled = loading || isRefreshing || isSequenceLocked;
 
+  const togglePrivacy = useCallback(() => {
+    setPrivacyMode((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("dsar_privacy", next ? "1" : "0");
+      } catch {}
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     setIsHydrated(true);
+    try {
+      setPrivacyMode(localStorage.getItem("dsar_privacy") === "1");
+    } catch {}
   }, []);
 
   return (
@@ -301,48 +422,46 @@ export default function Dashboard() {
 
       <div className="max-w-6xl mx-auto">
         <DashboardHeader
-          showScanButton={activeTab === "pst"}
+          showScanButton
           isRefreshing={isRefreshing}
           scanDisabled={isHydrated ? isGlobalScanDisabled : false}
           onScan={handleScanDirectory}
+          privacyMode={privacyMode}
+          onTogglePrivacy={togglePrivacy}
         />
 
-        <TabNavigation activeTab={activeTab} onChange={setActiveTab} />
-
-        {activeTab === "pst" &&
-          (loading && !isRefreshing ? (
-            <ConnectingState />
-          ) : files.length === 0 ? (
-            <EmptyState />
-          ) : (
-            // CRITICAL FIX: items-start prevents grids from stretching when accordion opens
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
-              {Object.entries(groupedCases).map(([caseName, caseFiles]) => (
-                <CaseCard
-                  key={caseName}
-                  caseName={caseName}
-                  caseFiles={caseFiles}
-                  hasAiConfig={!!pendingAiConfigs[caseName]}
-                  isSequenceLocked={isSequenceLocked}
-                  isSyncing={!!syncingCases[caseName]}
-                  isResetting={!!resettingCases[caseName]}
-                  isMetricsOpen={!!openMetrics[caseName]}
-                  isConfigOpen={activeConfigCase === caseName}
-                  onToggleMetrics={() => toggleMetrics(caseName)}
-                  onOpenConfig={() => setActiveConfigCase(caseName)}
-                  onCloseConfig={() => setActiveConfigCase(null)}
-                  onSync={(ids) => handleSyncBatch(caseName, ids)}
-                  onReset={(ids) => handleResetCase(caseName, ids)}
-                  onStartSequence={(action) => startSequence(caseName, action)}
-                  onSubmitAiConfig={(config) =>
-                    submitAiConfigAndStart(caseName, config)
-                  }
-                />
-              ))}
-            </div>
-          ))}
-
-        {activeTab === "standalone" && <StandalonePanel />}
+        {loading && !isRefreshing ? (
+          <ConnectingState />
+        ) : files.length === 0 ? (
+          <EmptyState />
+        ) : (
+          // CRITICAL FIX: items-start prevents grids from stretching when accordion opens
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-start">
+            {Object.entries(groupedCases).map(([caseName, caseFiles]) => (
+              <CaseCard
+                key={caseName}
+                caseName={caseName}
+                caseFiles={caseFiles}
+                privacyMode={privacyMode}
+                hasAiConfig={!!pendingAiConfigs[caseName]}
+                isSequenceLocked={isSequenceLocked}
+                isSyncing={!!syncingCases[caseName]}
+                isResetting={!!resettingCases[caseName]}
+                isMetricsOpen={!!openMetrics[caseName]}
+                isConfigOpen={activeConfigCase === caseName}
+                onToggleMetrics={() => toggleMetrics(caseName)}
+                onOpenConfig={() => setActiveConfigCase(caseName)}
+                onCloseConfig={() => setActiveConfigCase(null)}
+                onSync={(ids) => handleSyncBatch(caseName, ids)}
+                onReset={(ids) => handleResetCase(caseName, ids)}
+                onStartSequence={(action) => startSequence(caseName, action)}
+                onSubmitAiConfig={(config) =>
+                  submitAiConfigAndStart(caseName, config)
+                }
+              />
+            ))}
+          </div>
+        )}
       </div>
     </main>
   );
