@@ -1,35 +1,49 @@
-import { Archive, Cpu, Database, FileText, Loader2 } from "lucide-react";
+import {
+  Archive,
+  Cpu,
+  Database,
+  FileText,
+  FolderOpen,
+  Loader2,
+  type LucideIcon,
+} from "lucide-react";
 
-interface PhaseState {
+export interface PhaseItem {
+  id: string;
+  label: string;
+  icon: LucideIcon;
   hasStarted: boolean;
   isProcessing: boolean;
   isDone: boolean;
   progressPct: number;
 }
 
-interface PhaseIndicatorsProps {
-  parse: PhaseState;
-  extract: PhaseState;
-  ai: PhaseState;
-  render: PhaseState;
-}
+export const PHASE_ICONS = {
+  parse: Database,
+  extract: Archive,
+  ai: Cpu,
+  render: FileText,
+  files: FolderOpen,
+} as const;
 
-export function PhaseIndicators({
-  parse,
-  extract,
-  ai,
-  render,
-}: PhaseIndicatorsProps) {
-  const items = [
-    { id: "parse", label: "PARSE", icon: Database, ...parse },
-    { id: "extract", label: "EXTRACT", icon: Archive, ...extract },
-    { id: "ai", label: "AI AUDIT", icon: Cpu, ...ai },
-    { id: "render", label: "RENDER", icon: FileText, ...render },
-  ];
+const COLS_CLASS: Record<number, string> = {
+  1: "sm:grid-cols-1",
+  2: "sm:grid-cols-2",
+  3: "sm:grid-cols-3",
+  4: "sm:grid-cols-4",
+  5: "sm:grid-cols-5",
+};
+
+export function PhaseIndicators({ phases }: { phases: PhaseItem[] }) {
+  if (phases.length === 0) return null;
+
+  const colsClass = COLS_CLASS[Math.min(phases.length, 5)] || "sm:grid-cols-4";
 
   return (
-    <div className="grid grid-cols-2 sm:grid-cols-4 gap-4 w-full max-w-2xl mt-8 pt-8 border-t border-slate-700/50">
-      {items.map((item) => {
+    <div
+      className={`grid grid-cols-2 ${colsClass} gap-4 w-full max-w-2xl mt-8 pt-8 border-t border-slate-700/50`}
+    >
+      {phases.map((item) => {
         const clampedProgress = Math.max(0, Math.min(100, item.progressPct));
         const style = item.isProcessing
           ? "bg-indigo-500/10 border-indigo-500/50 text-indigo-400"

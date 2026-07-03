@@ -10,10 +10,15 @@ import {
   Trash2,
 } from "lucide-react";
 import { memo, useEffect, useMemo, useState } from "react";
+import { maskCaseName } from "@/lib/format";
 import type { AiConfig, CaseStats, StagedFile } from "@/lib/types";
 import { AiConfigForm } from "./AiConfigForm";
 import { CaseMetrics } from "./CaseMetrics";
-import { PhaseIndicators } from "./PhaseIndicators";
+import {
+  PHASE_ICONS,
+  PhaseIndicators,
+  type PhaseItem,
+} from "./PhaseIndicators";
 
 const DEFAULT_PARSE_MS = 120_000;
 const DEFAULT_EXTRACT_MS = 90_000;
@@ -27,6 +32,7 @@ const PHASE_PROGRESS_SMOOTH_STEP = 8;
 interface CaseCardProps {
   caseName: string;
   caseFiles: StagedFile[];
+  privacyMode: boolean;
   hasAiConfig: boolean;
   isSequenceLocked: boolean;
   isSyncing: boolean;
@@ -130,6 +136,7 @@ function toTimestampMs(value?: string): number | null {
 function CaseCardComponent({
   caseName,
   caseFiles,
+  privacyMode,
   hasAiConfig,
   isSequenceLocked,
   isSyncing,
@@ -145,6 +152,23 @@ function CaseCardComponent({
   onSubmitAiConfig,
 }: CaseCardProps) {
   const stats = useMemo(() => computeStats(caseFiles), [caseFiles]);
+
+  const displayName = privacyMode ? maskCaseName(caseName) : caseName;
+
+  // Split the case into PST rows (email pipeline) and the single Files row
+  // (Teams/docs). Email phases are computed over PST rows only; the Files phase
+  // is driven by the Files row's files_status.
+  const pstFiles = useMemo(
+    () => caseFiles.filter((f) => f.kind !== "files"),
+    [caseFiles],
+  );
+  const filesRow = useMemo(
+    () => caseFiles.find((f) => f.kind === "files"),
+    [caseFiles],
+  );
+  const hasPst = pstFiles.length > 0;
+  const hasFiles = !!filesRow;
+
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [displayedPhaseProgress, setDisplayedPhaseProgress] = useState({
     parse: 0,
@@ -155,7 +179,7 @@ function CaseCardComponent({
 
   const hasActiveWork = useMemo(
     () =>
-      caseFiles.some(
+      pstFiles.some(
         (f) =>
           ["scanning_metadata", "pending_analysis", "processing"].includes(
             f.status,
@@ -163,8 +187,8 @@ function CaseCardComponent({
           f.status === "extracting" ||
           ["processing", "batch_ready"].includes(f.ai_status || "") ||
           f.pdf_status === "processing",
-      ),
-    [caseFiles],
+      ) || filesRow?.files_status === "processing",
+    [pstFiles, filesRow],
   );
 
   useEffect(() => {
@@ -178,22 +202,22 @@ function CaseCardComponent({
   }, [hasActiveWork]);
 
   const phaseProgress = useMemo(() => {
-    if (caseFiles.length === 0) {
+    if (pstFiles.length === 0) {
       return { parse: 0, extract: 0, ai: 0, render: 0 };
     }
 
-    const total = caseFiles.length;
+    const total = pstFiles.length;
 
-    const parseSamples = caseFiles
+    const parseSamples = pstFiles
       .map((f) => (f.metadata_duration_ms || 0) + (f.analyze_duration_ms || 0))
       .filter((ms) => ms > 0);
-    const extractSamples = caseFiles
+    const extractSamples = pstFiles
       .map((f) => f.extract_duration_ms || 0)
       .filter((ms) => ms > 0);
-    const aiSamples = caseFiles
+    const aiSamples = pstFiles
       .map((f) => f.ai_duration_ms || 0)
       .filter((ms) => ms > 0);
-    const renderSamples = caseFiles
+    const renderSamples = pstFiles
       .map((f) => f.pdf_duration_ms || 0)
       .filter((ms) => ms > 0);
 
@@ -212,7 +236,7 @@ function CaseCardComponent({
       3,
     );
 
-    const parseSum = caseFiles.reduce((sum, file) => {
+    const parseSum = pstFiles.reduce((sum, file) => {
       if (
         ["analyzed", "extracting", "completed", "failed"].includes(file.status)
       ) {
@@ -242,7 +266,7 @@ function CaseCardComponent({
       return sum;
     }, 0);
 
-    const extractSum = caseFiles.reduce((sum, file) => {
+    const extractSum = pstFiles.reduce((sum, file) => {
       if (["completed", "failed"].includes(file.status)) {
         return sum + 1;
       }
@@ -273,30 +297,26 @@ function CaseCardComponent({
       return sum;
     }, 0);
 
-    const aiSum = caseFiles.reduce((sum, file) => {
-      if (["completed", "failed"].includes(file.ai_status || "")) {
-        return sum + 1;
-      }
+    // AI progress is batch-based: completed OpenAI batches divided by the
+    // estimated total batches for the case. Each finished batch advances the
+    // bar by ~1/total (e.g. 5 total -> 20% per batch). The total self-corrects
+    // in the batch worker if the initial estimate is exceeded.
+    const aiBatchesTotal = pstFiles.reduce(
+      (sum, file) => sum + (file.ai_batches_total || 0),
+      0,
+    );
+    const aiBatchesDone = pstFiles.reduce(
+      (sum, file) => sum + (file.ai_batches_done || 0),
+      0,
+    );
+    const anyAiActive = pstFiles.some((f) =>
+      ["processing", "batch_ready"].includes(f.ai_status || ""),
+    );
+    const allAiDone = pstFiles.every((f) =>
+      ["completed", "failed"].includes(f.ai_status || ""),
+    );
 
-      if (["processing", "batch_ready"].includes(file.ai_status || "")) {
-        const createdAtMs = toTimestampMs(file.created_at);
-        const aiStartEstimate =
-          file.ai_started_at ||
-          createdAtMs ||
-          nowMs - Math.floor(aiTargetMs * 0.2);
-        const aiStartMs = Math.min(aiStartEstimate, nowMs);
-
-        const elapsedMs = Math.max(0, nowMs - aiStartMs);
-        return (
-          sum +
-          activeProgress(elapsedMs, aiTargetMs, ACTIVE_MIN_PROGRESS_AI_RENDER)
-        );
-      }
-
-      return sum;
-    }, 0);
-
-    const renderSum = caseFiles.reduce((sum, file) => {
+    const renderSum = pstFiles.reduce((sum, file) => {
       if (["completed", "failed"].includes(file.pdf_status || "")) {
         return sum + 1;
       }
@@ -329,11 +349,17 @@ function CaseCardComponent({
 
     const parse = Math.round((parseSum / total) * 100);
     const extract = Math.round((extractSum / total) * 100);
-    const ai = Math.round((aiSum / total) * 100);
+    const ai = allAiDone
+      ? 100
+      : aiBatchesTotal > 0
+        ? Math.min(99, Math.round((aiBatchesDone / aiBatchesTotal) * 100))
+        : anyAiActive
+          ? ACTIVE_MIN_PROGRESS_AI_RENDER * 100
+          : 0;
     const render = Math.round((renderSum / total) * 100);
 
     return { parse, extract, ai, render };
-  }, [caseFiles, nowMs]);
+  }, [pstFiles, nowMs]);
 
   useEffect(() => {
     setDisplayedPhaseProgress((prev) => ({
@@ -344,55 +370,73 @@ function CaseCardComponent({
     }));
   }, [phaseProgress]);
 
-  const filesToSync = caseFiles
+  const filesToSync = pstFiles
     .filter((f) => f.ai_status === "batch_ready")
     .map((f) => f.id);
 
-  const isFaulted = caseFiles.some(
-    (f) =>
-      f.status === "failed" ||
-      f.pdf_status === "failed" ||
-      f.ai_status === "failed",
-  );
-  const isCompleted = caseFiles.every((f) => f.pdf_status === "completed");
-
-  const isParsePhase = caseFiles.some((f) =>
+  const isParsePhase = pstFiles.some((f) =>
     ["scanning_metadata", "pending_analysis", "processing"].includes(f.status),
   );
-  const parseStarted = caseFiles.some((f) => f.status !== "pending");
-  const parseDone = caseFiles.every((f) =>
-    ["analyzed", "extracting", "completed", "failed"].includes(f.status),
-  );
+  const parseStarted = pstFiles.some((f) => f.status !== "pending");
+  const parseDone =
+    hasPst &&
+    pstFiles.every((f) =>
+      ["analyzed", "extracting", "completed", "failed"].includes(f.status),
+    );
 
-  const isExtractPhase = caseFiles.some((f) => f.status === "extracting");
-  const extractStarted = caseFiles.some((f) =>
+  const isExtractPhase = pstFiles.some((f) => f.status === "extracting");
+  const extractStarted = pstFiles.some((f) =>
     ["extracting", "completed", "failed"].includes(f.status),
   );
-  const extractDone = caseFiles.every((f) =>
-    ["completed", "failed"].includes(f.status),
-  );
+  const extractDone =
+    hasPst && pstFiles.every((f) => ["completed", "failed"].includes(f.status));
 
-  const isAiPhase = caseFiles.some((f) =>
+  const isAiPhase = pstFiles.some((f) =>
     ["batch_ready", "processing"].includes(f.ai_status || ""),
   );
-  const aiStarted = caseFiles.some((f) =>
+  const aiStarted = pstFiles.some((f) =>
     ["batch_ready", "processing", "completed", "failed"].includes(
       f.ai_status || "",
     ),
   );
   const aiDone =
     extractDone &&
-    caseFiles.every((f) => ["completed", "failed"].includes(f.ai_status || ""));
+    pstFiles.every((f) => ["completed", "failed"].includes(f.ai_status || ""));
 
-  const isPdfPhase = caseFiles.some((f) => f.pdf_status === "processing");
-  const pdfStarted = caseFiles.some((f) =>
+  const isPdfPhase = pstFiles.some((f) => f.pdf_status === "processing");
+  const pdfStarted = pstFiles.some((f) =>
     ["processing", "completed", "failed"].includes(f.pdf_status || ""),
   );
   const pdfDone =
     aiDone &&
-    caseFiles.every((f) =>
-      ["completed", "failed"].includes(f.pdf_status || ""),
-    );
+    pstFiles.every((f) => ["completed", "failed"].includes(f.pdf_status || ""));
+
+  // Files phase state (driven by the Files row's files_status + counters).
+  const filesStatus = filesRow?.files_status || "pending";
+  const isFilesPhase = filesStatus === "processing";
+  const filesStarted = hasFiles && filesStatus !== "pending";
+  const filesDone = filesStatus === "completed";
+  const filesFaulted = filesStatus === "failed";
+  const filesHandled =
+    (filesRow?.files_processed || 0) + (filesRow?.files_skipped || 0);
+  const filesTotal = filesRow?.files_total || 0;
+  const filesProgress = filesDone
+    ? 100
+    : isFilesPhase
+      ? filesTotal > 0 && filesHandled > 0
+        ? Math.min(99, Math.round((filesHandled / filesTotal) * 100))
+        : 5
+      : 0;
+
+  const isFaulted =
+    pstFiles.some(
+      (f) =>
+        f.status === "failed" ||
+        f.pdf_status === "failed" ||
+        f.ai_status === "failed",
+    ) || filesFaulted;
+  const isCompleted =
+    (hasPst || hasFiles) && (!hasPst || pdfDone) && (!hasFiles || filesDone);
 
   let btnConfig = {
     text: hasAiConfig ? "Run Pipeline" : "Configure Case Settings",
@@ -465,9 +509,71 @@ function CaseCardComponent({
         "bg-amber-900/30 text-amber-400 border border-amber-500/30 cursor-wait",
       spin: true,
     };
+  } else if (isFilesPhase) {
+    btnConfig = {
+      text: "Processing Files...",
+      action: "",
+      icon: Loader2,
+      color:
+        "bg-amber-900/30 text-amber-400 border border-amber-500/30 cursor-wait",
+      spin: true,
+    };
   }
 
   const ActionIcon = btnConfig.icon;
+
+  const phases: PhaseItem[] = [];
+  if (hasPst) {
+    phases.push(
+      {
+        id: "parse",
+        label: "PARSE",
+        icon: PHASE_ICONS.parse,
+        hasStarted: parseStarted,
+        isProcessing: isParsePhase,
+        isDone: parseDone,
+        progressPct: displayedPhaseProgress.parse,
+      },
+      {
+        id: "extract",
+        label: "EXTRACT",
+        icon: PHASE_ICONS.extract,
+        hasStarted: extractStarted,
+        isProcessing: isExtractPhase,
+        isDone: extractDone,
+        progressPct: displayedPhaseProgress.extract,
+      },
+      {
+        id: "ai",
+        label: "AI AUDIT",
+        icon: PHASE_ICONS.ai,
+        hasStarted: aiStarted,
+        isProcessing: isAiPhase || filesToSync.length > 0,
+        isDone: aiDone,
+        progressPct: displayedPhaseProgress.ai,
+      },
+      {
+        id: "render",
+        label: "RENDER",
+        icon: PHASE_ICONS.render,
+        hasStarted: pdfStarted,
+        isProcessing: isPdfPhase,
+        isDone: pdfDone,
+        progressPct: displayedPhaseProgress.render,
+      },
+    );
+  }
+  if (hasFiles) {
+    phases.push({
+      id: "files",
+      label: "FILES",
+      icon: PHASE_ICONS.files,
+      hasStarted: filesStarted,
+      isProcessing: isFilesPhase,
+      isDone: filesDone,
+      progressPct: filesProgress,
+    });
+  }
 
   const handleMainAction = () => {
     if (btnConfig.action === "launch_audit") {
@@ -517,9 +623,9 @@ function CaseCardComponent({
       </div>
       <h2
         className="text-3xl font-bold tracking-tight text-white mb-2 text-center max-w-full truncate px-4"
-        title={caseName}
+        title={privacyMode ? undefined : caseName}
       >
-        {caseName}
+        {displayName}
       </h2>
       <p className="text-slate-400 mb-8 font-medium text-sm text-center">
         Data Subject Access Request Pipeline
@@ -547,33 +653,8 @@ function CaseCardComponent({
         <span className="text-lg tracking-wide">{btnConfig.text}</span>
       </button>
 
-      {/* 4-Step Technical Phase Indicators */}
-      <PhaseIndicators
-        parse={{
-          hasStarted: parseStarted,
-          isProcessing: isParsePhase,
-          isDone: parseDone,
-          progressPct: displayedPhaseProgress.parse,
-        }}
-        extract={{
-          hasStarted: extractStarted,
-          isProcessing: isExtractPhase,
-          isDone: extractDone,
-          progressPct: displayedPhaseProgress.extract,
-        }}
-        ai={{
-          hasStarted: aiStarted,
-          isProcessing: isAiPhase || filesToSync.length > 0,
-          isDone: aiDone,
-          progressPct: displayedPhaseProgress.ai,
-        }}
-        render={{
-          hasStarted: pdfStarted,
-          isProcessing: isPdfPhase,
-          isDone: pdfDone,
-          progressPct: displayedPhaseProgress.render,
-        }}
-      />
+      {/* Technical Phase Indicators (PST email phases and/or Files phase) */}
+      <PhaseIndicators phases={phases} />
 
       {/* Metrics Accordion */}
       <CaseMetrics
@@ -590,6 +671,7 @@ export const CaseCard = memo(CaseCardComponent, (prev, next) => {
   return (
     prev.caseName === next.caseName &&
     prev.caseFiles === next.caseFiles &&
+    prev.privacyMode === next.privacyMode &&
     prev.hasAiConfig === next.hasAiConfig &&
     prev.isSequenceLocked === next.isSequenceLocked &&
     prev.isSyncing === next.isSyncing &&
