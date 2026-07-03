@@ -5,6 +5,7 @@
  * Only one instance of this worker should run at a time.
  */
 
+import { isCaseAiSettled } from "./src/lib/case-utils";
 import { convertToPdfBatch } from "./src/lib/converter";
 import { db } from "./src/lib/db";
 
@@ -24,13 +25,18 @@ process.on("SIGTERM", () => requestShutdown("SIGTERM"));
 function pickNext():
   | { id: string; ai_status: string; pdf_status: string }
   | undefined {
-  return db
+  // Render is case-level. Only claim a file whose entire case has settled its
+  // AI phase, so we never render (and prematurely mark completed) a case while a
+  // sibling PST file is still being audited.
+  const candidates = db
     .prepare(
       `SELECT id, ai_status, pdf_status FROM processed_files
        WHERE ai_status = 'completed' AND pdf_status = 'pending'
-       ORDER BY created_at ASC LIMIT 1`,
+       ORDER BY created_at ASC`,
     )
-    .get() as { id: string; ai_status: string; pdf_status: string } | undefined;
+    .all() as { id: string; ai_status: string; pdf_status: string }[];
+
+  return candidates.find((c) => isCaseAiSettled(c.id));
 }
 
 async function run() {
