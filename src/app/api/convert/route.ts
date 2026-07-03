@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
+import { openWorkerLogFd } from "@/lib/worker-log";
 
 // Prevent Vercel/Next.js from caching this route statically
 export const dynamic = "force-dynamic";
@@ -66,9 +67,10 @@ export async function POST(request: Request) {
 
     if (!workerAlreadyRunning) {
       const workerPath = path.resolve(process.cwd(), "convert-worker.ts");
+      const logFd = openWorkerLogFd("convert-worker");
       const child = spawn("bun", [workerPath], {
         detached: true,
-        stdio: "ignore",
+        stdio: ["ignore", logFd, logFd],
       });
       child.unref();
     }

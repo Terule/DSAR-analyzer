@@ -1,8 +1,22 @@
+import { ensureBatchPollerRunning } from "@/lib/batch-scheduler";
 import { db } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
+  // If the server restarted while an AI/render phase was mid-flight, resume the
+  // poller as soon as a dashboard reconnects so batches keep getting synced and
+  // a render orphaned in 'processing' (dead worker) gets reclaimed.
+  const hasPendingAiWork = db
+    .prepare(
+      `SELECT 1 FROM processed_files
+       WHERE ai_status IN ('processing', 'batch_ready')
+          OR (ai_status = 'completed' AND pdf_status IN ('pending', 'processing'))
+       LIMIT 1`,
+    )
+    .get();
+  if (hasPendingAiWork) ensureBatchPollerRunning();
+
   const stream = new ReadableStream({
     start(controller) {
       const encoder = new TextEncoder();
