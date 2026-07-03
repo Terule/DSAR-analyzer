@@ -297,16 +297,19 @@ function CaseCardComponent({
       return sum;
     }, 0);
 
-    // AI progress is batch-based: completed OpenAI batches divided by the
-    // estimated total batches for the case. Each finished batch advances the
-    // bar by ~1/total (e.g. 5 total -> 20% per batch). The total self-corrects
-    // in the batch worker if the initial estimate is exceeded.
-    const aiBatchesTotal = pstFiles.reduce(
-      (sum, file) => sum + (file.ai_batches_total || 0),
+    // AI progress is item-based: the total number of unique emails to audit is
+    // 100%, and each completed batch advances the bar by (items in that batch /
+    // total). ai_approved_count + ai_discarded_count grows by a batch's item
+    // count when it finishes (and instantly for rule/system pre-filtered items),
+    // so audited / total tracks real per-batch progress without depending on a
+    // batch-count estimate.
+    const aiTotalItems = pstFiles.reduce(
+      (sum, file) => sum + (file.unique_emails || 0),
       0,
     );
-    const aiBatchesDone = pstFiles.reduce(
-      (sum, file) => sum + (file.ai_batches_done || 0),
+    const aiAuditedItems = pstFiles.reduce(
+      (sum, file) =>
+        sum + (file.ai_approved_count || 0) + (file.ai_discarded_count || 0),
       0,
     );
     const anyAiActive = pstFiles.some((f) =>
@@ -351,8 +354,8 @@ function CaseCardComponent({
     const extract = Math.round((extractSum / total) * 100);
     const ai = allAiDone
       ? 100
-      : aiBatchesTotal > 0
-        ? Math.min(99, Math.round((aiBatchesDone / aiBatchesTotal) * 100))
+      : aiTotalItems > 0
+        ? Math.min(99, Math.round((aiAuditedItems / aiTotalItems) * 100))
         : anyAiActive
           ? ACTIVE_MIN_PROGRESS_AI_RENDER * 100
           : 0;

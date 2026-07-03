@@ -38,11 +38,93 @@ function isConvertWorkerAlive(): boolean {
 }
 
 /**
+ * Headlessly starts the Files phase for any case whose email pipeline is done.
+ *
+ * The Files phase is normally kicked off by the browser orchestrator, so if the
+ * tab reloaded / the machine slept during a long AI+Render run it would never
+ * start. This starts it in-server: for each Files row still pending whose sibling
+ * PST files have all rendered, it copies the subject config from a rendered PST
+ * row and spawns the detached files-worker. Files-only cases (no PST siblings /
+ * no persisted config) are left to the UI. Returns how many were started.
+ */
+function startReadyFilesPhases(): number {
+  const filesRows = db
+    .prepare(
+      "SELECT id, filepath FROM processed_files WHERE kind = 'files' AND files_status = 'pending'",
+    )
+    .all() as { id: string; filepath: string }[];
+  if (filesRows.length === 0) return 0;
+
+  const pstRows = db
+    .prepare(
+      `SELECT filepath, pdf_status, subject_name, subject_email, subject_aliases
+       FROM processed_files WHERE kind = 'pst'`,
+    )
+    .all() as {
+    filepath: string;
+    pdf_status: string;
+    subject_name?: string;
+    subject_email?: string;
+    subject_aliases?: string;
+  }[];
+
+  let started = 0;
+  for (const fr of filesRows) {
+    // The Files dir sits at [case]/[request]/Files; its PST siblings live under
+    // [case]/[request]/... . Group by the [case]/[request] parent directory.
+    const caseDir = `${path.dirname(fr.filepath)}${path.sep}`;
+    const siblings = pstRows.filter((p) => p.filepath.startsWith(caseDir));
+    if (siblings.length === 0) continue; // Files-only case — UI must configure it.
+
+    const allRendered = siblings.every(
+      (p) => p.pdf_status === "completed" || p.pdf_status === "failed",
+    );
+    if (!allRendered) continue;
+
+    const configured = siblings.find((p) => p.subject_name?.trim());
+    if (!configured) continue; // No subject config persisted yet.
+
+    // Claim atomically so we don't double-start or race the UI.
+    const claim = db
+      .prepare(
+        `UPDATE processed_files
+         SET subject_name = ?, subject_email = ?, subject_aliases = ?,
+             files_status = 'processing', files_started_at = ?
+         WHERE id = ? AND files_status = 'pending'`,
+      )
+      .run(
+        configured.subject_name ?? "",
+        configured.subject_email ?? "",
+        configured.subject_aliases ?? "",
+        Date.now(),
+        fr.id,
+      );
+    if (claim.changes === 0) continue;
+
+    const workerPath = path.resolve(process.cwd(), "files-worker.ts");
+    const logFd = openWorkerLogFd("files-worker");
+    const child = spawn("bun", [workerPath, fr.id], {
+      cwd: process.cwd(),
+      detached: true,
+      stdio: ["ignore", logFd, logFd],
+    });
+    child.unref();
+    started++;
+    console.log(`[Batch Scheduler] Started headless Files phase for ${fr.id}.`);
+  }
+  return started;
+}
+
+/**
  * One sweep pass: triggers the render worker for finished-AI/pending-render
  * files and polls every OpenAI batch awaiting sync. Returns whether any
  * AI/render work still remains (used to decide if polling should continue).
  */
 export async function runBatchSweep(): Promise<SweepResult> {
+  // Kick off any case whose email pipeline finished but whose Files phase never
+  // started (e.g. the UI orchestrator state was lost mid-run).
+  startReadyFilesPhases();
+
   // 0. Reclaim render jobs orphaned by a dead worker. A file stuck in
   // 'processing' with no live convert-worker was abandoned (machine slept,
   // worker crashed/killed) — requeue it so the render resumes idempotently

@@ -5,13 +5,19 @@ export const dynamic = "force-dynamic";
 
 export async function GET(req: Request) {
   // If the server restarted while an AI/render phase was mid-flight, resume the
-  // poller as soon as a dashboard reconnects so batches keep getting synced and
-  // a render orphaned in 'processing' (dead worker) gets reclaimed.
+  // poller as soon as a dashboard reconnects so batches keep getting synced, a
+  // render orphaned in 'processing' gets reclaimed, and a Files phase whose case
+  // already rendered gets started headlessly.
   const hasPendingAiWork = db
     .prepare(
       `SELECT 1 FROM processed_files
        WHERE ai_status IN ('processing', 'batch_ready')
           OR (ai_status = 'completed' AND pdf_status IN ('pending', 'processing'))
+          OR (kind = 'files' AND files_status = 'pending'
+              AND EXISTS (
+                SELECT 1 FROM processed_files p2
+                WHERE p2.kind = 'pst' AND p2.pdf_status = 'completed'
+              ))
        LIMIT 1`,
     )
     .get();

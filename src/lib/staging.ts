@@ -8,7 +8,13 @@ async function getAllPstFiles(
   dirPath: string,
   arrayOfFiles: string[] = [],
 ): Promise<string[]> {
-  const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+  } catch (err) {
+    console.error(`[Scanner] Cannot read dir ${dirPath}:`, err);
+    return arrayOfFiles;
+  }
 
   for (const entry of entries) {
     const fullPath = path.resolve(dirPath, entry.name);
@@ -29,7 +35,13 @@ async function getAllFilesDirs(
   dirPath: string,
   found: string[] = [],
 ): Promise<string[]> {
-  const entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+  let entries: import("node:fs").Dirent[];
+  try {
+    entries = await fs.promises.readdir(dirPath, { withFileTypes: true });
+  } catch (err) {
+    console.error(`[Scanner] Cannot read dir ${dirPath}:`, err);
+    return found;
+  }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -87,6 +99,13 @@ export async function syncStagingArea(
     return;
   }
 
+  // Prune FIRST, before any directory walk. Pruning only needs the DB +
+  // fs.existsSync, so running it up front guarantees that rows for deleted
+  // cases are removed even if the walk/upsert below later throws (e.g. an
+  // unreadable Files folder). Previously prune ran last, so a mid-scan error
+  // meant adds succeeded but deletions were silently skipped.
+  const pruned = pruneMissingRows();
+
   const currentPstPaths = await getAllPstFiles(directoryPath);
   const filesDirs = await getAllFilesDirs(directoryPath);
 
@@ -113,34 +132,35 @@ export async function syncStagingArea(
 
   let newPst = 0;
   for (const fullPath of currentPstPaths) {
-    const stats = fs.statSync(fullPath);
-    const fileId = hashId(fullPath);
-    const existed = db
-      .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
-      .get(fileId);
-    upsertPst.run(fileId, path.basename(fullPath), fullPath, stats.size);
-    if (!existed) newPst++;
+    try {
+      const stats = fs.statSync(fullPath);
+      const fileId = hashId(fullPath);
+      const existed = db
+        .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
+        .get(fileId);
+      upsertPst.run(fileId, path.basename(fullPath), fullPath, stats.size);
+      if (!existed) newPst++;
+    } catch (err) {
+      console.error(`[Scanner] Skipping PST ${fullPath}:`, err);
+    }
   }
 
   let newFiles = 0;
   for (const filesDir of filesDirs) {
-    const { count, totalBytes } = await summarizeFilesDir(filesDir);
-    if (count === 0) continue; // Skip empty Files folders.
+    try {
+      const { count, totalBytes } = await summarizeFilesDir(filesDir);
+      if (count === 0) continue; // Skip empty Files folders.
 
-    const fileId = hashId(filesDir);
-    const existed = db
-      .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
-      .get(fileId);
-    upsertFiles.run(fileId, filesDir, totalBytes, count);
-    if (!existed) newFiles++;
+      const fileId = hashId(filesDir);
+      const existed = db
+        .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
+        .get(fileId);
+      upsertFiles.run(fileId, filesDir, totalBytes, count);
+      if (!existed) newFiles++;
+    } catch (err) {
+      console.error(`[Scanner] Skipping Files dir ${filesDir}:`, err);
+    }
   }
-
-  // Prune orphaned rows whose source no longer exists on disk. This happens
-  // when a PST/Files path is moved or renamed (the id is a hash of the path),
-  // leaving a stale record that would otherwise fail the pipeline (readpst
-  // "No such file or directory"). PST rows point at a file; Files rows point
-  // at a directory — both must still exist to be kept.
-  const pruned = pruneMissingRows();
 
   console.log(
     `[Scanner] Sync complete. Added ${newPst} PST files and ${newFiles} Files batches. Pruned ${pruned} stale rows.`,
