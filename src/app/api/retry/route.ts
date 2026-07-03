@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getCasePstFileIds } from "@/lib/case-utils";
 import { db } from "@/lib/db";
 
 export const dynamic = "force-dynamic";
@@ -35,19 +36,27 @@ export async function POST(request: Request) {
       );
     }
 
-    // 1. Reset PDF compilation failures
+    // 1. Reset PDF compilation failures. Render is case-level (all PST files in
+    // the request share the selected/ folder), so reset every PST row in the case.
     if (row.pdf_status === "failed") {
+      const caseIds = getCasePstFileIds(fileId);
+      const placeholders = caseIds.map(() => "?").join(",");
       db.prepare(
-        "UPDATE processed_files SET pdf_status = 'pending' WHERE id = ?",
-      ).run(fileId);
+        `UPDATE processed_files SET pdf_status = 'pending', pdf_duration_ms = 0 WHERE id IN (${placeholders})`,
+      ).run(...caseIds);
     }
-    // 2. Reset AI Batch processing failures
+    // 2. Reset AI Batch processing failures. AI is case-level (one run audits
+    // the whole request), so reset every PST row; the coordinator re-runs and
+    // resumes from undecided emails.
     else if (row.ai_status === "failed") {
+      const caseIds = getCasePstFileIds(fileId);
+      const placeholders = caseIds.map(() => "?").join(",");
       db.prepare(
-        "UPDATE processed_files SET ai_status = 'pending', ai_started_at = NULL WHERE id = ?",
-      ).run(fileId);
+        `UPDATE processed_files SET ai_status = 'pending', ai_started_at = NULL WHERE id IN (${placeholders})`,
+      ).run(...caseIds);
     }
-    // 3. Reset standard pipeline failures (metadata, analyze, extract)
+    // 3. Reset standard pipeline failures (metadata, analyze, extract). These
+    // are inherently per-file (each PST is parsed/extracted independently).
     else if (row.status === "failed") {
       // If metadata never completed, reset to the very beginning
       if (row.total_emails === 0) {
