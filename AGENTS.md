@@ -51,10 +51,15 @@ Same applies to `searchParams` in page components.
 
 ## Project Conventions
 
-- **Database**: Bun SQLite (`bun:sqlite`) at the path set by `DATABASE_PATH` env var.
+- **Database**: Bun SQLite (`bun:sqlite`) at the path set by `DATABASE_PATH` env var. Runs in WAL mode with a `busy_timeout` (see `src/lib/db.ts`) because multiple processes (API routes + detached workers) write concurrently. Wrap hot analyzer writes in the `withSqliteBusyRetry` helper.
 - **AI**: OpenAI Batch API (`gpt-4o-mini`) via `src/lib/ai.ts`. Do not switch to streaming/realtime calls.
+- **AI batch polling**: In-server self-stopping poller in `src/lib/batch-scheduler.ts` (`ensureBatchPollerRunning` / `runBatchSweep` / `stopBatchPoller`). Started from `/api/filter` when the AI phase begins; resumed from `/api/events` after a restart. There is **no standalone cron process** — do not reintroduce one. `/api/cron` is only a thin manual trigger that delegates to `runBatchSweep`.
 - **PDF**: WeasyPrint-based pipeline in `src/lib/converter.ts`. Do not reintroduce Puppeteer.
 - **Email extraction**: `readpst` (libpst) + `mailparser`. All EML logic lives in `src/lib/analyzer.ts` and `src/lib/exporter.ts`.
+- **Files phase**: Teams messages + loose documents live in a `Files` folder and are processed by `src/lib/standalone-processor.ts` (relevance filter + content dedup + WeasyPrint). It runs **after** the Render phase, never in parallel.
+- **Background workers**: `convert-worker.ts`, `files-worker.ts`, `office-worker.ts` at the repo root run under Bun. They are spawned as **detached, unref'd** child processes and must be cleaned up on wipe/reset (`/api/wipe` kills matching `files-worker.ts` processes). Synchronous CPU-heavy parsing (DOCX/XLSX) must go through `office-worker.ts` so `withTimeout` can actually interrupt it.
+- **Pipeline phases**: Parse → Extract → AI → Render → Files. Rows carry a `kind` of `'pst'` or `'files'`; email phases apply only to `kind='pst'` rows.
+- **Staging/output layout**: input `STAGING_PATH/[case]/[request]/{PST,Files}`; output `EXTRACTED_PATH/[case]/[request]/{Emails,Messages,Documents}`. Row id is a hash of the full path, so moving a file orphans its row — `syncStagingArea` prunes rows whose backing file/folder no longer exists.
 - **Environment variables**: `OPENAI_API_KEY`, `DATABASE_PATH`, `STAGING_PATH`, `EXTRACTED_PATH` — always read from `process.env`, never hardcode paths.
 - **No hardcoded absolute paths** in committed code.
 
@@ -66,7 +71,11 @@ Same applies to `searchParams` in page components.
 src/
   app/           # App Router: pages, layouts, API route handlers
   components/    # React client/server components
-  lib/           # Business logic (no React)
-batches/         # Ephemeral JSONL files for OpenAI batch uploads (gitignored)
+  hooks/         # SSE + notification hooks
+  lib/           # Business logic (no React); includes batch-scheduler.ts, standalone-processor.ts
+convert-worker.ts   # Detached PDF render worker (Render phase)
+files-worker.ts     # Detached Files-phase worker (spawned by /api/files-process)
+office-worker.ts    # Worker thread isolating sync DOCX/XLSX parsing
+batches/            # Ephemeral JSONL files for OpenAI batch uploads (gitignored)
 ```
 <!-- END:nextjs-agent-rules -->

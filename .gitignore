@@ -25,6 +25,7 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 bun-debug.log*
+logs/
 
 # Environment / secrets
 .env
