@@ -8,7 +8,7 @@ It ingests `.pst` files (and a per-request `Files` folder of Teams messages/docu
 
 ## How It Works
 
-Work is organised per **case/request**, and the case is the unit of processing. A single request can contain one or more `.pst` files and an optional `Files` folder. The pipeline runs in phases, each tracked in a SQLite database and streamed live to the UI:
+Work is organised per **case/request**, and the case is the unit of processing. A single request can contain one or more `.pst` files and an optional `Files` folder. The pipeline runs in phases, each tracked in a PostgreSQL database (via Prisma) and streamed live to the UI:
 
 1. **Parse** — `readpst` extracts emails as `.eml` files (per PST). Each email is parsed, hashed, and **deduplicated across the whole request** (by `message-id` with a content-hash fallback; the hash is scoped to `[case]/[request]`, so the same email in two PST files is kept once for the case but never bleeds into a different case).
 2. **Extract** — Unique emails are normalised into per-email JSON payloads for the AI, and drafts / headerless items are filtered out.
@@ -30,7 +30,7 @@ OpenAI batches complete asynchronously. Instead of a separate cron process, an *
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) (runtime and package manager)
+- [Node.js](https://nodejs.org) (runtime, npm package manager)
 - `readpst` (from `libpst`) — must be on `$PATH`
 - WeasyPrint — must be installed for PDF generation
 - An OpenAI API key
@@ -76,16 +76,118 @@ The scanner indexes each `.pst` as a `kind='pst'` row and each `Files` folder as
 Install dependencies:
 
 ```bash
-bun install
+npm install
 ```
 
 Run the development server:
 
 ```bash
-bun dev
+npm run dev
 ```
 
 Open [http://localhost:3000](http://localhost:3000) to access the UI. Batch polling and background workers are managed automatically by the app — no separate cron process is required.
+
+---
+
+## Docker (Primary Runtime)
+
+This repository includes a Docker-first runtime for daily use:
+
+- `Dockerfile` with native dependencies (`readpst`, `weasyprint`, `unzip`)
+- `docker-compose.yml` with `app`, `postgres`, and `redis` services
+- Shared volume mounts for staging/extracted/logs/batches
+- Startup path checks (`scripts/docker-check.mjs`) to fail fast on bad mounts
+- Health checks for app, Postgres, and Redis
+
+### One-Time Setup
+
+1. Copy `.env.docker.example` to `.env`.
+2. Set absolute host paths for:
+  - `HOST_STAGING_PATH`
+  - `HOST_EXTRACTED_PATH`
+3. Set `OPENAI_API_KEY`.
+
+Important:
+
+- Keep `STAGING_PATH` and `EXTRACTED_PATH` as container paths (`/data/...`) when running with Docker.
+- Use `HOST_*` values to point to your real host folders.
+
+### Run with Docker Compose
+
+```bash
+npm run docker:up
+```
+
+Then open [http://localhost:3000](http://localhost:3000).
+
+Useful commands:
+
+```bash
+npm run docker:ps
+npm run docker:logs
+npm run docker:rebuild
+npm run docker:down
+```
+
+### Notes
+
+- The dispatcher is the production local execution path; phase work runs in short-lived Docker containers.
+- `POSTGRES_URL` and `REDIS_URL` are required by the dispatcher.
+- Docker compose uses `POSTGRES_URL_DOCKER` and `REDIS_URL_DOCKER` (defaulting to internal service DNS names) so containers do not try to connect to `localhost`.
+- The control plane is enabled when Postgres configuration is present; set `CONTROL_PLANE_PIPELINE_ENABLED=true` to make this explicit.
+- Host mount paths can be overridden via:
+  - `HOST_STAGING_PATH`
+  - `HOST_EXTRACTED_PATH`
+  - `HOST_DATABASES_PATH`
+
+### Local Control-Plane Worker
+
+The Phase 3 pipeline is local-first. API case-start requests persist jobs in
+the Postgres control-plane. The private Compose `dispatcher` claims those jobs
+with Postgres leases and launches a short-lived, `--rm` Docker worker container
+for each one. Redis (BullMQ) is the wake-up transport; Postgres is the durable
+source of truth. The dispatcher is the only service with Docker-socket access.
+
+Only one case is admitted to the local pipeline at a time. Jobs for that case
+can still run in parallel within their phase limits; jobs from every other case
+remain queued until the active case has fully settled (including OpenAI Batch
+waiting).
+
+Parse and Extract fan out per PST, AI is globally serialized while OpenAI Batch
+work is pending, and Render/Files run in bounded parallelism across cases.
+
+Set `CONTROL_PLANE_PIPELINE_ENABLED=true` to require this path explicitly. If
+unset, it activates whenever `POSTGRES_URL` (or `POSTGRES_URL_DOCKER`) is
+configured. You can also start the local consumer manually with:
+
+```bash
+npm run orchestrator:worker
+```
+
+### Phase 2 Scaffold Endpoints
+
+Without Postgres control-plane config, these routes are safe no-ops for production runs.
+
+- `GET /api/orchestrator/health`: reports control-plane + queue adapter health.
+- `POST /api/orchestrator/bootstrap`: creates/updates Postgres control-plane tables.
+
+These routes operate against the same durable job store used by the dispatcher.
+
+### Migrating Existing Local Data To Docker
+
+If you had local runs before Docker, point Docker to those same host folders via `HOST_*` paths first.
+
+If a case was reset or failed and you want to re-run only AI next time (without wiping parse/extract), use:
+
+```bash
+npm run reset:ai:case -- --case <CASE> --request <REQUEST>
+```
+
+Example:
+
+```bash
+npm run reset:ai:case -- --case FH --request 2026
+```
 
 ---
 
@@ -107,16 +209,17 @@ src/
     exclusions.ts          # Shared privileged/confidential keyword filter
     standalone-processor.ts# Files phase engine (Teams messages + documents)
     converter.ts           # WeasyPrint-based PDF conversion
-    db.ts                  # SQLite schema + connection + SQLITE_BUSY retry
+    prisma.ts               # Prisma client singleton (Postgres, via @prisma/adapter-pg)
     exporter.ts            # Email parsing and content extraction
     purger.ts              # Cleanup utilities
     staging.ts             # Staging scanner + stale-row pruning
     types.ts               # Shared TypeScript types
 
-# Background workers (repo root, run under Bun as detached child processes)
-convert-worker.ts   # PDF rendering for the Render phase
-files-worker.ts     # Files phase processor (spawned by /api/files-process)
-office-worker.ts    # Isolates synchronous DOCX/XLSX parsing off the main loop
+# Runtime and maintenance scripts
+scripts/orchestrator/dispatcher.ts  # Persistent Docker job dispatcher
+scripts/orchestrator/job-runner.ts  # One-shot phase-job entry point
+scripts/workers/office-worker.ts    # Isolates synchronous DOCX/XLSX parsing
+scripts/maintenance/                # Explicit one-off maintenance utilities
 batches/            # Ephemeral JSONL files for OpenAI batch uploads (gitignored)
 ```
 
@@ -125,7 +228,8 @@ batches/            # Ephemeral JSONL files for OpenAI batch uploads (gitignored
 ## Tech Stack
 
 - **Next.js 16** (App Router, `--webpack`)
-- **Bun** — runtime, SQLite driver (`bun:sqlite`, WAL mode)
+- **Node.js** — runtime
+- **PostgreSQL 16** via **Prisma 7** — database access (see `prisma/schema.prisma`, `prisma.config.ts`)
 - **OpenAI Batch API** — async AI triage at scale
 - **WeasyPrint** — HTML-to-PDF rendering
 - **Tailwind CSS v4**

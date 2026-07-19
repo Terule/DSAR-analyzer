@@ -16,6 +16,7 @@ export function AiConfigForm({
 }: AiConfigFormProps) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
+  const [personalEmail, setPersonalEmail] = useState("");
   const [aliases, setAliases] = useState("");
 
   const canLaunch = name.trim().length > 0 && email.trim().length > 0;
@@ -25,6 +26,7 @@ export function AiConfigForm({
     onSubmit({
       name: name.trim(),
       email: email.trim(),
+      personalEmail: personalEmail.trim() || undefined,
       aliases: aliases
         .split(",")
         .map((a) => a.trim())
@@ -66,6 +68,22 @@ export function AiConfigForm({
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             placeholder="e.g. jhon.doe@example.com"
+            className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:border-indigo-500 outline-none transition-colors"
+          />
+        </div>
+        <div>
+          <label
+            htmlFor={`personal-email-${caseName}`}
+            className="block text-xs font-bold text-slate-400 uppercase mb-1.5"
+          >
+            Personal Email (Optional)
+          </label>
+          <input
+            id={`personal-email-${caseName}`}
+            type="email"
+            value={personalEmail}
+            onChange={(e) => setPersonalEmail(e.target.value)}
+            placeholder="e.g. jhon.doe@gmail.com"
             className="w-full bg-slate-800 border border-slate-700 rounded-lg px-4 py-2.5 text-sm text-white focus:border-indigo-500 outline-none transition-colors"
           />
         </div>

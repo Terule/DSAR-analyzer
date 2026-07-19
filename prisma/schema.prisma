@@ -1,0 +1,142 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model ProcessedFile {
+  id                      String   @id
+  filename                String?
+  filepath                String?
+  file_size_bytes         BigInt   @default(0)
+  status                  String   @default("pending")
+  total_emails            Int      @default(0)
+  total_attachments       Int      @default(0)
+  unique_emails           Int      @default(0)
+  duplicate_emails        Int      @default(0)
+  estimated_tokens        Int      @default(0)
+  created_at              DateTime @default(now())
+  ai_status               String   @default("pending")
+  ai_approved_count       Int      @default(0)
+  ai_discarded_count      Int      @default(0)
+  ai_batches_total        Int      @default(0)
+  ai_batches_done         Int      @default(0)
+  pdf_status              String   @default("pending")
+  batch_id                String?
+  subject_name            String?
+  subject_email           String?
+  subject_personal_email  String?
+  subject_aliases         String?
+  metadata_duration_ms    Int      @default(0)
+  analyze_duration_ms     Int      @default(0)
+  extract_duration_ms     Int      @default(0)
+  ai_started_at           BigInt?
+  ai_duration_ms          Int      @default(0)
+  pdf_duration_ms         Int      @default(0)
+  pdf_total               Int      @default(0)
+  pdf_processed           Int      @default(0)
+  kind                    String   @default("pst")
+  files_status            String   @default("pending")
+  files_total             Int      @default(0)
+  files_processed         Int      @default(0)
+  files_skipped           Int      @default(0)
+  files_duplicates        Int      @default(0)
+  files_duration_ms       Int      @default(0)
+  files_started_at        BigInt?
+
+  emails Email[] @relation("ProcessedFileEmails")
+
+  @@map("processed_files")
+}
+
+model Email {
+  id                String  @id
+  file_id           String?
+  message_id        String?
+  sent_date         String?
+  email_hash        String  @unique
+  is_duplicate      Int     @default(0)
+  parent_email_hash String?
+  is_attachment     Int     @default(0)
+  ai_decision       String?
+  ai_reason         String?
+
+  processed_file ProcessedFile? @relation("ProcessedFileEmails", fields: [file_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+
+  @@index([file_id])
+  @@map("emails")
+}
+
+model RunHistory {
+  id                   String   @id
+  source_file_id       String
+  source_kind          String?
+  filename             String?
+  filepath             String?
+  case_key             String?
+  request_key          String?
+  status               String?
+  ai_status            String?
+  pdf_status           String?
+  files_status         String?
+  total_emails         Int      @default(0)
+  unique_emails        Int      @default(0)
+  duplicate_emails     Int      @default(0)
+  ai_approved_count    Int      @default(0)
+  ai_discarded_count   Int      @default(0)
+  files_total          Int      @default(0)
+  files_processed      Int      @default(0)
+  files_skipped        Int      @default(0)
+  files_duplicates     Int      @default(0)
+  metadata_duration_ms Int      @default(0)
+  analyze_duration_ms  Int      @default(0)
+  extract_duration_ms  Int      @default(0)
+  ai_duration_ms       Int      @default(0)
+  pdf_duration_ms      Int      @default(0)
+  files_duration_ms    Int      @default(0)
+  terminal_outcome     String
+  archived_reason      String
+  state_signature      String
+  finalized_at         DateTime
+  created_at           DateTime @default(now())
+
+  @@unique([source_file_id, state_signature])
+  @@index([case_key])
+  @@index([terminal_outcome])
+  @@map("run_history")
+}
+
+model CaseHistory {
+  id                   String   @id
+  case_key             String
+  request_key          String?
+  source_rows          Int      @default(0)
+  pst_rows             Int      @default(0)
+  files_rows           Int      @default(0)
+  total_emails         Int      @default(0)
+  unique_emails        Int      @default(0)
+  duplicate_emails     Int      @default(0)
+  emails_selected      Int      @default(0)
+  emails_discarded     Int      @default(0)
+  files_total          Int      @default(0)
+  files_processed      Int      @default(0)
+  files_skipped        Int      @default(0)
+  files_duplicates     Int      @default(0)
+  metadata_duration_ms Int      @default(0)
+  analyze_duration_ms  Int      @default(0)
+  extract_duration_ms  Int      @default(0)
+  ai_duration_ms       Int      @default(0)
+  pdf_duration_ms      Int      @default(0)
+  files_duration_ms    Int      @default(0)
+  total_duration_ms    Int      @default(0)
+  terminal_outcome     String
+  archived_reason      String
+  state_signature      String
+  finalized_at       DateTime
+  created_at         DateTime @default(now())
+
+  @@unique([case_key, state_signature])
+  @@map("case_history")
+}

@@ -8,9 +8,11 @@
  * Spawned by src/lib/standalone-processor.ts via `new Worker(...)`.
  */
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import { parentPort, workerData } from "node:worker_threads";
-import { processDocxToPdf, processExcelToPdf } from "./src/lib/converter";
+import * as xlsx from "xlsx";
+import { processDocxToPdf, processExcelToPdf } from "../../src/lib/converter";
 
 interface OfficeWorkerData {
   kind: "docx" | "excel";
@@ -23,6 +25,33 @@ interface OfficeWorkerData {
 function isLikelyPasswordProtectedOffice(buffer: Buffer): boolean {
   // OOXML encrypted containers usually include this marker.
   return buffer.includes(Buffer.from("EncryptedPackage", "utf-8"));
+}
+
+/** A stable fingerprint of what an Excel user can see, ignoring package metadata. */
+function excelContentKey(buffer: Buffer): string {
+  const workbook = xlsx.read(buffer, { type: "buffer", cellText: true });
+  const sheets = workbook.SheetNames.map((name) => {
+    const sheet = workbook.Sheets[name];
+    const range = sheet?.["!ref"]
+      ? xlsx.utils.decode_range(sheet["!ref"])
+      : null;
+    const cells: string[][] = [];
+    if (range) {
+      for (let row = range.s.r; row <= range.e.r; row++) {
+        const values: string[] = [];
+        for (let column = range.s.c; column <= range.e.c; column++) {
+          const cell = sheet[xlsx.utils.encode_cell({ r: row, c: column })];
+          values.push(cell ? xlsx.utils.format_cell(cell).trim() : "");
+        }
+        cells.push(values);
+      }
+    }
+    return { name, cells };
+  });
+  return `office:${crypto
+    .createHash("sha256")
+    .update(JSON.stringify(sheets))
+    .digest("hex")}`;
 }
 
 async function main() {
@@ -41,12 +70,18 @@ async function main() {
       return;
     }
 
+    const contentKey = kind === "excel" ? excelContentKey(buffer) : undefined;
     const success =
       kind === "docx"
         ? await processDocxToPdf(buffer, outputPath, criteria, docTitle)
         : await processExcelToPdf(buffer, outputPath, criteria, docTitle);
 
-    parentPort?.postMessage({ ok: true, success, passwordProtected: false });
+    parentPort?.postMessage({
+      ok: true,
+      success,
+      passwordProtected: false,
+      contentKey,
+    });
   } catch (error) {
     parentPort?.postMessage({
       ok: false,

@@ -1,19 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback } from "react";
+import { toast } from "sonner";
 import type { AppNotification } from "@/lib/types";
 
-export function useNotification(timeoutMs = 5000) {
-  const [notification, setNotification] = useState<AppNotification | null>(
-    null,
-  );
+export function useNotification() {
+  const setNotification = useCallback((notification: AppNotification) => {
+    toast[notification.type](notification.message);
+  }, []);
 
-  useEffect(() => {
-    if (notification) {
-      const timer = setTimeout(() => setNotification(null), timeoutMs);
-      return () => clearTimeout(timer);
-    }
-  }, [notification, timeoutMs]);
-
-  return { notification, setNotification };
+  return { setNotification };
 }

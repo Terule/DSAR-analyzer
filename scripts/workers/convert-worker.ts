@@ -5,9 +5,9 @@
  * Only one instance of this worker should run at a time.
  */
 
-import { isCaseAiSettled } from "./src/lib/case-utils";
-import { convertToPdfBatch } from "./src/lib/converter";
-import { db } from "./src/lib/db";
+import { isCaseAiSettled } from "../../src/lib/case-utils";
+import { convertToPdfBatch } from "../../src/lib/converter";
+import { prisma } from "../../src/lib/prisma";
 
 let shouldStop = false;
 
@@ -22,44 +22,41 @@ function requestShutdown(signal: string) {
 process.on("SIGINT", () => requestShutdown("SIGINT"));
 process.on("SIGTERM", () => requestShutdown("SIGTERM"));
 
-function pickNext():
-  | { id: string; ai_status: string; pdf_status: string }
-  | undefined {
+async function pickNext(): Promise<
+  { id: string; ai_status: string; pdf_status: string } | undefined
+> {
   // Render is case-level. Only claim a file whose entire case has settled its
   // AI phase, so we never render (and prematurely mark completed) a case while a
   // sibling PST file is still being audited.
-  const candidates = db
-    .prepare(
-      `SELECT id, ai_status, pdf_status FROM processed_files
-       WHERE ai_status = 'completed' AND pdf_status = 'pending'
-       ORDER BY created_at ASC`,
-    )
-    .all() as { id: string; ai_status: string; pdf_status: string }[];
+  const candidates = await prisma.processedFile.findMany({
+    where: { ai_status: "completed", pdf_status: "pending" },
+    orderBy: { created_at: "asc" },
+    select: { id: true, ai_status: true, pdf_status: true },
+  });
 
-  return candidates.find((c) => isCaseAiSettled(c.id));
+  for (const candidate of candidates) {
+    if (await isCaseAiSettled(candidate.id)) return candidate;
+  }
+  return undefined;
 }
 
 async function run() {
-  let file = pickNext();
+  let file = await pickNext();
 
   while (file && !shouldStop) {
     const { id } = file;
 
     // Atomically claim this file so no other worker picks it up.
-    db.prepare(
-      "UPDATE processed_files SET pdf_status = 'processing', pdf_duration_ms = 0 WHERE id = ? AND pdf_status = 'pending'",
-    ).run(id);
+    const claim = await prisma.processedFile.updateMany({
+      where: { id, pdf_status: "pending" },
+      data: { pdf_status: "processing", pdf_duration_ms: 0 },
+    });
 
-    // Re-check that we actually claimed it (another process might have beaten us).
-    const claimed = db
-      .prepare("SELECT pdf_status FROM processed_files WHERE id = ?")
-      .get(id) as { pdf_status: string } | undefined;
-
-    if (claimed?.pdf_status !== "processing") {
+    if (claim.count === 0) {
       console.log(
         `[convert-worker] File ${id} claimed by another worker, skipping.`,
       );
-      file = pickNext();
+      file = await pickNext();
       continue;
     }
 
@@ -69,13 +66,14 @@ async function run() {
       console.log(`[convert-worker] Completed: ${id}`);
     } catch (err) {
       console.error(`[convert-worker] Failed: ${id}`, err);
-      db.prepare(
-        "UPDATE processed_files SET pdf_status = 'failed' WHERE id = ?",
-      ).run(id);
+      await prisma.processedFile.update({
+        where: { id },
+        data: { pdf_status: "failed" },
+      });
     }
 
     if (shouldStop) break;
-    file = pickNext();
+    file = await pickNext();
   }
 
   if (shouldStop) {

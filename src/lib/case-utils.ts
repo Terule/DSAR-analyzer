@@ -1,5 +1,5 @@
 import path from "node:path";
-import { db } from "./db";
+import { prisma } from "./prisma";
 
 /**
  * The email pipeline shares working folders (.unique-emails/selected, Emails/…)
@@ -11,19 +11,21 @@ import { db } from "./db";
  */
 
 /** Ids of all PST rows in the same case/request directory as `fileId`. */
-export function getCasePstFileIds(fileId: string): string[] {
-  const row = db
-    .prepare("SELECT filepath FROM processed_files WHERE id = ?")
-    .get(fileId) as { filepath: string } | undefined;
-  if (!row) return [fileId];
+export async function getCasePstFileIds(fileId: string): Promise<string[]> {
+  const row = await prisma.processedFile.findUnique({
+    where: { id: fileId },
+    select: { filepath: true },
+  });
+  if (!row?.filepath) return [fileId];
 
   const caseDir = path.dirname(row.filepath);
-  const rows = db
-    .prepare("SELECT id, filepath FROM processed_files WHERE kind = 'pst'")
-    .all() as { id: string; filepath: string }[];
+  const rows = await prisma.processedFile.findMany({
+    where: { kind: "pst" },
+    select: { id: true, filepath: true },
+  });
 
   const ids = rows
-    .filter((r) => path.dirname(r.filepath) === caseDir)
+    .filter((r) => r.filepath && path.dirname(r.filepath) === caseDir)
     .map((r) => r.id);
 
   return ids.length > 0 ? ids : [fileId];
@@ -34,17 +36,15 @@ export function getCasePstFileIds(fileId: string): string[] {
  * (`completed` or `failed`) — i.e. the case's `selected/` set is final and
  * Render can run once for the whole case.
  */
-export function isCaseAiSettled(fileId: string): boolean {
-  const ids = getCasePstFileIds(fileId);
-  const placeholders = ids.map(() => "?").join(",");
-  const pending = db
-    .prepare(
-      `SELECT 1 FROM processed_files
-       WHERE id IN (${placeholders})
-         AND ai_status NOT IN ('completed', 'failed')
-       LIMIT 1`,
-    )
-    .get(...ids);
+export async function isCaseAiSettled(fileId: string): Promise<boolean> {
+  const ids = await getCasePstFileIds(fileId);
+  const pending = await prisma.processedFile.findFirst({
+    where: {
+      id: { in: ids },
+      ai_status: { notIn: ["completed", "failed"] },
+    },
+    select: { id: true },
+  });
   return !pending;
 }
 
@@ -53,36 +53,71 @@ export function isCaseAiSettled(fileId: string): boolean {
  * state, but the terminal status must be mirrored to every PST row in the case
  * so the UI aggregation and the render gate (`isCaseAiSettled`) see the case as
  * done. The real duration is recorded only on the coordinator (0 on siblings)
- * so the telemetry sum stays accurate.
+ * so the telemetry sum stays accurate. Both updates run inside a single
+ * transaction so the case never ends up half-updated.
  */
-export function markCaseAiCompleted(
+export async function markCaseAiCompleted(
   coordinatorId: string,
   durationMs: number,
-): void {
-  const ids = getCasePstFileIds(coordinatorId);
-  const placeholders = ids.map(() => "?").join(",");
-  db.prepare(
-    `UPDATE processed_files
-     SET ai_status = 'completed',
-         batch_id = NULL,
-         ai_started_at = NULL,
-         ai_duration_ms = CASE WHEN id = ? THEN ? ELSE 0 END
-     WHERE id IN (${placeholders})`,
-  ).run(coordinatorId, durationMs, ...ids);
+): Promise<void> {
+  const ids = await getCasePstFileIds(coordinatorId);
+  const siblingIds = ids.filter((id) => id !== coordinatorId);
+
+  await prisma.$transaction([
+    prisma.processedFile.update({
+      where: { id: coordinatorId },
+      data: {
+        ai_status: "completed",
+        batch_id: null,
+        ai_started_at: null,
+        ai_duration_ms: durationMs,
+      },
+    }),
+    ...(siblingIds.length > 0
+      ? [
+          prisma.processedFile.updateMany({
+            where: { id: { in: siblingIds } },
+            data: {
+              ai_status: "completed",
+              batch_id: null,
+              ai_started_at: null,
+              ai_duration_ms: 0,
+            },
+          }),
+        ]
+      : []),
+  ]);
 }
 
-export function markCaseAiFailed(
+export async function markCaseAiFailed(
   coordinatorId: string,
   durationMs: number,
-): void {
-  const ids = getCasePstFileIds(coordinatorId);
-  const placeholders = ids.map(() => "?").join(",");
-  db.prepare(
-    `UPDATE processed_files
-     SET ai_status = 'failed',
-         batch_id = NULL,
-         ai_started_at = NULL,
-         ai_duration_ms = CASE WHEN id = ? THEN ? ELSE 0 END
-     WHERE id IN (${placeholders})`,
-  ).run(coordinatorId, durationMs, ...ids);
+): Promise<void> {
+  const ids = await getCasePstFileIds(coordinatorId);
+  const siblingIds = ids.filter((id) => id !== coordinatorId);
+
+  await prisma.$transaction([
+    prisma.processedFile.update({
+      where: { id: coordinatorId },
+      data: {
+        ai_status: "failed",
+        batch_id: null,
+        ai_started_at: null,
+        ai_duration_ms: durationMs,
+      },
+    }),
+    ...(siblingIds.length > 0
+      ? [
+          prisma.processedFile.updateMany({
+            where: { id: { in: siblingIds } },
+            data: {
+              ai_status: "failed",
+              batch_id: null,
+              ai_started_at: null,
+              ai_duration_ms: 0,
+            },
+          }),
+        ]
+      : []),
+  ]);
 }

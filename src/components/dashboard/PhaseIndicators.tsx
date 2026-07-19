@@ -16,6 +16,7 @@ export interface PhaseItem {
   isProcessing: boolean;
   isDone: boolean;
   progressPct: number;
+  detail?: string;
 }
 
 export const PHASE_ICONS = {
@@ -80,6 +81,11 @@ export function PhaseIndicators({ phases }: { phases: PhaseItem[] }) {
                 <span className="text-[10px] font-semibold tabular-nums">
                   {clampedProgress}%
                 </span>
+                {item.detail && (
+                  <span className="text-[10px] text-slate-500 tabular-nums">
+                    {item.detail}
+                  </span>
+                )}
               </>
             )}
           </div>

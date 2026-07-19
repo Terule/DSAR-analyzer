@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { pollBatchStatus } from "@/lib/batch-worker";
-import { db } from "@/lib/db";
+import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
@@ -23,9 +23,10 @@ export async function POST(request: Request) {
     // 🔥 ORPHANED BATCH AUTO-HEALER 🔥
     // If the worker returns "no_batch", the file is missing its OpenAI ID.
     if (status === "no_batch") {
-      const row = db
-        .prepare("SELECT ai_status FROM processed_files WHERE id = ?")
-        .get(fileId) as { ai_status: string } | undefined;
+      const row = await prisma.processedFile.findUnique({
+        where: { id: fileId },
+        select: { ai_status: true },
+      });
 
       if (row && row.ai_status === "batch_ready") {
         console.log(
@@ -33,9 +34,10 @@ export async function POST(request: Request) {
         );
 
         // Push the file back to pending so the UI orchestrator can restart it instantly
-        db.prepare(
-          "UPDATE processed_files SET ai_status = 'pending' WHERE id = ?",
-        ).run(fileId);
+        await prisma.processedFile.update({
+          where: { id: fileId },
+          data: { ai_status: "pending" },
+        });
 
         return NextResponse.json(
           {

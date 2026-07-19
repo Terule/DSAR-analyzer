@@ -9,7 +9,7 @@ import {
   RefreshCw,
   Trash2,
 } from "lucide-react";
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useMemo } from "react";
 import { maskCaseName } from "@/lib/format";
 import type { AiConfig, CaseStats, StagedFile } from "@/lib/types";
 import { AiConfigForm } from "./AiConfigForm";
@@ -20,21 +20,12 @@ import {
   type PhaseItem,
 } from "./PhaseIndicators";
 
-const DEFAULT_PARSE_MS = 120_000;
-const DEFAULT_EXTRACT_MS = 90_000;
-const DEFAULT_AI_MS = 480_000;
-const DEFAULT_RENDER_MS = 120_000;
-const ACTIVE_MAX_PROGRESS = 0.96;
-const ACTIVE_MIN_PROGRESS_PARSE_EXTRACT = 0;
-const ACTIVE_MIN_PROGRESS_AI_RENDER = 0.04;
-const PHASE_PROGRESS_SMOOTH_STEP = 8;
-
 interface CaseCardProps {
   caseName: string;
   caseFiles: StagedFile[];
   privacyMode: boolean;
   hasAiConfig: boolean;
-  isSequenceLocked: boolean;
+  isBlockedByAnotherCase: boolean;
   isSyncing: boolean;
   isResetting: boolean;
   isMetricsOpen: boolean;
@@ -82,63 +73,12 @@ function computeStats(caseFiles: StagedFile[]): CaseStats {
   );
 }
 
-function clampUnit(value: number): number {
-  return Math.max(0, Math.min(1, value));
-}
-
-function averageDuration(values: number[], fallbackMs: number): number {
-  if (values.length === 0) return fallbackMs;
-  const total = values.reduce((sum, current) => sum + current, 0);
-  return Math.max(1, total / values.length);
-}
-
-function tunedDuration(
-  values: number[],
-  fallbackMs: number,
-  minFactor: number,
-  maxFactor: number,
-): number {
-  const avg = averageDuration(values, fallbackMs);
-  const minMs = fallbackMs * minFactor;
-  const maxMs = fallbackMs * maxFactor;
-  return Math.max(minMs, Math.min(maxMs, avg));
-}
-
-function activeProgress(
-  elapsedMs: number,
-  targetMs: number,
-  minProgress: number,
-): number {
-  const unit = clampUnit(elapsedMs / Math.max(1, targetMs));
-  return minProgress + unit * (ACTIVE_MAX_PROGRESS - minProgress);
-}
-
-function smoothProgress(prev: number, next: number): number {
-  if (next <= prev) return next;
-  if (next === 100) return 100;
-  return Math.min(prev + PHASE_PROGRESS_SMOOTH_STEP, next);
-}
-
-function toTimestampMs(value?: string): number | null {
-  if (!value) return null;
-
-  // SQLite CURRENT_TIMESTAMP is typically "YYYY-MM-DD HH:MM:SS" in UTC.
-  // Browsers can interpret this as local time, causing future timestamps.
-  const sqliteUtcPattern = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
-  const normalized = sqliteUtcPattern.test(value)
-    ? `${value.replace(" ", "T")}Z`
-    : value;
-
-  const parsed = Date.parse(normalized);
-  return Number.isNaN(parsed) ? null : parsed;
-}
-
 function CaseCardComponent({
   caseName,
   caseFiles,
   privacyMode,
   hasAiConfig,
-  isSequenceLocked,
+  isBlockedByAnotherCase,
   isSyncing,
   isResetting,
   isMetricsOpen,
@@ -169,147 +109,40 @@ function CaseCardComponent({
   const hasPst = pstFiles.length > 0;
   const hasFiles = !!filesRow;
 
-  const [nowMs, setNowMs] = useState(() => Date.now());
-  const [displayedPhaseProgress, setDisplayedPhaseProgress] = useState({
-    parse: 0,
-    extract: 0,
-    ai: 0,
-    render: 0,
-  });
-
-  const hasActiveWork = useMemo(
-    () =>
-      pstFiles.some(
-        (f) =>
-          ["scanning_metadata", "pending_analysis", "processing"].includes(
-            f.status,
-          ) ||
-          f.status === "extracting" ||
-          ["processing", "batch_ready"].includes(f.ai_status || "") ||
-          f.pdf_status === "processing",
-      ) || filesRow?.files_status === "processing",
-    [pstFiles, filesRow],
-  );
-
-  useEffect(() => {
-    if (!hasActiveWork) return;
-
-    const timer = setInterval(() => {
-      setNowMs(Date.now());
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [hasActiveWork]);
-
   const phaseProgress = useMemo(() => {
     if (pstFiles.length === 0) {
-      return { parse: 0, extract: 0, ai: 0, render: 0 };
+      return {
+        parse: 0,
+        extract: 0,
+        ai: 0,
+        render: 0,
+        parseComplete: 0,
+        extractComplete: 0,
+        renderTotal: 0,
+        renderProcessed: 0,
+        aiAuditedItems: 0,
+        aiTotalItems: 0,
+      };
     }
 
     const total = pstFiles.length;
 
-    const parseSamples = pstFiles
-      .map((f) => (f.metadata_duration_ms || 0) + (f.analyze_duration_ms || 0))
-      .filter((ms) => ms > 0);
-    const extractSamples = pstFiles
-      .map((f) => f.extract_duration_ms || 0)
-      .filter((ms) => ms > 0);
-    const aiSamples = pstFiles
-      .map((f) => f.ai_duration_ms || 0)
-      .filter((ms) => ms > 0);
-    const renderSamples = pstFiles
-      .map((f) => f.pdf_duration_ms || 0)
-      .filter((ms) => ms > 0);
+    const parseComplete = pstFiles.filter((file) =>
+      ["analyzed", "extracting", "completed", "failed"].includes(file.status),
+    ).length;
+    const extractComplete = pstFiles.filter((file) =>
+      ["completed", "failed"].includes(file.status),
+    ).length;
 
-    const parseTargetMs = tunedDuration(parseSamples, DEFAULT_PARSE_MS, 0.5, 3);
-    const extractTargetMs = tunedDuration(
-      extractSamples,
-      DEFAULT_EXTRACT_MS,
-      0.5,
-      3,
-    );
-    const aiTargetMs = tunedDuration(aiSamples, DEFAULT_AI_MS, 0.5, 4);
-    const renderTargetMs = tunedDuration(
-      renderSamples,
-      DEFAULT_RENDER_MS,
-      0.5,
-      3,
-    );
-
-    const parseSum = pstFiles.reduce((sum, file) => {
-      if (
-        ["analyzed", "extracting", "completed", "failed"].includes(file.status)
-      ) {
-        return sum + 1;
-      }
-
-      if (
-        ["scanning_metadata", "pending_analysis", "processing"].includes(
-          file.status,
-        )
-      ) {
-        const createdAtMs = toTimestampMs(file.created_at);
-        const parseStartEstimate =
-          createdAtMs || nowMs - Math.floor(parseTargetMs * 0.2);
-        const parseStartMs = Math.min(parseStartEstimate, nowMs);
-        const elapsedMs = Math.max(0, nowMs - parseStartMs);
-        return (
-          sum +
-          activeProgress(
-            elapsedMs,
-            parseTargetMs,
-            ACTIVE_MIN_PROGRESS_PARSE_EXTRACT,
-          )
-        );
-      }
-
-      return sum;
-    }, 0);
-
-    const extractSum = pstFiles.reduce((sum, file) => {
-      if (["completed", "failed"].includes(file.status)) {
-        return sum + 1;
-      }
-
-      if (file.status === "extracting") {
-        const createdAtMs = toTimestampMs(file.created_at);
-
-        const knownParseMs =
-          (file.metadata_duration_ms || 0) + (file.analyze_duration_ms || 0);
-        const parseMsForOffset =
-          knownParseMs > 0 ? knownParseMs : parseTargetMs;
-        const extractStartEstimate = createdAtMs
-          ? createdAtMs + parseMsForOffset
-          : nowMs - Math.floor(extractTargetMs * 0.2);
-        const extractStartMs = Math.min(extractStartEstimate, nowMs);
-        const elapsedMs = Math.max(0, nowMs - extractStartMs);
-
-        return (
-          sum +
-          activeProgress(
-            elapsedMs,
-            extractTargetMs,
-            ACTIVE_MIN_PROGRESS_PARSE_EXTRACT,
-          )
-        );
-      }
-
-      return sum;
-    }, 0);
-
-    // AI progress is item-based: the total number of unique emails to audit is
-    // 100%, and each completed batch advances the bar by (items in that batch /
-    // total). ai_approved_count + ai_discarded_count grows by a batch's item
-    // count when it finishes (and instantly for rule/system pre-filtered items),
-    // so audited / total tracks real per-batch progress without depending on a
-    // batch-count estimate.
+    // AI progress comes from the actual email rows with a persisted decision.
+    // Cumulative approval/discard counters are reporting metrics and must not
+    // drive progress because a retried Batch can otherwise inflate them.
     const aiTotalItems = pstFiles.reduce(
       (sum, file) => sum + (file.unique_emails || 0),
       0,
     );
     const aiAuditedItems = pstFiles.reduce(
-      (sum, file) =>
-        sum + (file.ai_approved_count || 0) + (file.ai_discarded_count || 0),
+      (sum, file) => sum + (file.ai_audited_count || 0),
       0,
     );
     const anyAiActive = pstFiles.some((f) =>
@@ -319,59 +152,45 @@ function CaseCardComponent({
       ["completed", "failed"].includes(f.ai_status || ""),
     );
 
-    const renderSum = pstFiles.reduce((sum, file) => {
-      if (["completed", "failed"].includes(file.pdf_status || "")) {
-        return sum + 1;
-      }
-
-      if (file.pdf_status === "processing") {
-        const createdAtMs = toTimestampMs(file.created_at);
-        const parseMs =
-          (file.metadata_duration_ms || 0) + (file.analyze_duration_ms || 0) ||
-          parseTargetMs;
-        const extractMs = file.extract_duration_ms || extractTargetMs;
-        const aiMs = file.ai_duration_ms || aiTargetMs;
-
-        const renderStartEstimate = createdAtMs
-          ? createdAtMs + parseMs + extractMs + aiMs
-          : nowMs - Math.floor(renderTargetMs * 0.2);
-        const renderStartMs = Math.min(renderStartEstimate, nowMs);
-        const elapsedMs = Math.max(0, nowMs - renderStartMs);
-        return (
-          sum +
-          activeProgress(
-            elapsedMs,
-            renderTargetMs,
-            ACTIVE_MIN_PROGRESS_AI_RENDER,
-          )
-        );
-      }
-
-      return sum;
-    }, 0);
-
-    const parse = Math.round((parseSum / total) * 100);
-    const extract = Math.round((extractSum / total) * 100);
+    const renderTotal = Math.max(
+      0,
+      ...pstFiles.map((file) => file.pdf_total || 0),
+    );
+    const renderProcessed = Math.max(
+      0,
+      ...pstFiles.map((file) => file.pdf_processed || 0),
+    );
+    const parse = Math.round((parseComplete / total) * 100);
+    const extract = Math.round((extractComplete / total) * 100);
     const ai = allAiDone
       ? 100
       : aiTotalItems > 0
         ? Math.min(99, Math.round((aiAuditedItems / aiTotalItems) * 100))
         : anyAiActive
-          ? ACTIVE_MIN_PROGRESS_AI_RENDER * 100
+          ? 0
           : 0;
-    const render = Math.round((renderSum / total) * 100);
+    const allRenderDone = pstFiles.every((file) =>
+      ["completed", "failed"].includes(file.pdf_status || ""),
+    );
+    const render = allRenderDone
+      ? 100
+      : renderTotal > 0
+        ? Math.min(99, Math.round((renderProcessed / renderTotal) * 100))
+        : 0;
 
-    return { parse, extract, ai, render };
-  }, [pstFiles, nowMs]);
-
-  useEffect(() => {
-    setDisplayedPhaseProgress((prev) => ({
-      parse: smoothProgress(prev.parse, phaseProgress.parse),
-      extract: smoothProgress(prev.extract, phaseProgress.extract),
-      ai: smoothProgress(prev.ai, phaseProgress.ai),
-      render: smoothProgress(prev.render, phaseProgress.render),
-    }));
-  }, [phaseProgress]);
+    return {
+      parse,
+      extract,
+      ai,
+      render,
+      parseComplete,
+      extractComplete,
+      renderTotal,
+      renderProcessed,
+      aiAuditedItems,
+      aiTotalItems,
+    };
+  }, [pstFiles]);
 
   const filesToSync = pstFiles
     .filter((f) => f.ai_status === "batch_ready")
@@ -405,6 +224,16 @@ function CaseCardComponent({
   const aiDone =
     extractDone &&
     pstFiles.every((f) => ["completed", "failed"].includes(f.ai_status || ""));
+  // The coordinator briefly changes state while a completed OpenAI chunk is
+  // being applied and the next one is submitted. Persisted batch counters keep
+  // the card in its AI state through that hand-off instead of falling back to
+  // the configuration prompt for one SSE refresh.
+  const isAiLifecycleActive =
+    !aiDone &&
+    pstFiles.some(
+      (file) =>
+        (file.ai_batches_total || 0) > 0 || (file.ai_batches_done || 0) > 0,
+    );
 
   const isPdfPhase = pstFiles.some((f) => f.pdf_status === "processing");
   const pdfStarted = pstFiles.some((f) =>
@@ -485,7 +314,7 @@ function CaseCardComponent({
         "bg-amber-900/30 text-amber-400 border border-amber-500/30 cursor-wait",
       spin: true,
     };
-  } else if (isAiPhase || filesToSync.length > 0) {
+  } else if (isAiPhase || filesToSync.length > 0 || isAiLifecycleActive) {
     btnConfig = {
       text: "AI Auditing Process...",
       action: "",
@@ -523,6 +352,17 @@ function CaseCardComponent({
     };
   }
 
+  if (isBlockedByAnotherCase && btnConfig.action === "launch_audit") {
+    btnConfig = {
+      text: "Waiting for Active Case...",
+      action: "",
+      icon: Loader2,
+      color:
+        "bg-slate-700/70 text-slate-400 border border-slate-600 cursor-not-allowed",
+      spin: false,
+    };
+  }
+
   const ActionIcon = btnConfig.icon;
 
   const phases: PhaseItem[] = [];
@@ -535,7 +375,8 @@ function CaseCardComponent({
         hasStarted: parseStarted,
         isProcessing: isParsePhase,
         isDone: parseDone,
-        progressPct: displayedPhaseProgress.parse,
+        progressPct: phaseProgress.parse,
+        detail: `${phaseProgress.parseComplete}/${pstFiles.length}`,
       },
       {
         id: "extract",
@@ -544,16 +385,22 @@ function CaseCardComponent({
         hasStarted: extractStarted,
         isProcessing: isExtractPhase,
         isDone: extractDone,
-        progressPct: displayedPhaseProgress.extract,
+        progressPct: phaseProgress.extract,
+        detail: `${phaseProgress.extractComplete}/${pstFiles.length}`,
       },
       {
         id: "ai",
         label: "AI AUDIT",
         icon: PHASE_ICONS.ai,
         hasStarted: aiStarted,
-        isProcessing: isAiPhase || filesToSync.length > 0,
+        isProcessing:
+          isAiPhase || filesToSync.length > 0 || isAiLifecycleActive,
         isDone: aiDone,
-        progressPct: displayedPhaseProgress.ai,
+        progressPct: phaseProgress.ai,
+        detail:
+          phaseProgress.aiTotalItems > 0
+            ? `${phaseProgress.aiAuditedItems}/${phaseProgress.aiTotalItems}`
+            : undefined,
       },
       {
         id: "render",
@@ -562,7 +409,11 @@ function CaseCardComponent({
         hasStarted: pdfStarted,
         isProcessing: isPdfPhase,
         isDone: pdfDone,
-        progressPct: displayedPhaseProgress.render,
+        progressPct: phaseProgress.render,
+        detail:
+          phaseProgress.renderTotal > 0
+            ? `${phaseProgress.renderProcessed}/${phaseProgress.renderTotal}`
+            : undefined,
       },
     );
   }
@@ -575,6 +426,10 @@ function CaseCardComponent({
       isProcessing: isFilesPhase,
       isDone: filesDone,
       progressPct: filesProgress,
+      detail:
+        filesTotal > 0
+          ? `${Math.min(filesHandled, filesTotal)}/${filesTotal}`
+          : undefined,
     });
   }
 
@@ -608,7 +463,7 @@ function CaseCardComponent({
         <button
           type="button"
           onClick={() => onReset(caseFiles.map((f) => f.id))}
-          disabled={isResetting || isSequenceLocked}
+          disabled={isResetting}
           className="p-2 bg-slate-700 hover:bg-rose-900/50 text-slate-400 hover:text-rose-400 rounded-lg transition-colors border border-slate-600"
           title="Wipe Data"
         >
@@ -643,18 +498,25 @@ function CaseCardComponent({
         />
       )}
 
-      {/* Primary Big Action Button */}
-      <button
-        type="button"
-        onClick={handleMainAction}
-        disabled={!btnConfig.action || isSequenceLocked}
-        className={`w-full max-w-xl py-4 rounded-2xl font-bold flex items-center justify-center gap-3 transition-all shadow-sm disabled:opacity-90 disabled:cursor-not-allowed ${btnConfig.color}`}
-      >
-        <ActionIcon
-          className={`w-5 h-5 ${btnConfig.spin ? "animate-spin" : ""}`}
-        />
-        <span className="text-lg tracking-wide">{btnConfig.text}</span>
-      </button>
+      {/* The form owns the action while it is open; Cancel restores this button. */}
+      {!isConfigOpen && (
+        <button
+          type="button"
+          onClick={handleMainAction}
+          disabled={!btnConfig.action || isBlockedByAnotherCase}
+          title={
+            isBlockedByAnotherCase
+              ? "Another case is currently using the pipeline."
+              : undefined
+          }
+          className={`w-full max-w-xl py-4 rounded-2xl font-bold flex items-center justify-center gap-3 transition-all shadow-sm disabled:opacity-90 disabled:cursor-not-allowed ${btnConfig.color}`}
+        >
+          <ActionIcon
+            className={`w-5 h-5 ${btnConfig.spin ? "animate-spin" : ""}`}
+          />
+          <span className="text-lg tracking-wide">{btnConfig.text}</span>
+        </button>
+      )}
 
       {/* Technical Phase Indicators (PST email phases and/or Files phase) */}
       <PhaseIndicators phases={phases} />
@@ -676,7 +538,7 @@ export const CaseCard = memo(CaseCardComponent, (prev, next) => {
     prev.caseFiles === next.caseFiles &&
     prev.privacyMode === next.privacyMode &&
     prev.hasAiConfig === next.hasAiConfig &&
-    prev.isSequenceLocked === next.isSequenceLocked &&
+    prev.isBlockedByAnotherCase === next.isBlockedByAnotherCase &&
     prev.isSyncing === next.isSyncing &&
     prev.isResetting === next.isResetting &&
     prev.isMetricsOpen === next.isMetricsOpen &&

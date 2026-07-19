@@ -1,4 +1,5 @@
 import { Database, Eye, EyeOff, RefreshCw } from "lucide-react";
+import Link from "next/link";
 
 interface DashboardHeaderProps {
   showScanButton: boolean;
@@ -30,6 +31,13 @@ export function DashboardHeader({
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
+        <Link
+          href="/history"
+          className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm border shadow-sm transition-colors bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700"
+        >
+          History
+        </Link>
+
         <button
           type="button"
           onClick={onTogglePrivacy}

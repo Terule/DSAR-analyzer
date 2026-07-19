@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { scanFileMetadata } from "@/lib/analyzer";
-import { db } from "@/lib/db";
+import {
+  enqueueFilePhase,
+  isControlPlanePipelineEnabled,
+} from "@/lib/control-plane/pipeline";
+import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +19,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const row = db
-      .prepare("SELECT status FROM processed_files WHERE id = ?")
-      .get(fileId) as { status: string } | undefined;
+    const row = await prisma.processedFile.findUnique({
+      where: { id: fileId },
+      select: { status: true },
+    });
 
     if (!row || row.status !== "pending") {
       return NextResponse.json(
@@ -26,17 +31,24 @@ export async function POST(request: Request) {
       );
     }
 
-    db.prepare(
-      "UPDATE processed_files SET status = 'scanning_metadata' WHERE id = ?",
-    ).run(fileId);
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { status: "scanning_metadata" },
+    });
+
+    if (isControlPlanePipelineEnabled()) {
+      await enqueueFilePhase({ fileId, phase: "parse" });
+      return NextResponse.json({ success: true }, { status: 202 });
+    }
 
     // Timeout de 100ms destrava o botão instantaneamente
     setTimeout(() => {
-      scanFileMetadata(fileId).catch((err: unknown) => {
+      scanFileMetadata(fileId).catch(async (err: unknown) => {
         console.error(`Metadata background worker crashed for ${fileId}:`, err);
-        db.prepare(
-          "UPDATE processed_files SET status = 'failed' WHERE id = ?",
-        ).run(fileId);
+        await prisma.processedFile.update({
+          where: { id: fileId },
+          data: { status: "failed" },
+        });
       });
     }, 100);
 

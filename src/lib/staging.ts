@@ -1,7 +1,11 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { db } from "./db";
+import {
+  insertCaseHistorySnapshots,
+  insertRunHistorySnapshot,
+} from "./history";
+import { prisma } from "./prisma";
 
 // Recursive function using async/promises to prevent blocking the Node.js event loop
 async function getAllPstFiles(
@@ -104,28 +108,10 @@ export async function syncStagingArea(
   // cases are removed even if the walk/upsert below later throws (e.g. an
   // unreadable Files folder). Previously prune ran last, so a mid-scan error
   // meant adds succeeded but deletions were silently skipped.
-  const pruned = pruneMissingRows();
+  const pruned = await pruneMissingRows();
 
   const currentPstPaths = await getAllPstFiles(directoryPath);
   const filesDirs = await getAllFilesDirs(directoryPath);
-
-  const upsertPst = db.prepare(`
-    INSERT INTO processed_files (id, filename, filepath, file_size_bytes, status, kind)
-    VALUES (?, ?, ?, ?, 'pending', 'pst')
-    ON CONFLICT(id) DO UPDATE SET
-      filename = excluded.filename,
-      filepath = excluded.filepath,
-      file_size_bytes = excluded.file_size_bytes
-  `);
-
-  const upsertFiles = db.prepare(`
-    INSERT INTO processed_files (id, filename, filepath, file_size_bytes, status, ai_status, pdf_status, kind, files_total)
-    VALUES (?, 'Files', ?, ?, 'completed', 'completed', 'completed', 'files', ?)
-    ON CONFLICT(id) DO UPDATE SET
-      filepath = excluded.filepath,
-      file_size_bytes = excluded.file_size_bytes,
-      files_total = excluded.files_total
-  `);
 
   const hashId = (value: string) =>
     crypto.createHash("sha256").update(value).digest("hex").substring(0, 12);
@@ -135,10 +121,28 @@ export async function syncStagingArea(
     try {
       const stats = fs.statSync(fullPath);
       const fileId = hashId(fullPath);
-      const existed = db
-        .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
-        .get(fileId);
-      upsertPst.run(fileId, path.basename(fullPath), fullPath, stats.size);
+      const existed = await prisma.processedFile.findUnique({
+        where: { id: fileId },
+        select: { id: true },
+      });
+
+      await prisma.processedFile.upsert({
+        where: { id: fileId },
+        create: {
+          id: fileId,
+          filename: path.basename(fullPath),
+          filepath: fullPath,
+          file_size_bytes: BigInt(stats.size),
+          status: "pending",
+          kind: "pst",
+        },
+        update: {
+          filename: path.basename(fullPath),
+          filepath: fullPath,
+          file_size_bytes: BigInt(stats.size),
+        },
+      });
+
       if (!existed) newPst++;
     } catch (err) {
       console.error(`[Scanner] Skipping PST ${fullPath}:`, err);
@@ -152,10 +156,31 @@ export async function syncStagingArea(
       if (count === 0) continue; // Skip empty Files folders.
 
       const fileId = hashId(filesDir);
-      const existed = db
-        .prepare("SELECT 1 FROM processed_files WHERE id = ? LIMIT 1")
-        .get(fileId);
-      upsertFiles.run(fileId, filesDir, totalBytes, count);
+      const existed = await prisma.processedFile.findUnique({
+        where: { id: fileId },
+        select: { id: true },
+      });
+
+      await prisma.processedFile.upsert({
+        where: { id: fileId },
+        create: {
+          id: fileId,
+          filename: "Files",
+          filepath: filesDir,
+          file_size_bytes: BigInt(totalBytes),
+          status: "completed",
+          ai_status: "completed",
+          pdf_status: "completed",
+          kind: "files",
+          files_total: count,
+        },
+        update: {
+          filepath: filesDir,
+          file_size_bytes: BigInt(totalBytes),
+          files_total: count,
+        },
+      });
+
       if (!existed) newFiles++;
     } catch (err) {
       console.error(`[Scanner] Skipping Files dir ${filesDir}:`, err);
@@ -171,27 +196,31 @@ export async function syncStagingArea(
  * Removes rows whose backing file/directory no longer exists on disk.
  * Returns the number of rows deleted.
  */
-export function pruneMissingRows(): number {
-  const rows = db.prepare("SELECT id, filepath FROM processed_files").all() as {
-    id: string;
-    filepath: string;
-  }[];
-
-  const deleteFile = db.prepare("DELETE FROM processed_files WHERE id = ?");
-  const deleteEmails = db.prepare("DELETE FROM emails WHERE file_id = ?");
-
-  const tx = db.transaction((items: { id: string; filepath: string }[]) => {
-    let deleted = 0;
-    for (const item of items) {
-      if (item.filepath && fs.existsSync(item.filepath)) continue;
-      deleteEmails.run(item.id);
-      deleteFile.run(item.id);
-      deleted++;
-    }
-    return deleted;
+export async function pruneMissingRows(): Promise<number> {
+  const rows = await prisma.processedFile.findMany({
+    select: { id: true, filepath: true },
   });
 
-  return tx(rows);
+  const missingRows = rows.filter(
+    (item) => !item.filepath || !fs.existsSync(item.filepath),
+  );
+  const missingIds = missingRows.map((item) => item.id);
+
+  if (missingIds.length > 0) {
+    await insertCaseHistorySnapshots(missingIds, "source_deleted");
+  }
+
+  let deleted = 0;
+  await prisma.$transaction(async (tx) => {
+    for (const item of missingRows) {
+      await insertRunHistorySnapshot(item.id, "source_deleted");
+      await tx.email.deleteMany({ where: { file_id: item.id } });
+      await tx.processedFile.delete({ where: { id: item.id } });
+      deleted++;
+    }
+  });
+
+  return deleted;
 }
 
 /**
@@ -199,33 +228,28 @@ export function pruneMissingRows(): number {
  * Returns number of rows updated.
  */
 export async function backfillMissingFileSizes(limit = 500): Promise<number> {
-  const rows = db
-    .prepare(
-      `SELECT id, filepath FROM processed_files
-       WHERE COALESCE(file_size_bytes, 0) <= 0
-       LIMIT ?`,
-    )
-    .all(limit) as { id: string; filepath: string }[];
+  const rows = await prisma.processedFile.findMany({
+    where: { file_size_bytes: { lte: 0 } },
+    select: { id: true, filepath: true },
+    take: limit,
+  });
 
   if (rows.length === 0) return 0;
 
-  const updateStmt = db.prepare(
-    "UPDATE processed_files SET file_size_bytes = ? WHERE id = ?",
-  );
-
-  const tx = db.transaction((items: { id: string; filepath: string }[]) => {
-    let updated = 0;
-    for (const item of items) {
+  let updatedCount = 0;
+  await prisma.$transaction(async (tx) => {
+    for (const item of rows) {
       if (!item.filepath || !fs.existsSync(item.filepath)) continue;
       const size = fs.statSync(item.filepath).size;
       if (size <= 0) continue;
-      updateStmt.run(size, item.id);
-      updated++;
+      await tx.processedFile.update({
+        where: { id: item.id },
+        data: { file_size_bytes: BigInt(size) },
+      });
+      updatedCount++;
     }
-    return updated;
   });
 
-  const updatedCount = tx(rows);
   if (updatedCount > 0) {
     console.log(`[Scanner] Backfilled file sizes for ${updatedCount} rows.`);
   }
@@ -236,14 +260,16 @@ export async function backfillMissingFileSizes(limit = 500): Promise<number> {
  * Updates file size in the database, useful after a "purge".
  */
 export async function updateFileSize(fileId: string) {
-  const row = db
-    .prepare("SELECT filepath FROM processed_files WHERE id = ?")
-    .get(fileId) as { filepath: string } | undefined;
+  const row = await prisma.processedFile.findUnique({
+    where: { id: fileId },
+    select: { filepath: true },
+  });
 
-  if (row && fs.existsSync(row.filepath)) {
+  if (row?.filepath && fs.existsSync(row.filepath)) {
     const stats = fs.statSync(row.filepath);
-    db.prepare(
-      "UPDATE processed_files SET file_size_bytes = ? WHERE id = ?",
-    ).run(stats.size, fileId);
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { file_size_bytes: BigInt(stats.size) },
+    });
   }
 }

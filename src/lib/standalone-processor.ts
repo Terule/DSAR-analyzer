@@ -11,9 +11,11 @@ import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
 
 export interface StandaloneBatchParams {
   inputDir: string;
+  /** A dispatcher-provided slice of the input tree for parallel batch jobs. */
+  filePaths?: string[];
   messagesDir: string;
   documentsDir: string;
-  subjectCriteria: { name: string; aliases?: string[] };
+  subjectCriteria: { name: string; personalEmail?: string; aliases?: string[] };
 }
 
 export interface StandaloneBatchResult {
@@ -23,6 +25,11 @@ export interface StandaloneBatchResult {
   processedCount?: number;
   skippedCount?: number;
   duplicatesCount?: number;
+}
+
+export interface FilesDeliverableRenameResult {
+  documents: number;
+  messages: number;
 }
 
 // Recursive file scanner to handle messy nested export folders
@@ -38,6 +45,56 @@ function getAllFiles(dirPath: string, arrayOfFiles: string[] = []) {
   });
 
   return arrayOfFiles;
+}
+
+export function listStandaloneInputFiles(inputDir: string): string[] {
+  if (!fs.existsSync(inputDir)) return [];
+  return getAllFiles(inputDir)
+    .filter((filePath) => {
+      const filename = path.basename(filePath).toLowerCase();
+      return !filename.startsWith(".") && !filename.endsWith(".json");
+    })
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+}
+
+/**
+ * Converts the collision-safe hash filenames produced by parallel workers into
+ * a clean deliverable sequence once no worker can still write to the folders.
+ * Two-stage renaming makes the operation safe even when a target name already
+ * exists from a previous attempt.
+ */
+function renameDeliverableFolder(folder: string, prefix: string): number {
+  if (!fs.existsSync(folder)) return 0;
+  const files = fs
+    .readdirSync(folder, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+    .map((entry) => entry.name)
+    .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const padLength = Math.max(4, String(files.length).length);
+  const temporaryNames = files.map((name, index) => {
+    const temporary = `.__finalizing-${index}-${name}`;
+    fs.renameSync(path.join(folder, name), path.join(folder, temporary));
+    return temporary;
+  });
+
+  for (const [index, temporary] of temporaryNames.entries()) {
+    const extension = path.extname(
+      temporary.replace(/^\.__finalizing-\d+-/, ""),
+    );
+    const finalName = `${prefix} ${String(index + 1).padStart(padLength, "0")}${extension}`;
+    fs.renameSync(path.join(folder, temporary), path.join(folder, finalName));
+  }
+  return files.length;
+}
+
+export function finalizeStandaloneDeliverables(input: {
+  messagesDir: string;
+  documentsDir: string;
+}): FilesDeliverableRenameResult {
+  return {
+    documents: renameDeliverableFolder(input.documentsDir, "Document"),
+    messages: renameDeliverableFolder(input.messagesDir, "Message"),
+  };
 }
 
 function escapeHtml(text: string): string {
@@ -245,6 +302,7 @@ async function extractPdfTextInWorker(
 interface OfficeConversionOutcome {
   success: boolean;
   passwordProtected: boolean;
+  contentKey?: string;
 }
 
 // Runs Office (docx/xlsx) parsing in a worker thread. `xlsx.read()` is fully
@@ -259,10 +317,14 @@ async function convertOfficeInWorker(
   docTitle: string,
   timeoutMs = 150_000,
 ): Promise<OfficeConversionOutcome> {
-  const workerPath = path.resolve(process.cwd(), "office-worker.ts");
+  const workerPath = path.resolve(
+    process.cwd(),
+    "scripts/workers/office-worker.ts",
+  );
 
   return await new Promise<OfficeConversionOutcome>((resolve, reject) => {
     const worker = new Worker(workerPath, {
+      execArgv: ["--import", "tsx"],
       workerData: { kind, filePath, outputPath, criteria, docTitle },
     });
 
@@ -292,6 +354,7 @@ async function convertOfficeInWorker(
         ok?: boolean;
         success?: boolean;
         passwordProtected?: boolean;
+        contentKey?: string;
         error?: string;
       }) => {
         if (msg.ok) {
@@ -299,6 +362,7 @@ async function convertOfficeInWorker(
             resolve({
               success: Boolean(msg.success),
               passwordProtected: Boolean(msg.passwordProtected),
+              contentKey: msg.contentKey,
             }),
           );
         } else {
@@ -717,6 +781,9 @@ export async function runStandaloneBatch(
     subjectCriteria.name,
     aliases,
   );
+  const subjectEmail = (subjectCriteria.personalEmail || "")
+    .trim()
+    .toLowerCase();
 
   // Shared privileged/confidential keyword filter (see src/lib/exclusions.ts)
   // so the Files pipeline stays in lockstep with the PST pipeline.
@@ -743,10 +810,6 @@ export async function runStandaloneBatch(
   let skippedCount = 0;
   let duplicatesCount = 0;
 
-  // Track counters separately for clean sequential naming
-  let messageCounter = 1;
-  let documentCounter = 1;
-
   console.log(`\n=================================================`);
   console.log(`[Standalone Engine] Scanning: ${standaloneStagingDir}`);
   console.log(
@@ -755,7 +818,8 @@ export async function runStandaloneBatch(
   console.log(`=================================================\n`);
 
   // Retrieve all files recursively
-  const allFiles = getAllFiles(standaloneStagingDir);
+  const allFiles =
+    params.filePaths || listStandaloneInputFiles(standaloneStagingDir);
   console.log(
     `[Standalone Engine] Found ${allFiles.length} files to evaluate (recursively).`,
   );
@@ -818,6 +882,7 @@ export async function runStandaloneBatch(
 
       let success = false;
       let producedPath: string | null = null;
+      let semanticContentKey: string | undefined;
       let targetDir = deliverablesDirDocuments;
       let isMessage = false;
 
@@ -832,11 +897,11 @@ export async function runStandaloneBatch(
         isMessage = true;
       }
 
-      // Generate clean sequential names
-      const padLen = 4;
+      // A hash-based name is stable and collision-free across parallel batch
+      // workers. Sequential names only work when a single process owns a case.
       const seqName = isMessage
-        ? `Message ${String(messageCounter).padStart(padLen, "0")}`
-        : `Document ${String(documentCounter).padStart(padLen, "0")}`;
+        ? `Message ${fileHash.slice(0, 16)}`
+        : `Document ${fileHash.slice(0, 16)}`;
 
       const pdfOutputPath = path.join(targetDir, `${seqName}.pdf`);
 
@@ -857,6 +922,7 @@ export async function runStandaloneBatch(
           continue;
         }
         success = outcome.success;
+        semanticContentKey = outcome.contentKey;
         if (success) producedPath = pdfOutputPath;
       }
 
@@ -877,6 +943,7 @@ export async function runStandaloneBatch(
           continue;
         }
         success = outcome.success;
+        semanticContentKey = outcome.contentKey;
         if (success) producedPath = pdfOutputPath;
       }
 
@@ -1002,7 +1069,16 @@ export async function runStandaloneBatch(
           subjectNameTokens,
         );
 
-        if (exclusionsRegex.test(rawText)) {
+        // Exception: if the email was sent directly TO the subject's personal
+        // email address, include it even when it contains a privileged keyword.
+        const sentToSubjectEmail =
+          subjectEmail.length > 0 &&
+          new RegExp(
+            `\\bto\\s*:[^\\n]*${subjectEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
+            "i",
+          ).test(rawText);
+
+        if (exclusionsRegex.test(rawText) && !sentToSubjectEmail) {
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword.`,
           );
@@ -1184,12 +1260,26 @@ export async function runStandaloneBatch(
         }
       }
 
+      // Office containers can differ by metadata, revision history, or a
+      // workbook id while yielding the exact same visible document. Dedup on
+      // the normalized workbook content as well as the source bytes.
+      if (success && semanticContentKey) {
+        if (processedHashes.has(semanticContentKey)) {
+          fs.rmSync(producedPath || pdfOutputPath, { force: true });
+          console.log(
+            `[Standalone Filter] Discarded Duplicate ${file} (matching Office content).`,
+          );
+          duplicatesCount++;
+          skippedCount++;
+          continue;
+        }
+        processedHashes.add(semanticContentKey);
+      }
+
       // Tally results and increment counters only on success
       if (success) {
         processedHashes.add(fileHash); // Lock this hash so future duplicates are dropped
         processedCount++;
-        if (isMessage) messageCounter++;
-        else documentCounter++;
         console.log(`[Standalone Engine] Exported: ${seqName}.pdf`);
       } else {
         skippedCount++;

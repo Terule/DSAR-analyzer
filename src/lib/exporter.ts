@@ -1,8 +1,8 @@
-import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { type AddressObject, simpleParser } from "mailparser";
-import { db } from "./db";
+import { prisma } from "./prisma";
+import { getPstArtifactPaths } from "./pst-artifacts";
 
 // Helper to calculate basic token estimates
 function estimateTokens(text: string): number {
@@ -108,38 +108,28 @@ export async function extractUniqueEmails(
   outputBaseDir: string = process.env.EXTRACTED_PATH ||
     "/Users/rgomes/Projects/extracted_emails",
 ) {
-  const row = db
-    .prepare("SELECT filepath FROM processed_files WHERE id = ?")
-    .get(fileId) as { filepath: string } | undefined;
-  if (!row) throw new Error("File target missing");
+  const row = await prisma.processedFile.findUnique({
+    where: { id: fileId },
+    select: { filepath: true },
+  });
+  if (!row?.filepath) throw new Error("File target missing");
 
-  db.prepare(
-    "UPDATE processed_files SET status = 'extracting', estimated_tokens = 0 WHERE id = ?",
-  ).run(fileId);
+  await prisma.processedFile.update({
+    where: { id: fileId },
+    data: { status: "extracting", estimated_tokens: 0 },
+  });
 
   try {
     const stagingPath =
       process.env.STAGING_PATH || "/Users/rgomes/Projects/staging-area";
 
-    let cleanRelativePath = "";
-    if (row.filepath.startsWith(stagingPath)) {
-      const rel = path.relative(stagingPath, row.filepath);
-      cleanRelativePath = path.dirname(rel);
-    } else {
-      cleanRelativePath = fileId;
-    }
-
-    if (cleanRelativePath === "." || cleanRelativePath === "") {
-      cleanRelativePath = path.parse(row.filepath).name;
-    }
-
-    const mainFolder = path.join(outputBaseDir, cleanRelativePath);
-    const pstExtractionKey = crypto
-      .createHash("sha256")
-      .update(`${fileId}:${row.filepath}`)
-      .digest("hex")
-      .substring(0, 12);
-    const rawFolder = path.join(mainFolder, `.pst-eml-${pstExtractionKey}`);
+    const { caseFolder: mainFolder, rawEmlFolder: rawFolder } =
+      getPstArtifactPaths({
+        fileId,
+        filepath: row.filepath,
+        stagingPath,
+        extractedPath: outputBaseDir,
+      });
 
     const uniqueEmailsFolder = path.join(mainFolder, ".unique-emails");
     const uniqueRawEmailsFolder = path.join(uniqueEmailsFolder, "raw-emails");
@@ -162,11 +152,10 @@ export async function extractUniqueEmails(
       );
     }
 
-    const uniqueRecords = db
-      .prepare(
-        "SELECT id, email_hash FROM emails WHERE file_id = ? AND is_duplicate = 0",
-      )
-      .all(fileId) as { id: string; email_hash: string }[];
+    const uniqueRecords = await prisma.email.findMany({
+      where: { file_id: fileId, is_duplicate: 0 },
+      select: { id: true, email_hash: true },
+    });
 
     let totalTokens = 0;
     let draftsBlocked = 0;
@@ -200,9 +189,13 @@ export async function extractUniqueEmails(
           toFormatted === "No Recipient"
         ) {
           // 1. Mark as discarded in DB so the AI step ignores it
-          db.prepare(
-            "UPDATE emails SET ai_decision = 'discard', ai_reason = 'System Discard: Draft (Missing Routing Headers)' WHERE id = ?",
-          ).run(record.id);
+          await prisma.email.update({
+            where: { id: record.id },
+            data: {
+              ai_decision: "discard",
+              ai_reason: "System Discard: Draft (Missing Routing Headers)",
+            },
+          });
 
           // 2. Delete the copied .eml file so it doesn't clutter the main folder
           fs.unlinkSync(finalEmlPath);
@@ -284,16 +277,20 @@ export async function extractUniqueEmails(
     fs.rmSync(rawFolder, { recursive: true, force: true });
 
     // Update total discarded counter instantly with our blocked drafts
-    db.prepare(`
-        UPDATE processed_files 
-        SET status = 'completed', estimated_tokens = ?, ai_discarded_count = ai_discarded_count + ? 
-        WHERE id = ?
-      `).run(totalTokens, draftsBlocked, fileId);
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: {
+        status: "completed",
+        estimated_tokens: totalTokens,
+        ai_discarded_count: { increment: draftsBlocked },
+      },
+    });
   } catch (error) {
     console.error("Extraction failed:", error);
-    db.prepare("UPDATE processed_files SET status = 'failed' WHERE id = ?").run(
-      fileId,
-    );
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { status: "failed" },
+    });
     throw error;
   }
 }

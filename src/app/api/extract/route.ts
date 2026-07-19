@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
-import { db } from "@/lib/db";
+import {
+  enqueueFilePhase,
+  isControlPlanePipelineEnabled,
+} from "@/lib/control-plane/pipeline";
 import { extractUniqueEmails } from "@/lib/exporter";
+import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +19,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const row = db
-      .prepare("SELECT id, status FROM processed_files WHERE id = ?")
-      .get(fileId) as { status: string } | undefined;
+    const row = await prisma.processedFile.findUnique({
+      where: { id: fileId },
+      select: { id: true, status: true },
+    });
 
     if (!row) {
       return NextResponse.json(
@@ -36,6 +41,14 @@ export async function POST(request: Request) {
       );
     }
 
+    if (isControlPlanePipelineEnabled()) {
+      await enqueueFilePhase({ fileId, phase: "extract" });
+      return NextResponse.json(
+        { success: true, message: "Extraction queued" },
+        { status: 202 },
+      );
+    }
+
     // ⏱ Start Clock
     const startTime = Date.now();
 
@@ -44,9 +57,10 @@ export async function POST(request: Request) {
 
     // ⏱ Save extraction duration
     const durationMs = Date.now() - startTime;
-    db.prepare(
-      "UPDATE processed_files SET extract_duration_ms = COALESCE(extract_duration_ms, 0) + ? WHERE id = ?",
-    ).run(durationMs, fileId);
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { extract_duration_ms: { increment: durationMs } },
+    });
 
     return NextResponse.json(
       { success: true, message: "Extraction completed" },

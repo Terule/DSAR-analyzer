@@ -4,7 +4,16 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CaseCard } from "@/components/dashboard/CaseCard";
 import { DashboardHeader } from "@/components/dashboard/DashboardHeader";
 import { ConnectingState, EmptyState } from "@/components/dashboard/EmptyState";
-import { NotificationToast } from "@/components/dashboard/NotificationToast";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { useFileStream } from "@/hooks/useFileStream";
 import { useNotification } from "@/hooks/useNotification";
 import * as api from "@/lib/api";
@@ -13,7 +22,7 @@ import type { AiConfig, StagedFile } from "@/lib/types";
 
 export default function Dashboard() {
   const { files, loading } = useFileStream();
-  const { notification, setNotification } = useNotification();
+  const { setNotification } = useNotification();
 
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
@@ -34,9 +43,12 @@ export default function Dashboard() {
     {},
   );
   const [activeConfigCase, setActiveConfigCase] = useState<string | null>(null);
+  const [launchingCase, setLaunchingCase] = useState<string | null>(null);
+  const [wipeDialog, setWipeDialog] = useState<{
+    caseName: string;
+    fileIds: string[];
+  } | null>(null);
   const [openMetrics, setOpenMetrics] = useState<Record<string, boolean>>({});
-
-  const isSequenceLocked = Object.keys(activeCaseSequence).length > 0;
 
   // Cache of the previous grouping so we can preserve array reference identity
   // for cases whose contents did not change. The SSE stream re-emits the full
@@ -71,6 +83,60 @@ export default function Dashboard() {
     prevGroupsRef.current = stable;
     return stable;
   }, [files]);
+
+  // A launch persists subject criteria before its Parse job begins, so this
+  // remains true through every hand-off (including a queued job or OpenAI Batch
+  // wait), not merely while a worker container is visible.
+  const activeCaseNames = useMemo(
+    () =>
+      Object.entries(groupedCases)
+        .filter(([, caseFiles]) => {
+          const pstFiles = caseFiles.filter((file) => file.kind !== "files");
+          if (pstFiles.length === 0) return false;
+          const wasLaunched = pstFiles.some((file) => !!file.subject_name);
+          if (!wasLaunched) return false;
+          const faulted = pstFiles.some(
+            (file) =>
+              file.status === "failed" ||
+              file.ai_status === "failed" ||
+              file.pdf_status === "failed",
+          );
+          const renderComplete = pstFiles.every(
+            (file) => file.pdf_status === "completed",
+          );
+          const filesRow = caseFiles.find((file) => file.kind === "files");
+          const filesSettled =
+            !filesRow ||
+            filesRow.files_status === "completed" ||
+            filesRow.files_status === "failed";
+          return !faulted && !(renderComplete && filesSettled);
+        })
+        .map(([caseName]) => caseName),
+    [groupedCases],
+  );
+  const activeCaseName =
+    launchingCase ??
+    activeCaseNames[0] ??
+    Object.keys(activeCaseSequence)[0] ??
+    null;
+
+  useEffect(() => {
+    if (
+      launchingCase &&
+      groupedCases[launchingCase]?.some((file) => !!file.subject_name)
+    ) {
+      setLaunchingCase(null);
+    }
+  }, [groupedCases, launchingCase]);
+
+  useEffect(() => {
+    if (
+      activeConfigCase &&
+      activeCaseName &&
+      activeConfigCase !== activeCaseName
+    )
+      setActiveConfigCase(null);
+  }, [activeCaseName, activeConfigCase]);
 
   const toggleMetrics = (caseName: string) => {
     setOpenMetrics((prev) => ({ ...prev, [caseName]: !prev[caseName] }));
@@ -184,12 +250,6 @@ export default function Dashboard() {
 
   const handleResetCase = useCallback(
     async (caseName: string, fileIds: string[]) => {
-      if (
-        !window.confirm(
-          `Are you sure you want to permanently reset case "${caseName}"? This will delete all extracted data.`,
-        )
-      )
-        return;
       setResettingCases((prev) => ({ ...prev, [caseName]: true }));
       try {
         const ok = await api.wipeCase(caseName, fileIds);
@@ -229,6 +289,19 @@ export default function Dashboard() {
     },
     [setNotification],
   );
+
+  const requestResetCase = useCallback(
+    (caseName: string, fileIds: string[]) =>
+      setWipeDialog({ caseName, fileIds }),
+    [],
+  );
+
+  const confirmResetCase = useCallback(() => {
+    if (!wipeDialog) return;
+    const { caseName, fileIds } = wipeDialog;
+    setWipeDialog(null);
+    void handleResetCase(caseName, fileIds);
+  }, [handleResetCase, wipeDialog]);
 
   useEffect(() => {
     const isGlobalAiBusy = files.some(
@@ -389,15 +462,35 @@ export default function Dashboard() {
   }, []);
 
   const submitAiConfigAndStart = useCallback(
-    (caseName: string, config: AiConfig) => {
+    async (caseName: string, config: AiConfig) => {
+      const coordinator = groupedCases[caseName]
+        ?.filter((file) => file.kind === "pst")
+        .sort((a, b) => a.id.localeCompare(b.id))[0];
+      if (!coordinator) {
+        setNotification({
+          type: "error",
+          message: "This case has no PST files to process.",
+        });
+        return;
+      }
       setPendingAiConfigs((prev) => ({ ...prev, [caseName]: config }));
       setActiveConfigCase(null);
-      startSequence(caseName, "metadata");
+      setLaunchingCase(caseName);
+      try {
+        await api.startCase(coordinator.id, config);
+      } catch (error) {
+        setLaunchingCase(null);
+        setNotification({
+          type: "error",
+          message:
+            error instanceof Error ? error.message : "Failed to start case.",
+        });
+      }
     },
-    [startSequence],
+    [groupedCases, setNotification],
   );
 
-  const isGlobalScanDisabled = loading || isRefreshing || isSequenceLocked;
+  const isGlobalScanDisabled = loading || isRefreshing || !!activeCaseName;
 
   const togglePrivacy = useCallback(() => {
     setPrivacyMode((prev) => {
@@ -418,7 +511,29 @@ export default function Dashboard() {
 
   return (
     <main className="min-h-screen bg-slate-900 text-slate-100 p-4 sm:p-8 font-sans">
-      {notification && <NotificationToast notification={notification} />}
+      <AlertDialog
+        open={Boolean(wipeDialog)}
+        onOpenChange={(open) => {
+          if (!open) setWipeDialog(null);
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Wipe this case?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently deletes this case&apos;s extracted data and
+              resets its pipeline progress. The original staged source files are
+              kept.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction onClick={confirmResetCase}>
+              Wipe case
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <div className="max-w-6xl mx-auto">
         <DashboardHeader
@@ -443,8 +558,13 @@ export default function Dashboard() {
                 caseName={caseName}
                 caseFiles={caseFiles}
                 privacyMode={privacyMode}
-                hasAiConfig={!!pendingAiConfigs[caseName]}
-                isSequenceLocked={isSequenceLocked}
+                hasAiConfig={
+                  !!pendingAiConfigs[caseName] ||
+                  caseFiles.some((file) => !!file.subject_name)
+                }
+                isBlockedByAnotherCase={
+                  !!activeCaseName && activeCaseName !== caseName
+                }
                 isSyncing={!!syncingCases[caseName]}
                 isResetting={!!resettingCases[caseName]}
                 isMetricsOpen={!!openMetrics[caseName]}
@@ -453,7 +573,7 @@ export default function Dashboard() {
                 onOpenConfig={() => setActiveConfigCase(caseName)}
                 onCloseConfig={() => setActiveConfigCase(null)}
                 onSync={(ids) => handleSyncBatch(caseName, ids)}
-                onReset={(ids) => handleResetCase(caseName, ids)}
+                onReset={(ids) => requestResetCase(caseName, ids)}
                 onStartSequence={(action) => startSequence(caseName, action)}
                 onSubmitAiConfig={(config) =>
                   submitAiConfigAndStart(caseName, config)

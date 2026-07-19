@@ -1,4 +1,4 @@
-import type { AiConfig } from "@/lib/types";
+import type { AiConfig, CaseHistoryResponse } from "@/lib/types";
 
 const jsonHeaders = { "Content-Type": "application/json" };
 
@@ -16,6 +16,20 @@ export function scanDirectory(): Promise<Response> {
 
 export async function scanMetadata(fileId: string): Promise<void> {
   await postJson("/api/metadata", { fileId });
+}
+
+export async function startCase(
+  fileId: string,
+  subjectCriteria: AiConfig,
+): Promise<void> {
+  const res = await postJson("/api/orchestrator/start", {
+    fileId,
+    subjectCriteria,
+  });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error || "Failed to start case pipeline.");
+  }
 }
 
 export async function analyzeFile(fileId: string): Promise<void> {
@@ -71,4 +85,40 @@ export async function processFiles(
     const data = (await res.json().catch(() => ({}))) as { error?: string };
     throw new Error(data.error || "Failed to start Files processing.");
   }
+}
+
+export async function fetchRunHistory(params?: {
+  caseKey?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<CaseHistoryResponse> {
+  const query = new URLSearchParams();
+  if (params?.caseKey) query.set("caseKey", params.caseKey);
+  if (typeof params?.limit === "number")
+    query.set("limit", String(params.limit));
+  if (typeof params?.offset === "number")
+    query.set("offset", String(params.offset));
+
+  const suffix = query.toString();
+  const url = suffix ? `/api/history?${suffix}` : "/api/history";
+
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const data = (await res.json().catch(() => ({}))) as { error?: string };
+    throw new Error(data.error || "Failed to fetch run history.");
+  }
+  const payload = (await res.json()) as {
+    success: boolean;
+    data: CaseHistoryResponse["data"];
+    total: number;
+    limit: number;
+    offset: number;
+  };
+
+  return {
+    data: payload.data,
+    total: payload.total,
+    limit: payload.limit,
+    offset: payload.offset,
+  };
 }

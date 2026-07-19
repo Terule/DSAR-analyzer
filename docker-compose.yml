@@ -1,0 +1,109 @@
+services:
+  app:
+    image: pst-analyser:local
+    build:
+      context: .
+      dockerfile: Dockerfile
+    init: true
+    env_file:
+      - .env
+    environment:
+      STAGING_PATH: /data/staging-area
+      EXTRACTED_PATH: /data/extracted-emails
+      EXECUTION_PROVIDER: ${EXECUTION_PROVIDER:-local-process}
+      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-bullmq}
+      POSTGRES_URL: ${POSTGRES_URL_DOCKER:-postgres://pst:pst@postgres:5432/pst_analyser}
+      REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379}
+    command:
+      [
+        "sh",
+        "-lc",
+        "node scripts/docker-check.mjs && npm run dev -- --hostname 0.0.0.0 --port 3000",
+      ]
+    ports:
+      - "3000:3000"
+    volumes:
+      - ${HOST_STAGING_PATH:-./staging-area}:/data/staging-area
+      - ${HOST_EXTRACTED_PATH:-./extracted-emails}:/data/extracted-emails
+      - ./logs:/workspace/logs
+      - ./batches:/workspace/batches
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:3000').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 20s
+    restart: unless-stopped
+
+  dispatcher:
+    image: pst-analyser:local
+    init: true
+    env_file:
+      - .env
+    environment:
+      STAGING_PATH: /data/staging-area
+      EXTRACTED_PATH: /data/extracted-emails
+      CONTROL_PLANE_PIPELINE_ENABLED: "true"
+      POSTGRES_URL: ${POSTGRES_URL_DOCKER:-postgres://pst:pst@postgres:5432/pst_analyser}
+      REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379}
+      WORKER_IMAGE: pst-analyser:local
+      # Compose's stable project-default network. Override only when the stack
+      # is intentionally started with a different project/network name.
+      WORKER_NETWORK: ${WORKER_NETWORK:-pst-analyser_default}
+    command: ["node", "--import", "tsx", "scripts/orchestrator/dispatcher.ts"]
+    volumes:
+      - ${HOST_STAGING_PATH:-./staging-area}:/data/staging-area
+      - ${HOST_EXTRACTED_PATH:-./extracted-emails}:/data/extracted-emails
+      - ./logs:/workspace/logs
+      - ./batches:/workspace/batches
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    cpus: "1.0"
+    mem_limit: 1g
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: pst_analyser
+      POSTGRES_USER: pst
+      POSTGRES_PASSWORD: pst
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pst -d pst_analyser"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  redis:
+    image: redis:7
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

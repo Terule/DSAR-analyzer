@@ -2,7 +2,11 @@ import { NextResponse } from "next/server";
 import { DEFAULT_MAX_TOKENS_PER_BATCH, generateBatchFile } from "@/lib/ai";
 import { ensureBatchPollerRunning } from "@/lib/batch-scheduler";
 import { getCasePstFileIds } from "@/lib/case-utils";
-import { db } from "@/lib/db";
+import {
+  enqueueFilePhase,
+  isControlPlanePipelineEnabled,
+} from "@/lib/control-plane/pipeline";
+import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
@@ -11,7 +15,12 @@ export async function POST(request: Request) {
     // Cast the parsed request body to eliminate implicit 'any' warnings
     const { fileId, subjectCriteria } = (await request.json()) as {
       fileId: string;
-      subjectCriteria?: { name: string; email: string; aliases: string[] };
+      subjectCriteria?: {
+        name: string;
+        email: string;
+        personalEmail?: string;
+        aliases: string[];
+      };
     };
 
     if (!fileId) {
@@ -21,20 +30,18 @@ export async function POST(request: Request) {
       );
     }
 
-    const row = db
-      .prepare(
-        "SELECT status, subject_name, subject_email, subject_aliases, estimated_tokens, unique_emails FROM processed_files WHERE id = ?",
-      )
-      .get(fileId) as
-      | {
-          status: string;
-          subject_name?: string;
-          subject_email?: string;
-          subject_aliases?: string;
-          estimated_tokens?: number;
-          unique_emails?: number;
-        }
-      | undefined;
+    const row = await prisma.processedFile.findUnique({
+      where: { id: fileId },
+      select: {
+        status: true,
+        subject_name: true,
+        subject_email: true,
+        subject_personal_email: true,
+        subject_aliases: true,
+        estimated_tokens: true,
+        unique_emails: true,
+      },
+    });
 
     if (!row || row.status !== "completed") {
       return NextResponse.json(
@@ -53,6 +60,7 @@ export async function POST(request: Request) {
         finalCriteria = {
           name: row.subject_name,
           email: row.subject_email,
+          personalEmail: row.subject_personal_email || undefined,
           aliases: row.subject_aliases
             ? row.subject_aliases
                 .split(",")
@@ -68,46 +76,64 @@ export async function POST(request: Request) {
       }
     }
 
+    // Persist personal email separately (ai.ts only saves name/email/aliases).
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { subject_personal_email: finalCriteria.personalEmail ?? null },
+    });
+
     // 🚨 Instantly lock the file status to 'processing'
     // This tells the React Master Orchestrator to stop and wait before firing the next file.
     // AI is case-level: this `fileId` is the coordinator row and the batch total
     // is estimated across EVERY PST file in the request. Per-request fixed
     // overhead (system prompt + schema + msg overhead) is added on top of the
     // raw payload token estimate; the batch worker self-corrects if exceeded.
-    const casePstIds = getCasePstFileIds(fileId);
-    const caseTotals = db
-      .prepare(
-        `SELECT COALESCE(SUM(estimated_tokens), 0) AS et,
-                COALESCE(SUM(unique_emails), 0) AS ue
-         FROM processed_files
-         WHERE id IN (${casePstIds.map(() => "?").join(",")})`,
-      )
-      .get(...casePstIds) as { et: number; ue: number };
+    const casePstIds = await getCasePstFileIds(fileId);
+    const caseTotals = await prisma.processedFile.aggregate({
+      where: { id: { in: casePstIds } },
+      _sum: { estimated_tokens: true, unique_emails: true },
+    });
 
     const PER_REQUEST_OVERHEAD_TOKENS = 650;
     const estimatedRequestTokens =
-      caseTotals.et + caseTotals.ue * PER_REQUEST_OVERHEAD_TOKENS;
+      (caseTotals._sum.estimated_tokens ?? 0) +
+      (caseTotals._sum.unique_emails ?? 0) * PER_REQUEST_OVERHEAD_TOKENS;
     const estimatedBatches = Math.max(
       1,
       Math.ceil(estimatedRequestTokens / DEFAULT_MAX_TOKENS_PER_BATCH),
     );
-    db.prepare(
-      "UPDATE processed_files SET ai_status = 'processing', ai_started_at = ?, ai_duration_ms = 0, ai_batches_total = ?, ai_batches_done = 0 WHERE id = ?",
-    ).run(Date.now(), estimatedBatches, fileId);
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: {
+        ai_status: "processing",
+        ai_started_at: BigInt(Date.now()),
+        ai_duration_ms: 0,
+        ai_batches_total: estimatedBatches,
+        ai_batches_done: 0,
+      },
+    });
 
-    // AI phase has started — start the in-server batch poller. It self-stops
-    // once no AI/render work remains, so no external cron process is needed.
+    if (isControlPlanePipelineEnabled()) {
+      await enqueueFilePhase({ fileId, phase: "ai" });
+      return NextResponse.json(
+        { success: true, message: "AI Batch job queued" },
+        { status: 202 },
+      );
+    }
+
+    // Legacy non-control-plane mode owns polling in the app process.
     ensureBatchPollerRunning();
 
     // Trigger the Batch generation process safely in the background
     setTimeout(() => {
       generateBatchFile(fileId, finalCriteria)
         .then(() => {})
-        .catch((err) => {
+        .catch(async (err) => {
           console.error(`Batch generation crashed for file ${fileId}:`, err);
-          db.prepare(
-            "UPDATE processed_files SET ai_status = 'failed', ai_started_at = NULL WHERE id = ?",
-          ).run(fileId);
+          await prisma.processedFile.update({
+            where: { id: fileId },
+            data: { ai_status: "failed", ai_started_at: null },
+          });
         });
     }, 50);
 

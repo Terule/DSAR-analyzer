@@ -12,7 +12,9 @@ import {
 import mammoth from "mammoth";
 import * as xlsx from "xlsx";
 import { getCasePstFileIds } from "./case-utils";
-import { db, withSqliteBusyRetry } from "./db";
+import { prisma } from "./prisma";
+import { getPstWorkFolder } from "./pst-artifacts";
+import { repairMojibake } from "./text-encoding";
 
 const FONT_FOLDER =
   process.env.PDF_FONT_DIR || path.join(process.cwd(), "fonts");
@@ -40,6 +42,17 @@ function getAddressText(
     return text.trim() || "Unknown";
   }
   return addr.text?.trim() || "Unknown";
+}
+
+function getAddressValues(
+  addr: AddressObject | AddressObject[] | undefined,
+): string[] {
+  if (!addr) return [];
+  const containers = Array.isArray(addr) ? addr : [addr];
+  return containers
+    .flatMap((container) => container.value ?? [])
+    .map((entry) => (entry.address ?? "").toLowerCase())
+    .filter(Boolean);
 }
 
 function sanitizeFontsForPdf(html: string): string {
@@ -397,10 +410,12 @@ export async function processDocxToPdf(
   criteria: string[],
   docTitle: string,
   processedHashes?: Set<string>,
+  bypassKeywordFilter = false,
 ): Promise<boolean> {
   try {
     const textExtraction = await mammoth.extractRawText({ buffer });
-    const rawText = (textExtraction.value || "").toLowerCase();
+    const sourceText = repairMojibake(textExtraction.value || "");
+    const rawText = sourceText.toLowerCase();
 
     const exclusions = [
       "confidential",
@@ -410,7 +425,7 @@ export async function processDocxToPdf(
       "cros",
     ];
     const exclusionsRegex = new RegExp(`\\b(${exclusions.join("|")})\\b`, "i");
-    if (exclusionsRegex.test(rawText)) return false;
+    if (!bypassKeywordFilter && exclusionsRegex.test(rawText)) return false;
 
     const mentionsSubject =
       criteria.length === 0 ||
@@ -428,7 +443,7 @@ export async function processDocxToPdf(
 
     const result = await mammoth.convertToHtml({ buffer });
     const htmlContent = sanitizeFontsForPdf(
-      `<html><head><title>${docTitle}</title><style>body { font-family: sans-serif; line-height: 1.6; padding: 20px; }</style></head><body>${result.value || ""}</body></html>`,
+      `<html><head><title>${docTitle}</title><style>body { font-family: sans-serif; line-height: 1.6; padding: 20px; }</style></head><body>${repairMojibake(result.value || "")}</body></html>`,
     );
 
     const tempHtmlPath = `${outputPath}.tmp.html`;
@@ -451,10 +466,82 @@ export async function processExcelToPdf(
   criteria: string[],
   docTitle: string,
   processedHashes?: Set<string>,
+  bypassKeywordFilter = false,
 ): Promise<boolean> {
   try {
+    const escapeHtml = (value: string): string =>
+      value
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;")
+        .replaceAll("'", "&#39;");
+
+    const toExcelColumnLabel = (index: number): string => {
+      let n = index + 1;
+      let label = "";
+      while (n > 0) {
+        const rem = (n - 1) % 26;
+        label = String.fromCharCode(65 + rem) + label;
+        n = Math.floor((n - 1) / 26);
+      }
+      return label;
+    };
+
+    const estimateColumnUnits = (values: string[]): number => {
+      let maxLineLength = 0;
+      for (const value of values) {
+        for (const line of value.split(/\r?\n/)) {
+          const len = line.trim().length;
+          if (len > maxLineLength) maxLineLength = len;
+        }
+      }
+
+      // Keep columns readable without letting one verbose cell dominate page width.
+      const scaled = Math.ceil(maxLineLength * 0.8) + 4;
+      return Math.max(10, Math.min(42, scaled));
+    };
+
+    const displayedCellValue = (
+      sheet: xlsx.WorkSheet,
+      row: number,
+      column: number,
+    ): string => {
+      const cell = sheet[xlsx.utils.encode_cell({ r: row, c: column })];
+      return cell ? repairMojibake(xlsx.utils.format_cell(cell)) : "";
+    };
+
+    const splitColumnsIntoPages = (
+      units: number[],
+      maxUnitsPerPage: number,
+    ): number[][] => {
+      const pages: number[][] = [];
+      let current: number[] = [];
+      let currentTotal = 0;
+
+      for (let i = 0; i < units.length; i++) {
+        const width = units[i] || 10;
+        const wouldOverflow =
+          current.length > 0 && currentTotal + width > maxUnitsPerPage;
+
+        if (wouldOverflow) {
+          pages.push(current);
+          current = [i];
+          currentTotal = width;
+          continue;
+        }
+
+        current.push(i);
+        currentTotal += width;
+      }
+
+      if (current.length > 0) pages.push(current);
+      return pages;
+    };
+
     const wb = xlsx.read(buffer, { type: "buffer" });
     let fullTextForExclusion = "";
+    const loweredCriteria = criteria.map((c) => c.toLowerCase());
 
     for (const sheetName of wb.SheetNames) {
       const sheet = wb.Sheets[sheetName];
@@ -474,59 +561,139 @@ export async function processExcelToPdf(
       "cros",
     ];
     const exclusionsRegex = new RegExp(`\\b(${exclusions.join("|")})\\b`, "i");
-    if (exclusionsRegex.test(fullTextForExclusion)) return false;
+    if (!bypassKeywordFilter && exclusionsRegex.test(fullTextForExclusion))
+      return false;
 
     let htmlContent = `
       <html><head><title>${docTitle}</title><style>
         @page { size: A4 landscape; margin: 8mm; }
-        body { font-family: Arial, sans-serif; font-size: 8pt; padding: 4px; }
-        table { border-collapse: collapse; width: 100%; table-layout: auto; margin-bottom: 16px; }
-        th, td { border: 0.5px solid #ccc; padding: 3px 4px; vertical-align: top; word-break: break-word; white-space: normal; }
-        th { background-color: #f8f8f8; font-weight: bold; }
+        body { font-family: Arial, sans-serif; font-size: 8pt; padding: 0; }
+        .sheet-page.page-break { break-before: page; page-break-before: always; }
+        table { border-collapse: collapse; width: 100%; table-layout: fixed; margin-bottom: 12px; }
+        thead { display: table-header-group; }
+        tr { break-inside: avoid; page-break-inside: avoid; }
+        th, td { border: 0.5px solid #d9d9d9; padding: 2px 4px; vertical-align: top; white-space: pre-wrap; overflow-wrap: break-word; word-break: normal; line-height: 1.15; }
+        th { background-color: #f2f2f2; font-weight: bold; text-align: left; }
         .highlight { background-color: #fff3cd !important; }
         h1 { margin: 0 0 10px; font-size: 13px; }
         h2 { margin: 10px 0 6px; font-size: 11px; }
+        h3 { margin: 6px 0 4px; font-size: 9pt; font-weight: 600; color: #555; }
       </style></head><body><h1>Redacted Spreadsheet</h1>
     `;
 
     let foundMatches = false;
     for (const sheetName of wb.SheetNames) {
       const sheet = wb.Sheets[sheetName];
-      const jsonData = xlsx.utils.sheet_to_json(sheet, {
-        header: 1,
-      }) as string[][];
+      const range = sheet["!ref"]
+        ? xlsx.utils.decode_range(sheet["!ref"])
+        : null;
+      if (!range) continue;
+      const jsonData = Array.from(
+        { length: range.e.r - range.s.r + 1 },
+        (_, rowOffset) =>
+          Array.from({ length: range.e.c - range.s.c + 1 }, (_, columnOffset) =>
+            displayedCellValue(
+              sheet,
+              range.s.r + rowOffset,
+              range.s.c + columnOffset,
+            ),
+          ),
+      );
       if (jsonData.length === 0) continue;
 
       const headers = jsonData[0] || [];
       const matchedRows = jsonData
         .slice(1)
         .filter((row) =>
-          row.some(
-            (cell) =>
-              cell != null &&
-              criteria.some((c) => String(cell).toLowerCase().includes(c)),
-          ),
+          loweredCriteria.length === 0
+            ? true
+            : row.some(
+                (cell) =>
+                  cell != null &&
+                  loweredCriteria.some((c) =>
+                    String(cell).toLowerCase().includes(c),
+                  ),
+              ),
         );
 
       if (matchedRows.length > 0) {
         foundMatches = true;
-        htmlContent += `<h2>Sheet: ${sheetName}</h2><table><thead><tr>`;
-        for (const h of headers)
-          htmlContent += `<th>${String(h).replace(/</g, "&lt;")}</th>`;
-        htmlContent += `</tr></thead><tbody>`;
+        const columnCount = Math.max(
+          headers.length,
+          ...matchedRows.map((row) => row.length),
+        );
+        if (columnCount === 0) continue;
 
-        for (const row of matchedRows) {
-          htmlContent += `<tr>`;
-          for (const cell of row) {
-            const cellVal = String(cell || "").replace(/</g, "&lt;");
-            const isMatch = criteria.some((c) =>
-              cellVal.toLowerCase().includes(c),
-            );
-            htmlContent += `<td class="${isMatch ? "highlight" : ""}">${cellVal}</td>`;
+        const normalizedHeaders = Array.from(
+          { length: columnCount },
+          (_, i) => {
+            const raw = String(headers[i] ?? "").trim();
+            return raw.length > 0 ? raw : `Column ${i + 1}`;
+          },
+        );
+
+        const normalizedRows = matchedRows.map((row) =>
+          Array.from({ length: columnCount }, (_, i) => String(row[i] ?? "")),
+        );
+
+        const sheetColumns = sheet["!cols"] || [];
+        const columnUnits = normalizedHeaders.map((header, colIdx) => {
+          const sourceColumn = range.s.c + colIdx;
+          const excelWidth = sheetColumns[sourceColumn]?.wch;
+          return excelWidth && excelWidth > 0
+            ? Math.max(8, Math.min(42, Math.round(excelWidth)))
+            : estimateColumnUnits([
+                header,
+                ...normalizedRows.map((row) => row[colIdx]),
+              ]);
+        });
+
+        // Horizontal pagination: keep readable column widths and flow to next page
+        // when the current set no longer fits within the printable width.
+        const columnPages = splitColumnsIntoPages(columnUnits, 140);
+
+        htmlContent += `<h2>Sheet: ${escapeHtml(sheetName)}</h2>`;
+        for (let pageIdx = 0; pageIdx < columnPages.length; pageIdx++) {
+          const pageColumns = columnPages[pageIdx];
+          const totalUnits = pageColumns.reduce(
+            (sum, colIdx) => sum + (columnUnits[colIdx] || 10),
+            0,
+          );
+          const firstCol = toExcelColumnLabel(pageColumns[0]);
+          const lastCol = toExcelColumnLabel(
+            pageColumns[pageColumns.length - 1],
+          );
+
+          htmlContent += `<section class="sheet-page${pageIdx > 0 ? " page-break" : ""}">`;
+          htmlContent += `<h3>Columns ${firstCol} to ${lastCol}</h3>`;
+          htmlContent += `<table><colgroup>`;
+
+          for (const colIdx of pageColumns) {
+            const pct = ((columnUnits[colIdx] || 10) / totalUnits) * 100;
+            htmlContent += `<col style="width:${pct.toFixed(2)}%" />`;
           }
-          htmlContent += `</tr>`;
+
+          htmlContent += `</colgroup><thead><tr>`;
+          for (const colIdx of pageColumns) {
+            htmlContent += `<th>${escapeHtml(normalizedHeaders[colIdx])}</th>`;
+          }
+          htmlContent += `</tr></thead><tbody>`;
+
+          for (const row of normalizedRows) {
+            htmlContent += `<tr>`;
+            for (const colIdx of pageColumns) {
+              const cellVal = row[colIdx] || "";
+              const escapedCellVal = escapeHtml(cellVal);
+              const isMatch = loweredCriteria.some((c) =>
+                cellVal.toLowerCase().includes(c),
+              );
+              htmlContent += `<td class="${isMatch ? "highlight" : ""}">${escapedCellVal}</td>`;
+            }
+            htmlContent += `</tr>`;
+          }
+
+          htmlContent += `</tbody></table></section>`;
         }
-        htmlContent += `</tbody></table>`;
       }
     }
 
@@ -563,6 +730,7 @@ export async function processPdfAttachment(
   criteria: string[],
   _docTitle: string,
   processedHashes?: Set<string>,
+  bypassKeywordFilter = false,
 ): Promise<boolean> {
   try {
     const rawText = (await extractPdfText(buffer)).toLowerCase();
@@ -574,7 +742,7 @@ export async function processPdfAttachment(
       "cros",
     ];
     const exclusionsRegex = new RegExp(`\\b(${exclusions.join("|")})\\b`, "i");
-    if (exclusionsRegex.test(rawText)) return false;
+    if (!bypassKeywordFilter && exclusionsRegex.test(rawText)) return false;
 
     const mentionsSubject =
       criteria.length === 0 ||
@@ -603,20 +771,18 @@ export async function convertToPdfBatch(
     "/Users/rgomes/Projects/extracted_emails",
 ) {
   const startTime = Date.now();
-  const row = db
-    .prepare(
-      "SELECT filepath, subject_name, subject_email, subject_aliases FROM processed_files WHERE id = ?",
-    )
-    .get(fileId) as
-    | {
-        filepath: string;
-        subject_name?: string;
-        subject_email?: string;
-        subject_aliases?: string;
-      }
-    | undefined;
+  const row = await prisma.processedFile.findUnique({
+    where: { id: fileId },
+    select: {
+      filepath: true,
+      subject_name: true,
+      subject_email: true,
+      subject_personal_email: true,
+      subject_aliases: true,
+    },
+  });
 
-  if (!row) throw new Error(`File ID not found: ${fileId}`);
+  if (!row?.filepath) throw new Error(`File ID not found: ${fileId}`);
 
   const stagingPath =
     process.env.STAGING_PATH || "/Users/rgomes/Projects/staging-area";
@@ -627,25 +793,22 @@ export async function convertToPdfBatch(
   )
     relativeSystemPath = fileId;
 
-  let cleanRelativePath = path.dirname(relativeSystemPath);
-  if (cleanRelativePath === "." || cleanRelativePath === "")
-    cleanRelativePath = path.parse(relativeSystemPath).name;
-
-  // The exporter, AI batch generator and batch worker all write working folders
-  // (.unique-emails/selected etc.) under the UN-stripped path
-  // [case]/[request]/PST/.unique-emails. Only the final deliverables (Emails)
-  // move up to [case]/[request]/Emails. Read selected from the working path,
-  // write PDFs to the deliverable path — otherwise the render silently fails
-  // because it can't find the selected emails.
-  const workingFolder = path.join(outputBaseDir, cleanRelativePath);
-
-  let deliverableRelativePath = cleanRelativePath;
+  let deliverableRelativePath = path.dirname(relativeSystemPath);
+  if (deliverableRelativePath === "." || deliverableRelativePath === "")
+    deliverableRelativePath = path.parse(relativeSystemPath).name;
   if (path.basename(deliverableRelativePath).toLowerCase() === "pst")
     deliverableRelativePath = path.dirname(deliverableRelativePath);
+  const workingFolder = getPstWorkFolder({
+    fileId,
+    filepath: row.filepath,
+    stagingPath,
+    extractedPath: outputBaseDir,
+  });
   const targetFolder = path.join(outputBaseDir, deliverableRelativePath);
 
   const uniqueEmailsFolder = path.join(workingFolder, ".unique-emails");
   const selectedDir = path.join(uniqueEmailsFolder, "selected");
+  const rawEmailsDir = path.join(uniqueEmailsFolder, "raw-emails");
   const deliverablesDir = path.join(targetFolder, "Emails");
   const logsDir = path.join(targetFolder, ".logs");
 
@@ -654,15 +817,10 @@ export async function convertToPdfBatch(
       `[Converter] Render failed for ${fileId}: selected emails folder not found at ${selectedDir}`,
     );
     const durationMs = Date.now() - startTime;
-    await withSqliteBusyRetry(
-      () =>
-        db
-          .prepare(
-            "UPDATE processed_files SET pdf_status = 'failed', pdf_duration_ms = ? WHERE id = ?",
-          )
-          .run(durationMs, fileId),
-      "mark pdf failed (no selected dir)",
-    );
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { pdf_status: "failed", pdf_duration_ms: durationMs },
+    });
     return;
   }
 
@@ -670,15 +828,10 @@ export async function convertToPdfBatch(
     fs.mkdirSync(deliverablesDir, { recursive: true });
   if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
 
-  await withSqliteBusyRetry(
-    () =>
-      db
-        .prepare(
-          "UPDATE processed_files SET pdf_status = 'processing' WHERE id = ?",
-        )
-        .run(fileId),
-    "mark pdf processing",
-  );
+  await prisma.processedFile.update({
+    where: { id: fileId },
+    data: { pdf_status: "processing" },
+  });
 
   try {
     const emlFiles = fs
@@ -689,6 +842,11 @@ export async function convertToPdfBatch(
       );
 
     const padLength = Math.max(4, emlFiles.length.toString().length);
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { pdf_total: emlFiles.length, pdf_processed: 0 },
+    });
+    let lastProgressWrite = 0;
 
     const filterCriteriaSet = new Set<string>();
     if (row.subject_aliases) {
@@ -702,6 +860,79 @@ export async function convertToPdfBatch(
       filterCriteriaSet.add(row.subject_email.toLowerCase());
 
     const filterCriteria = Array.from(filterCriteriaSet);
+    const subjectPersonalEmail = (row.subject_personal_email || "")
+      .trim()
+      .toLowerCase();
+
+    // Shared attachment renderer — used for both normal and warning emails.
+    const renderNestedAttachments = async (
+      attachments: Attachment[],
+      currentBaseName: string,
+      outputDir: string,
+      bypassKeywordFilter = false,
+    ) => {
+      let attachmentCounter = 1;
+      const padLen = Math.max(2, attachments.length.toString().length);
+
+      for (const att of attachments) {
+        if (!att || !att.content) continue;
+        const ext = path.extname(att.filename || "").toLowerCase();
+        const contentBuf = Buffer.isBuffer(att.content)
+          ? att.content
+          : Buffer.from(att.content);
+
+        const attSeqName = `${currentBaseName} Attachment ${String(attachmentCounter).padStart(padLen, "0")}`;
+        attachmentCounter++;
+
+        const allowedExtensions = [
+          ".zip",
+          ".pdf",
+          ".docx",
+          ".doc",
+          ".xlsx",
+          ".xls",
+          ".csv",
+        ];
+        if (!allowedExtensions.includes(ext)) continue;
+
+        if (ext === ".docx" || ext === ".doc") {
+          await processDocxToPdf(
+            contentBuf,
+            path.join(outputDir, `${attSeqName}.pdf`),
+            filterCriteria,
+            attSeqName,
+            undefined,
+            bypassKeywordFilter,
+          );
+        } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
+          await processExcelToPdf(
+            contentBuf,
+            path.join(outputDir, `${attSeqName}.pdf`),
+            filterCriteria,
+            attSeqName,
+            undefined,
+            bypassKeywordFilter,
+          );
+        } else if (ext === ".pdf") {
+          await processPdfAttachment(
+            contentBuf,
+            path.join(outputDir, `${attSeqName}${ext}`),
+            filterCriteria,
+            attSeqName,
+            undefined,
+            bypassKeywordFilter,
+          );
+        } else if (ext === ".zip") {
+          const zipPath = path.join(outputDir, `${attSeqName}${ext}`);
+          fs.writeFileSync(zipPath, contentBuf);
+          const extractedDir = path.join(outputDir, `${attSeqName}_unzipped`);
+          const extracted = await extractZipAttachment(zipPath, extractedDir);
+          if (!extracted) {
+            fs.rmSync(extractedDir, { recursive: true, force: true });
+          }
+        }
+      }
+    };
 
     for (let idx = 0; idx < emlFiles.length; idx++) {
       const filename = emlFiles[idx];
@@ -737,91 +968,21 @@ export async function convertToPdfBatch(
             }
 
             // Process Flattened Attachments
+            // Bypass keyword filter when email was addressed to the subject's personal email.
+            const toValues = getAddressValues(parsed.to);
+            const bypassAttachmentKeywords =
+              subjectPersonalEmail.length > 0 &&
+              toValues.includes(subjectPersonalEmail);
             const processNestedAttachments = async (
               attachments: Attachment[],
               currentBaseName: string,
             ) => {
-              let attachmentCounter = 1;
-              const padLen = Math.max(2, attachments.length.toString().length);
-
-              for (const att of attachments) {
-                if (!att || !att.content) continue;
-                const ext = path.extname(att.filename || "").toLowerCase();
-                const contentBuf = Buffer.isBuffer(att.content)
-                  ? att.content
-                  : Buffer.from(att.content);
-
-                const attSeqName = `${currentBaseName} Attachment ${String(attachmentCounter).padStart(padLen, "0")}`;
-                attachmentCounter++;
-
-                const allowedExtensions = [
-                  ".zip",
-                  ".pdf",
-                  ".docx",
-                  ".doc",
-                  ".xlsx",
-                  ".xls",
-                  ".csv",
-                ];
-                if (!allowedExtensions.includes(ext)) continue;
-
-                if (ext === ".docx" || ext === ".doc") {
-                  const docxPdfPath = path.join(
-                    deliverablesDir,
-                    `${attSeqName}.pdf`,
-                  );
-                  await processDocxToPdf(
-                    contentBuf,
-                    docxPdfPath,
-                    filterCriteria,
-                    attSeqName,
-                  );
-                } else if (
-                  ext === ".xlsx" ||
-                  ext === ".xls" ||
-                  ext === ".csv"
-                ) {
-                  const excelPdfPath = path.join(
-                    deliverablesDir,
-                    `${attSeqName}.pdf`,
-                  );
-                  await processExcelToPdf(
-                    contentBuf,
-                    excelPdfPath,
-                    filterCriteria,
-                    attSeqName,
-                  );
-                } else if (ext === ".pdf") {
-                  const pdfPath = path.join(
-                    deliverablesDir,
-                    `${attSeqName}${ext}`,
-                  );
-                  await processPdfAttachment(
-                    contentBuf,
-                    pdfPath,
-                    filterCriteria,
-                    attSeqName,
-                  );
-                } else if (ext === ".zip") {
-                  const zipPath = path.join(
-                    deliverablesDir,
-                    `${attSeqName}${ext}`,
-                  );
-                  fs.writeFileSync(zipPath, contentBuf);
-                  const extractedDir = path.join(
-                    deliverablesDir,
-                    `${attSeqName}_unzipped`,
-                  );
-                  const extracted = await extractZipAttachment(
-                    zipPath,
-                    extractedDir,
-                  );
-                  if (!extracted) {
-                    // Keep original zip when extraction tool is unavailable or archive is invalid.
-                    fs.rmSync(extractedDir, { recursive: true, force: true });
-                  }
-                }
-              }
+              await renderNestedAttachments(
+                attachments,
+                currentBaseName,
+                deliverablesDir,
+                bypassAttachmentKeywords,
+              );
             };
 
             if (parsed.attachments && parsed.attachments.length > 0) {
@@ -838,28 +999,124 @@ export async function convertToPdfBatch(
       }
 
       // Keep the API server responsive while processing large batches.
+      const now = Date.now();
+      if (idx === emlFiles.length - 1 || now - lastProgressWrite >= 1_000) {
+        lastProgressWrite = now;
+        await prisma.processedFile.update({
+          where: { id: fileId },
+          data: { pdf_processed: idx + 1 },
+        });
+      }
       await yieldToEventLoop();
+    }
+
+    // --- WARNING EMAILS: self-forwards (company → personal email) ---
+    // These were tagged ai_decision = 'warning' during analysis and skipped AI.
+    // Render them into Emails/Warning/ so reviewers can inspect them separately.
+    const caseIdsForWarning = await getCasePstFileIds(fileId);
+    const warningRecords = await prisma.email.findMany({
+      where: {
+        file_id: { in: caseIdsForWarning },
+        ai_decision: "warning",
+        is_duplicate: 0,
+      },
+      select: { email_hash: true },
+    });
+
+    if (warningRecords.length > 0) {
+      const warningDir = path.join(deliverablesDir, "Warning");
+      fs.mkdirSync(warningDir, { recursive: true });
+      const warnPad = Math.max(4, warningRecords.length.toString().length);
+
+      for (let wi = 0; wi < warningRecords.length; wi++) {
+        const { email_hash } = warningRecords[wi];
+        const emlPath = path.join(rawEmailsDir, `${email_hash}.eml`);
+        if (!fs.existsSync(emlPath)) continue;
+
+        const baseName = `Warning ${String(wi + 1).padStart(warnPad, "0")}`;
+        const pdfPath = path.join(warningDir, `${baseName}.pdf`);
+
+        try {
+          await withTimeout(
+            (async () => {
+              const rawEml = fs.readFileSync(emlPath);
+              const parsed = await simpleParser(rawEml);
+              const fromText = getAddressText(parsed.from);
+              const toText = getAddressText(parsed.to);
+
+              if (!fs.existsSync(pdfPath)) {
+                const htmlContent = generateEmailHtml(
+                  parsed,
+                  fromText,
+                  toText,
+                  baseName,
+                );
+                const tempHtml = `${pdfPath}.tmp.html`;
+                fs.writeFileSync(tempHtml, htmlContent);
+                try {
+                  await runWeasyPrint(tempHtml, pdfPath);
+                } finally {
+                  fs.rmSync(tempHtml, { force: true });
+                }
+              }
+
+              if (parsed.attachments && parsed.attachments.length > 0) {
+                await renderNestedAttachments(
+                  parsed.attachments,
+                  baseName,
+                  warningDir,
+                  true, // self-forwards are addressed to personal email — bypass keyword filter
+                );
+              }
+            })(),
+            PER_EMAIL_TIMEOUT_MS,
+            `Warning email render (${email_hash})`,
+          );
+        } catch (err) {
+          console.error(
+            `Skipping warning email ${email_hash}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+
+        await yieldToEventLoop();
+      }
     }
 
     const durationMs = Date.now() - startTime;
     // Render covers the whole case's shared selected/ folder, so mark every PST
     // row in the case completed in one pass. Record the real duration only on
     // the row that actually rendered (0 on siblings) so the telemetry sum stays
-    // accurate.
-    const caseIds = getCasePstFileIds(fileId);
-    const placeholders = caseIds.map(() => "?").join(",");
-    await withSqliteBusyRetry(
-      () =>
-        db
-          .prepare(
-            `UPDATE processed_files
-             SET pdf_status = 'completed',
-                 pdf_duration_ms = CASE WHEN id = ? THEN ? ELSE 0 END
-             WHERE id IN (${placeholders})`,
-          )
-          .run(fileId, durationMs, ...caseIds),
-      "mark pdf completed (case)",
-    );
+    // accurate. Both updates run in a single transaction to avoid a half-updated case.
+    const caseIds = await getCasePstFileIds(fileId);
+    const siblingIds = caseIds.filter((id) => id !== fileId);
+    await prisma.$transaction([
+      prisma.processedFile.update({
+        where: { id: fileId },
+        data: {
+          pdf_status: "completed",
+          pdf_duration_ms: durationMs,
+          pdf_processed: emlFiles.length,
+        },
+      }),
+      ...(siblingIds.length > 0
+        ? [
+            prisma.processedFile.updateMany({
+              where: { id: { in: siblingIds } },
+              data: {
+                pdf_status: "completed",
+                pdf_duration_ms: 0,
+                pdf_total: 0,
+                pdf_processed: 0,
+              },
+            }),
+          ]
+        : []),
+    ]);
+    // Once Render succeeds, the final PDFs no longer depend on raw EMLs or
+    // batch payloads. Remove the hidden work tree to reclaim disk space.
+    fs.rmSync(workingFolder, { recursive: true, force: true });
   } catch (error) {
     console.error(
       `[Converter] Render failed for ${fileId}: ${
@@ -867,14 +1124,9 @@ export async function convertToPdfBatch(
       }`,
     );
     const durationMs = Date.now() - startTime;
-    await withSqliteBusyRetry(
-      () =>
-        db
-          .prepare(
-            "UPDATE processed_files SET pdf_status = 'failed', pdf_duration_ms = ? WHERE id = ?",
-          )
-          .run(durationMs, fileId),
-      "mark pdf failed",
-    );
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { pdf_status: "failed", pdf_duration_ms: durationMs },
+    });
   }
 }

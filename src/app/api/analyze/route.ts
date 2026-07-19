@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { analyzePstDuplicates } from "@/lib/analyzer";
-import { db } from "@/lib/db";
+import {
+  enqueueFilePhase,
+  isControlPlanePipelineEnabled,
+} from "@/lib/control-plane/pipeline";
+import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
 
@@ -15,9 +19,10 @@ export async function POST(request: Request) {
       );
     }
 
-    const row = db
-      .prepare("SELECT id, status FROM processed_files WHERE id = ?")
-      .get(fileId) as { status: string } | undefined;
+    const row = await prisma.processedFile.findUnique({
+      where: { id: fileId },
+      select: { id: true, status: true },
+    });
 
     if (!row) {
       return NextResponse.json(
@@ -36,9 +41,18 @@ export async function POST(request: Request) {
       );
     }
 
-    db.prepare(
-      "UPDATE processed_files SET status = 'processing' WHERE id = ?",
-    ).run(fileId);
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { status: "processing" },
+    });
+
+    if (isControlPlanePipelineEnabled()) {
+      await enqueueFilePhase({ fileId, phase: "parse" });
+      return NextResponse.json(
+        { success: true, message: "Analysis queued" },
+        { status: 202 },
+      );
+    }
 
     // ⏱ 1. Start Clock
     const startTime = Date.now();
@@ -47,9 +61,10 @@ export async function POST(request: Request) {
 
     // ⏱ 2. Calculate and Save Clock
     const durationMs = Date.now() - startTime;
-    db.prepare(
-      "UPDATE processed_files SET analyze_duration_ms = COALESCE(analyze_duration_ms, 0) + ? WHERE id = ?",
-    ).run(durationMs, fileId);
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { analyze_duration_ms: { increment: durationMs } },
+    });
 
     return NextResponse.json(
       { success: true, message: "Analysis completed" },

@@ -1,8 +1,9 @@
-import { spawn } from "node:child_process";
-import path from "node:path";
 import { NextResponse } from "next/server";
-import { db } from "@/lib/db";
-import { openWorkerLogFd } from "@/lib/worker-log";
+import {
+  enqueueFilePhase,
+  isControlPlanePipelineEnabled,
+} from "@/lib/control-plane/pipeline";
+import { prisma } from "@/lib/prisma";
 
 // Prevent Vercel/Next.js from caching this route statically
 export const dynamic = "force-dynamic";
@@ -20,9 +21,10 @@ export async function POST(request: Request) {
     }
 
     // Check file status in DB
-    const row = db
-      .prepare("SELECT ai_status, pdf_status FROM processed_files WHERE id = ?")
-      .get(fileId) as { ai_status: string; pdf_status: string } | undefined;
+    const row = await prisma.processedFile.findUnique({
+      where: { id: fileId },
+      select: { ai_status: true, pdf_status: true },
+    });
 
     if (!row) {
       return NextResponse.json(
@@ -51,32 +53,25 @@ export async function POST(request: Request) {
     }
 
     // Enqueue this file. The worker will claim it when it's its turn.
-    db.prepare(
-      "UPDATE processed_files SET pdf_status = 'pending', pdf_duration_ms = 0 WHERE id = ?",
-    ).run(fileId);
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: {
+        pdf_status: "pending",
+        pdf_duration_ms: 0,
+        pdf_total: 0,
+        pdf_processed: 0,
+      },
+    });
 
     console.log(`Queued PDF conversion for file: ${fileId}`);
 
-    // Only spawn a worker if one isn't already running.
-    // A running worker is identified by any file having pdf_status = 'processing'.
-    const workerAlreadyRunning = db
-      .prepare(
-        "SELECT 1 FROM processed_files WHERE pdf_status = 'processing' LIMIT 1",
-      )
-      .get();
-
-    if (!workerAlreadyRunning) {
-      const workerPath = path.resolve(process.cwd(), "convert-worker.ts");
-      const logFd = openWorkerLogFd("convert-worker");
-      const child = spawn("bun", [workerPath], {
-        detached: true,
-        stdio: ["ignore", logFd, logFd],
-      });
-      child.unref();
+    if (!isControlPlanePipelineEnabled()) {
+      throw new Error("The local control-plane pipeline is not configured.");
     }
+    await enqueueFilePhase({ fileId, phase: "render" });
 
     return NextResponse.json(
-      { success: true, message: "PDF conversion job initiated." },
+      { success: true, message: "PDF conversion queued." },
       { status: 202 },
     );
   } catch (error) {

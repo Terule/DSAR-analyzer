@@ -3,7 +3,8 @@ import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
 import { getCasePstFileIds, markCaseAiCompleted } from "./case-utils";
-import { db } from "./db";
+import { prisma } from "./prisma";
+import { getPstWorkFolder } from "./pst-artifacts";
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL_NAME = "gpt-4o-mini";
@@ -52,6 +53,7 @@ function escapeRegExp(value: string): string {
 function buildSubjectSearchTokens(criteria: {
   name: string;
   email: string;
+  personalEmail?: string;
   aliases: string[];
 }): string[] {
   const tokens = new Set<string>();
@@ -76,12 +78,23 @@ function buildSubjectSearchTokens(criteria: {
     const local = email.split("@")[0];
     if (local && local.length >= 3) tokens.add(local);
   }
+  const personalEmail = (criteria.personalEmail || "").trim().toLowerCase();
+  if (personalEmail) {
+    tokens.add(personalEmail);
+    const personalLocal = personalEmail.split("@")[0];
+    if (personalLocal && personalLocal.length >= 3) tokens.add(personalLocal);
+  }
   return Array.from(tokens).filter(Boolean);
 }
 
 export async function generateBatchFile(
   fileId: string,
-  subjectCriteria: { name: string; email: string; aliases: string[] },
+  subjectCriteria: {
+    name: string;
+    email: string;
+    personalEmail?: string;
+    aliases: string[];
+  },
   options?: { maxTokensPerBatch?: number },
 ) {
   const maxTokensPerBatch =
@@ -89,44 +102,33 @@ export async function generateBatchFile(
       ? Math.floor(options.maxTokensPerBatch)
       : DEFAULT_MAX_TOKENS_PER_BATCH;
 
-  const row = db
-    .prepare("SELECT filepath, ai_started_at FROM processed_files WHERE id = ?")
-    .get(fileId) as
-    | { filepath: string; ai_started_at?: number | null }
-    | undefined;
-  if (!row) throw new Error("File not found");
+  const row = await prisma.processedFile.findUnique({
+    where: { id: fileId },
+    select: { filepath: true, ai_started_at: true },
+  });
+  if (!row?.filepath) throw new Error("File not found");
 
   // Save criteria configuration securely to disk
-  db.prepare(`
-    UPDATE processed_files 
-    SET subject_name = ?, subject_email = ?, subject_aliases = ? 
-    WHERE id = ?
-  `).run(
-    subjectCriteria.name,
-    subjectCriteria.email,
-    subjectCriteria.aliases.join(", "),
-    fileId,
-  );
+  await prisma.processedFile.update({
+    where: { id: fileId },
+    data: {
+      subject_name: subjectCriteria.name,
+      subject_email: subjectCriteria.email,
+      subject_aliases: subjectCriteria.aliases.join(", "),
+    },
+  });
 
   const stagingPath =
     process.env.STAGING_PATH || "/Users/rgomes/Projects/staging-area";
   const extractedPath =
     process.env.EXTRACTED_PATH || "/Users/rgomes/Projects/extracted_emails";
 
-  let relativeSystemPath = path.relative(stagingPath, row.filepath);
-  if (
-    relativeSystemPath.startsWith("..") ||
-    path.isAbsolute(relativeSystemPath)
-  ) {
-    relativeSystemPath = fileId;
-  }
-
-  let cleanRelativePath = path.dirname(relativeSystemPath);
-  if (cleanRelativePath === "." || cleanRelativePath === "") {
-    cleanRelativePath = path.parse(relativeSystemPath).name;
-  }
-
-  const targetFolder = path.join(extractedPath, cleanRelativePath);
+  const targetFolder = getPstWorkFolder({
+    fileId,
+    filepath: row.filepath,
+    stagingPath,
+    extractedPath,
+  });
   const uniqueEmailsFolder = path.join(targetFolder, ".unique-emails");
   const jsonFolder = path.join(uniqueEmailsFolder, "json-files");
   if (!fs.existsSync(targetFolder))
@@ -140,18 +142,20 @@ export async function generateBatchFile(
   // AI is case-level: audit the emails of EVERY PST file in this request in one
   // run (the JSON folder is shared). `fileId` is the coordinator row that holds
   // the live batch state and aggregate AI counters.
-  const casePstIds = getCasePstFileIds(fileId);
+  const casePstIds = await getCasePstFileIds(fileId);
 
   const allFiles = fs
     .readdirSync(jsonFolder)
     .filter((f) => f.endsWith(".json"));
 
-  const unprocessedRecords = db
-    .prepare(`
-    SELECT email_hash FROM emails 
-    WHERE file_id IN (${casePstIds.map(() => "?").join(",")}) AND is_duplicate = 0 AND ai_decision IS NULL
-  `)
-    .all(...casePstIds) as { email_hash: string }[];
+  const unprocessedRecords = await prisma.email.findMany({
+    where: {
+      file_id: { in: casePstIds },
+      is_duplicate: 0,
+      ai_decision: null,
+    },
+    select: { email_hash: true },
+  });
 
   const unprocessedHashes = new Set(
     unprocessedRecords.map((r) => r.email_hash),
@@ -159,7 +163,7 @@ export async function generateBatchFile(
 
   const systemPrompt = `You are an expert Legal AI performing a Data Subject Access Request (DSAR) compliance audit.
 Target Data Subject: ${subjectCriteria.name}
-Target Email: ${subjectCriteria.email}
+Primary Email (work): ${subjectCriteria.email}${subjectCriteria.personalEmail ? `\nPersonal Email: ${subjectCriteria.personalEmail}` : ""}
 Aliases: ${subjectCriteria.aliases.join(", ")}
 
 INSTRUCTIONS:
@@ -181,8 +185,8 @@ Important: token boundary match only. Do NOT treat substrings like "MICROSOFT" a
 
   2. [STRONG KEEP SIGNALS]
   Keep ONLY if at least one strong signal exists:
-- Subject's exact email appears in first_email.from.
-- Subject's exact email appears in first_email.to AND first_email has only one recipient.
+- Subject's primary or personal email appears in first_email.from.
+- Subject's primary or personal email appears in first_email.to AND first_email has only one recipient.
 - Subject name/alias/initials appear in first_email.body with clear substantive relation.
 - second_email.from is the subject (forwarded chain from subject).
 
@@ -238,12 +242,19 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
       subjectPatterns.length > 0 &&
       !subjectPatterns.some((re) => re.test(userContent))
     ) {
-      db.prepare(
-        "UPDATE emails SET ai_decision = 'discard', ai_reason = 'System Discard: Data subject not mentioned' WHERE email_hash = ?",
-      ).run(hash);
-      db.prepare(
-        "UPDATE processed_files SET ai_discarded_count = ai_discarded_count + 1 WHERE id = ?",
-      ).run(fileId);
+      await prisma.$transaction([
+        prisma.email.updateMany({
+          where: { email_hash: hash },
+          data: {
+            ai_decision: "discard",
+            ai_reason: "System Discard: Data subject not mentioned",
+          },
+        }),
+        prisma.processedFile.update({
+          where: { id: fileId },
+          data: { ai_discarded_count: { increment: 1 } },
+        }),
+      ]);
       continue;
     }
 
@@ -260,13 +271,19 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
       );
 
       // 🚨 CRITICAL FIX: Ensure skipped oversized files are marked as discarded so they don't infinite-loop!
-      db.prepare(
-        "UPDATE emails SET ai_decision = 'discard', ai_reason = 'System Discard: Exceeded max batch token limit' WHERE email_hash = ?",
-      ).run(hash);
-
-      db.prepare(
-        "UPDATE processed_files SET ai_discarded_count = ai_discarded_count + 1 WHERE id = ?",
-      ).run(fileId);
+      await prisma.$transaction([
+        prisma.email.updateMany({
+          where: { email_hash: hash },
+          data: {
+            ai_decision: "discard",
+            ai_reason: "System Discard: Exceeded max batch token limit",
+          },
+        }),
+        prisma.processedFile.update({
+          where: { id: fileId },
+          data: { ai_discarded_count: { increment: 1 } },
+        }),
+      ]);
 
       continue;
     }
@@ -304,10 +321,10 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
 
   if (addedCount === 0) {
     const totalAiMs =
-      typeof row.ai_started_at === "number"
-        ? Math.max(0, Date.now() - row.ai_started_at)
+      typeof row.ai_started_at === "bigint"
+        ? Math.max(0, Date.now() - Number(row.ai_started_at))
         : 0;
-    markCaseAiCompleted(fileId, totalAiMs);
+    await markCaseAiCompleted(fileId, totalAiMs);
     if (fs.existsSync(batchFilePath)) fs.unlinkSync(batchFilePath);
     return;
   }
@@ -327,7 +344,8 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
     completion_window: "24h",
   });
 
-  db.prepare(
-    "UPDATE processed_files SET batch_id = ?, ai_status = 'batch_ready' WHERE id = ?",
-  ).run(batch.id, fileId);
+  await prisma.processedFile.update({
+    where: { id: fileId },
+    data: { batch_id: batch.id, ai_status: "batch_ready" },
+  });
 }
