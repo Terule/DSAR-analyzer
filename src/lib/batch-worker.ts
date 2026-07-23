@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import OpenAI from "openai";
-import { DEFAULT_MAX_TOKENS_PER_BATCH, generateBatchFile } from "./ai";
+import { DEFAULT_MAX_TOKENS_PER_BATCH, fillAiBatchSlots } from "./ai";
 import {
   getCasePstFileIds,
   isCaseAiSettled,
@@ -45,6 +45,26 @@ interface SubjectCriteria {
   email?: string;
   personalEmail?: string;
   aliases?: string[];
+}
+
+function criteriaFromRow(row: {
+  subject_name: string | null;
+  subject_email: string | null;
+  subject_personal_email: string | null;
+  subject_aliases: string | null;
+}): Required<Pick<SubjectCriteria, "name" | "email" | "aliases">> &
+  Pick<SubjectCriteria, "personalEmail"> {
+  return {
+    name: row.subject_name || "",
+    email: row.subject_email || "",
+    personalEmail: row.subject_personal_email || undefined,
+    aliases: row.subject_aliases
+      ? row.subject_aliases
+          .split(",")
+          .map((alias) => alias.trim())
+          .filter(Boolean)
+      : [],
+  };
 }
 
 function getBatchErrorText(batch: OpenAI.Batches.Batch): string {
@@ -166,7 +186,10 @@ function moveEmailToBucket(
   if (fs.existsSync(otherPath)) fs.rmSync(otherPath, { force: true });
 
   if (fs.existsSync(rawPath)) {
-    fs.copyFileSync(rawPath, targetPath);
+    // Stage ownership is exclusive: selected/discarded contains the one
+    // canonical EML, rather than a second copy beside raw-emails.
+    if (fs.existsSync(targetPath)) fs.rmSync(targetPath, { force: true });
+    fs.renameSync(rawPath, targetPath);
     return;
   }
 
@@ -298,12 +321,41 @@ async function queuePdfWorker(fileId: string): Promise<void> {
   await enqueueFilePhase({ fileId, phase: "render" });
 }
 
-export async function pollBatchStatus(fileId: string) {
+function openAiCompletedAt(batch: OpenAI.Batches.Batch): Date | undefined {
+  return typeof batch.completed_at === "number"
+    ? new Date(batch.completed_at * 1_000)
+    : undefined;
+}
+
+/**
+ * AI is parallel, so its useful elapsed time is the wall-clock span from the
+ * first upload to OpenAI's final completion event. Local output download or a
+ * restarted poller must not inflate this metric.
+ */
+async function completedAiElapsedMs(
+  coordinatorId: string,
+  fallbackMs: number,
+): Promise<number> {
+  const timings = await prisma.aiBatchRun.aggregate({
+    where: { coordinator_id: coordinatorId },
+    _min: { submitted_at: true },
+    _max: { openai_completed_at: true },
+  });
+  const firstSubmitted = timings._min.submitted_at;
+  const lastCompleted = timings._max.openai_completed_at;
+  if (!firstSubmitted || !lastCompleted) return fallbackMs;
+  return Math.max(0, lastCompleted.getTime() - firstSubmitted.getTime());
+}
+
+async function pollSingleBatchStatus(
+  fileId: string,
+  batchRunId: string,
+  batchId: string,
+) {
   const row = await prisma.processedFile.findUnique({
     where: { id: fileId },
     select: {
       filepath: true,
-      batch_id: true,
       subject_name: true,
       subject_email: true,
       subject_personal_email: true,
@@ -312,9 +364,8 @@ export async function pollBatchStatus(fileId: string) {
     },
   });
 
-  if (!row?.filepath || !row.batch_id) return "no_batch";
+  if (!row?.filepath) return "no_batch";
   const filepath = row.filepath;
-  const batchId = row.batch_id;
   const aiStartedAtMs =
     typeof row.ai_started_at === "bigint" ? Number(row.ai_started_at) : null;
 
@@ -343,6 +394,13 @@ export async function pollBatchStatus(fileId: string) {
   console.log(`[Batch Worker] Status returned from OpenAI: ${batch.status}`);
 
   if (batch.status === "completed") {
+    await prisma.aiBatchRun.update({
+      where: { id: batchRunId },
+      data: {
+        status: "processing",
+        openai_completed_at: openAiCompletedAt(batch),
+      },
+    });
     // 🔥 NEW SAFETY CHECK: Catch silent OpenAI validation failures
     if (!batch.output_file_id) {
       console.error(
@@ -357,12 +415,21 @@ export async function pollBatchStatus(fileId: string) {
           console.error("Could not download error file", e);
         }
       }
-      await markCaseAiFailed(
-        fileId,
-        typeof aiStartedAtMs === "number"
-          ? Math.max(0, Date.now() - aiStartedAtMs)
-          : 0,
-      );
+      await prisma.$transaction([
+        prisma.email.updateMany({
+          where: { ai_batch_run_id: batchRunId, ai_decision: null },
+          data: { ai_batch_run_id: null },
+        }),
+        prisma.aiBatchRun.update({
+          where: { id: batchRunId },
+          data: {
+            status: "retryable",
+            error: "Batch completed without an output file.",
+            completed_at: new Date(),
+          },
+        }),
+      ]);
+      await fillAiBatchSlots(fileId, criteriaFromRow(row));
       return batch.status;
     }
 
@@ -390,7 +457,6 @@ export async function pollBatchStatus(fileId: string) {
       secondPassRescued: 0,
     };
 
-    const keptHashes: string[] = [];
     const payloadCache = new Map<string, AiPayload | null>();
     const subjectCriteria: SubjectCriteria = {
       name: row.subject_name || "",
@@ -409,6 +475,7 @@ export async function pollBatchStatus(fileId: string) {
       decision: "keep" | "discard";
       reason: string;
     }> = [];
+    const selectedHashes: string[] = [];
 
     for (const line of lines) {
       if (!line.trim()) continue;
@@ -499,20 +566,49 @@ export async function pollBatchStatus(fileId: string) {
 
       if (decision === "keep") {
         keepCount++;
-        keptHashes.push(emailHash);
+        selectedHashes.push(emailHash);
       } else {
         discardCount++;
       }
     }
 
-    await prisma.$transaction(
-      pendingUpdates.map((item) =>
-        prisma.email.update({
-          where: { email_hash: item.emailHash },
-          data: { ai_decision: item.decision, ai_reason: item.reason },
+    await prisma.$transaction([
+      ...pendingUpdates.map((item) =>
+        prisma.email.updateMany({
+          where: { email_hash: item.emailHash, ai_batch_run_id: batchRunId },
+          data: {
+            ai_decision: item.decision,
+            ai_reason: item.reason,
+            ai_batch_run_id: null,
+          },
         }),
       ),
-    );
+      // A completed Batch may include failed request lines.  Successful lines
+      // above have durable decisions; release only the unresolved claimed lines
+      // so the next slot retries precisely those custom IDs.
+      prisma.email.updateMany({
+        where: { ai_batch_run_id: batchRunId, ai_decision: null },
+        data: { ai_batch_run_id: null },
+      }),
+      prisma.aiBatchRun.update({
+        where: { id: batchRunId },
+        data: { status: "completed", completed_at: new Date() },
+      }),
+    ]);
+
+    // Once a keep decision is durable, the EML has been moved to selected/ and
+    // no later AI step needs its JSON payload. Remove it immediately instead of
+    // retaining a second representation until the end of the whole case.
+    for (const emailHash of selectedHashes) {
+      try {
+        fs.rmSync(path.join(jsonFolder, `${emailHash}.json`), { force: true });
+      } catch (error) {
+        console.warn(
+          `[Batch Worker] Could not reclaim JSON payload for ${emailHash}:`,
+          error,
+        );
+      }
+    }
 
     // Selected/discarded folders are now the canonical AI outputs.
 
@@ -572,32 +668,26 @@ export async function pollBatchStatus(fileId: string) {
       },
     });
 
+    const activeBatchCount = await prisma.aiBatchRun.count({
+      where: {
+        coordinator_id: fileId,
+        status: { in: ["claiming", "submitted", "processing"] },
+      },
+    });
+
     if (remainingCount > 0) {
       console.log(
         `[Batch Worker] Chunk complete. ${remainingCount} items remaining. Generating next chunk immediately...`,
       );
 
-      await prisma.processedFile.update({
-        where: { id: fileId },
-        data: { ai_status: "processing", batch_id: null },
-      });
-
-      // 🔥 FIRE THE NEXT CHUNK INSTANTLY 🔥
       const adaptiveCap = adaptiveTokenCapByFile.get(fileId);
-      generateBatchFile(
-        fileId,
-        {
-          name: row.subject_name || "",
-          email: row.subject_email || "",
-          aliases: row.subject_aliases
-            ? row.subject_aliases
-                .split(",")
-                .map((a) => a.trim())
-                .filter(Boolean)
-            : [],
-        },
-        adaptiveCap ? { maxTokensPerBatch: adaptiveCap } : undefined,
-      ).catch(async (err) => {
+      try {
+        await fillAiBatchSlots(
+          fileId,
+          criteriaFromRow(row),
+          adaptiveCap ? { maxTokensPerBatch: adaptiveCap } : undefined,
+        );
+      } catch (err) {
         console.error(
           `[Batch Worker] Fatal error generating next chunk for ${fileId}:`,
           err,
@@ -608,17 +698,20 @@ export async function pollBatchStatus(fileId: string) {
             ? Math.max(0, Date.now() - aiStartedAtMs)
             : 0,
         );
-      });
-    } else {
+      }
+    } else if (activeBatchCount === 0) {
       console.log(
         `[Batch Worker] All AI chunks completed successfully for case (coordinator ${fileId}).`,
       );
 
       await markCaseAiCompleted(
         fileId,
-        typeof aiStartedAtMs === "number"
-          ? Math.max(0, Date.now() - aiStartedAtMs)
-          : 0,
+        await completedAiElapsedMs(
+          fileId,
+          typeof aiStartedAtMs === "number"
+            ? Math.max(0, Date.now() - aiStartedAtMs)
+            : 0,
+        ),
       );
 
       adaptiveTokenCapByFile.delete(fileId);
@@ -642,26 +735,25 @@ export async function pollBatchStatus(fileId: string) {
       `[Batch Worker] Batch ${batch.id} failed due to token limits. Retrying with reduced chunk cap ${retryCap} tokens for file ${fileId}.`,
     );
 
-    await prisma.processedFile.update({
-      where: { id: fileId },
-      data: { ai_status: "processing", batch_id: null },
-    });
+    await prisma.$transaction([
+      prisma.email.updateMany({
+        where: { ai_batch_run_id: batchRunId, ai_decision: null },
+        data: { ai_batch_run_id: null },
+      }),
+      prisma.aiBatchRun.update({
+        where: { id: batchRunId },
+        data: {
+          status: "retryable",
+          error: errorText.slice(0, 1000),
+          completed_at: new Date(),
+        },
+      }),
+    ]);
 
     try {
-      await generateBatchFile(
-        fileId,
-        {
-          name: row.subject_name || "",
-          email: row.subject_email || "",
-          aliases: row.subject_aliases
-            ? row.subject_aliases
-                .split(",")
-                .map((a) => a.trim())
-                .filter(Boolean)
-            : [],
-        },
-        { maxTokensPerBatch: retryCap },
-      );
+      await fillAiBatchSlots(fileId, criteriaFromRow(row), {
+        maxTokensPerBatch: retryCap,
+      });
       return "retrying_token_limited";
     } catch (err) {
       console.error(
@@ -682,24 +774,25 @@ export async function pollBatchStatus(fileId: string) {
       `[Batch Worker] Batch ${batch.id} expired. Re-uploading a fresh batch for file ${fileId}...`,
     );
 
-    await prisma.processedFile.update({
-      where: { id: fileId },
-      data: { ai_status: "processing", batch_id: null },
-    });
+    await prisma.$transaction([
+      prisma.email.updateMany({
+        where: { ai_batch_run_id: batchRunId, ai_decision: null },
+        data: { ai_batch_run_id: null },
+      }),
+      prisma.aiBatchRun.update({
+        where: { id: batchRunId },
+        data: {
+          status: "retryable",
+          error: "Batch expired.",
+          completed_at: new Date(),
+        },
+      }),
+    ]);
 
     try {
-      await generateBatchFile(
+      await fillAiBatchSlots(
         fileId,
-        {
-          name: row.subject_name || "",
-          email: row.subject_email || "",
-          aliases: row.subject_aliases
-            ? row.subject_aliases
-                .split(",")
-                .map((a) => a.trim())
-                .filter(Boolean)
-            : [],
-        },
+        criteriaFromRow(row),
         adaptiveTokenCapByFile.has(fileId)
           ? { maxTokensPerBatch: adaptiveTokenCapByFile.get(fileId) }
           : undefined,
@@ -724,13 +817,44 @@ export async function pollBatchStatus(fileId: string) {
       `[Batch Worker] OpenAI batch execution failed/cancelled. Status: ${batch.status}`,
     );
     adaptiveTokenCapByFile.delete(fileId);
-    await markCaseAiFailed(
-      fileId,
-      typeof aiStartedAtMs === "number"
-        ? Math.max(0, Date.now() - aiStartedAtMs)
-        : 0,
-    );
+    await prisma.$transaction([
+      prisma.email.updateMany({
+        where: { ai_batch_run_id: batchRunId, ai_decision: null },
+        data: { ai_batch_run_id: null },
+      }),
+      prisma.aiBatchRun.update({
+        where: { id: batchRunId },
+        data: {
+          status: "retryable",
+          error: getBatchErrorText(batch).slice(0, 1000) || batch.status,
+          completed_at: new Date(),
+        },
+      }),
+    ]);
+    await fillAiBatchSlots(fileId, criteriaFromRow(row));
   }
 
   return batch.status;
+}
+
+/** Poll every durable Batch submitted for this case coordinator.  `batch_id`
+ * on processed_files is retained only for compatibility; it cannot represent
+ * multiple in-flight batches and is never used for ownership. */
+export async function pollBatchStatus(fileId: string) {
+  const runs = await prisma.aiBatchRun.findMany({
+    where: {
+      coordinator_id: fileId,
+      status: "submitted",
+      openai_batch_id: { not: null },
+    },
+    select: { id: true, openai_batch_id: true },
+  });
+  if (runs.length === 0) return "no_batch";
+
+  const statuses = await Promise.all(
+    runs.map((run) =>
+      pollSingleBatchStatus(fileId, run.id, run.openai_batch_id as string),
+    ),
+  );
+  return statuses.join(",");
 }

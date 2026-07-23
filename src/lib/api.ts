@@ -51,6 +51,18 @@ export async function runAiAudit(
   }
 }
 
+export async function resumeAiAudit(
+  fileId: string,
+): Promise<{ remaining: number }> {
+  const res = await postJson("/api/ai-resume", { fileId });
+  const data = (await res.json().catch(() => ({}))) as {
+    remaining?: number;
+    error?: string;
+  };
+  if (!res.ok) throw new Error(data.error || "Failed to resume AI audit.");
+  return { remaining: data.remaining || 0 };
+}
+
 export async function convertToPdf(fileId: string): Promise<void> {
   const res = await postJson("/api/convert", { fileId });
   if (!res.ok) {
@@ -61,6 +73,45 @@ export async function convertToPdf(fileId: string): Promise<void> {
 
 export interface BatchPollResult {
   status: string;
+}
+
+export interface AiBatchSettings {
+  maxTokensPerBatch: number;
+  maxConcurrentBatches: number;
+}
+
+export interface AiBatchSettingsLimits {
+  minTokensPerBatch: number;
+  maxTokensPerBatch: number;
+  minConcurrentBatches: number;
+  maxConcurrentBatches: number;
+  maxQueuedTokens: number;
+}
+
+export async function getPipelineSettings(): Promise<{
+  settings: AiBatchSettings;
+  limits: AiBatchSettingsLimits;
+}> {
+  const res = await fetch("/api/settings", { cache: "no-store" });
+  if (!res.ok) throw new Error("Failed to load pipeline settings.");
+  return res.json();
+}
+
+export async function updatePipelineSettings(
+  settings: AiBatchSettings,
+): Promise<AiBatchSettings> {
+  const res = await fetch("/api/settings", {
+    method: "PATCH",
+    headers: jsonHeaders,
+    body: JSON.stringify(settings),
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    settings?: AiBatchSettings;
+    error?: string;
+  };
+  if (!res.ok || !data.settings)
+    throw new Error(data.error || "Failed to save pipeline settings.");
+  return data.settings;
 }
 
 export async function pollBatch(fileId: string): Promise<BatchPollResult> {
@@ -74,6 +125,18 @@ export async function wipeCase(
 ): Promise<boolean> {
   const res = await postJson("/api/wipe", { caseName, fileIds });
   return res.ok;
+}
+
+export async function prepareUpload(
+  fileIds: string[],
+): Promise<{ removed: number }> {
+  const res = await postJson("/api/prepare-upload", { fileIds });
+  const data = (await res.json().catch(() => ({}))) as {
+    removed?: number;
+    error?: string;
+  };
+  if (!res.ok) throw new Error(data.error || "Failed to prepare upload.");
+  return { removed: data.removed || 0 };
 }
 
 export async function processFiles(

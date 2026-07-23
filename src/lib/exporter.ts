@@ -169,8 +169,9 @@ export async function extractUniqueEmails(
       );
 
       if (fs.existsSync(emlPath)) {
-        fs.copyFileSync(emlPath, finalEmlPath);
-        fs.unlinkSync(emlPath);
+        // Normalization hands the EML to the case-level raw folder. It is a
+        // move so a large PST email is never retained twice between stages.
+        fs.renameSync(emlPath, finalEmlPath);
 
         const rawEml = fs.readFileSync(finalEmlPath);
         const parsed = await simpleParser(rawEml);

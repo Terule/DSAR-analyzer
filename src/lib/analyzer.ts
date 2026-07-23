@@ -434,10 +434,9 @@ export async function analyzePstDuplicates(
     const emailId = crypto.randomUUID();
     const sentDate = parsed.date ? parsed.date.toISOString() : "no-date";
 
-    // Move the unique EML to the secure .raw_fileId folder
+    // Move (do not duplicate) the unique EML to the secure .raw_fileId folder.
     const finalEmlPath = path.join(targetFolder, `${emailId}.eml`);
-    fs.copyFileSync(filePath, finalEmlPath);
-    fs.unlinkSync(filePath); // Cleanup temp file
+    fs.renameSync(filePath, finalEmlPath);
 
     // Insert into DB with relational logic (is it an attachment? does it have a parent?)
     await prisma.email.create({

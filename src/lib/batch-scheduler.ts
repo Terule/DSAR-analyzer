@@ -9,6 +9,7 @@
 
 import path from "node:path";
 import { pollBatchStatus } from "./batch-worker";
+import { getCasePstFileIds } from "./case-utils";
 import {
   enqueueFilePhase,
   isControlPlanePipelineEnabled,
@@ -18,6 +19,12 @@ import { prisma } from "./prisma";
 // OpenAI batches use a 24h completion window; a 1-minute cadence keeps the UI
 // responsive without hammering the API.
 const POLL_INTERVAL_MS = 60_000;
+// Applying a completed Batch is local work and normally takes seconds. If a
+// service restart interrupts it, its durable row would otherwise remain in
+// `processing` forever because only `submitted` rows are polled. Give a very
+// generous window before re-queueing it; re-applying an output file is
+// idempotent because email decisions are ownership-guarded.
+const STALE_BATCH_APPLICATION_MS = 30 * 60_000;
 
 let timer: ReturnType<typeof setInterval> | null = null;
 let sweeping = false;
@@ -105,32 +112,65 @@ export async function runBatchSweep(): Promise<SweepResult> {
   // started (e.g. the UI orchestrator state was lost mid-run).
   await startReadyFilesPhases();
 
+  const staleBefore = new Date(Date.now() - STALE_BATCH_APPLICATION_MS);
+  const recoveredApplications = await prisma.aiBatchRun.updateMany({
+    where: {
+      status: "processing",
+      submitted_at: { lt: staleBefore },
+      completed_at: null,
+    },
+    data: { status: "submitted" },
+  });
+  if (recoveredApplications.count > 0) {
+    console.warn(
+      `[Batch Scheduler] Re-queued ${recoveredApplications.count} stale completed-Batch application(s) after an interrupted local worker.`,
+    );
+  }
+
   // 0. Safety net: AI finished but render still pending -> enqueue the durable
   // local control-plane job. Lease recovery, not process inspection, handles
   // worker crashes in the new architecture.
-  const hasPendingRender = await prisma.processedFile.findFirst({
+  const pendingRenderRows = await prisma.processedFile.findMany({
     where: { ai_status: "completed", pdf_status: "pending" },
     select: { id: true },
   });
 
   let renderWorkerStarted = false;
-  if (hasPendingRender && isControlPlanePipelineEnabled()) {
-    await enqueueFilePhase({ fileId: hasPendingRender.id, phase: "render" });
+  // Render is case-level: every PST row shares the same selected/ folder.
+  // Only the deterministic coordinator (the lowest row id) may own that
+  // folder. Scheduling an arbitrary completed sibling creates competing
+  // render workers, which can race while reclaiming selected EML files.
+  let renderCoordinatorId: string | undefined;
+  for (const row of pendingRenderRows) {
+    const coordinatorId = (await getCasePstFileIds(row.id)).sort()[0];
+    if (coordinatorId && coordinatorId === row.id) {
+      renderCoordinatorId = coordinatorId;
+      break;
+    }
+  }
+  if (renderCoordinatorId && isControlPlanePipelineEnabled()) {
+    await enqueueFilePhase({ fileId: renderCoordinatorId, phase: "render" });
     renderWorkerStarted = true;
     console.log("[Batch Scheduler] Enqueued control-plane render job.");
   }
 
-  // 2. Poll every batch that was uploaded to OpenAI and awaits results.
-  const pendingFiles = await prisma.processedFile.findMany({
-    where: { ai_status: "batch_ready", batch_id: { not: null } },
-    select: { id: true },
+  // 2. Poll every durable submitted Batch. A coordinator can now have several
+  // batches in flight, so processed_files.batch_id is only a compatibility
+  // pointer and must not control polling.
+  const pendingRuns = await prisma.aiBatchRun.findMany({
+    where: { status: "submitted", openai_batch_id: { not: null } },
+    select: { coordinator_id: true },
+    distinct: ["coordinator_id"],
   });
 
-  for (const file of pendingFiles) {
+  for (const run of pendingRuns) {
     try {
-      await pollBatchStatus(file.id);
+      await pollBatchStatus(run.coordinator_id);
     } catch (err) {
-      console.error(`[Batch Scheduler] Failed to poll file ${file.id}:`, err);
+      console.error(
+        `[Batch Scheduler] Failed to poll file ${run.coordinator_id}:`,
+        err,
+      );
     }
   }
 
@@ -152,7 +192,7 @@ export async function runBatchSweep(): Promise<SweepResult> {
   });
 
   return {
-    polledBatches: pendingFiles.length,
+    polledBatches: pendingRuns.length,
     renderWorkerStarted,
     workRemains: !!remaining,
   };

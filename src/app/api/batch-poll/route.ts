@@ -20,33 +20,21 @@ export async function POST(request: Request) {
     // stopping TypeScript from complaining about a void overlap if the cache is stale.
     const status = (await pollBatchStatus(fileId)) as unknown;
 
-    // 🔥 ORPHANED BATCH AUTO-HEALER 🔥
-    // If the worker returns "no_batch", the file is missing its OpenAI ID.
+    // A coordinator can legitimately have no *currently submitted* Batch while
+    // another worker is filling slots or all rows are already settled.  Do not
+    // revert it based on the legacy processed_files.batch_id pointer.
     if (status === "no_batch") {
-      const row = await prisma.processedFile.findUnique({
-        where: { id: fileId },
-        select: { ai_status: true },
+      const activeRun = await prisma.aiBatchRun.findFirst({
+        where: {
+          coordinator_id: fileId,
+          status: { in: ["claiming", "submitted", "processing"] },
+        },
+        select: { id: true },
       });
 
-      if (row && row.ai_status === "batch_ready") {
+      if (!activeRun) {
         console.log(
-          `[Auto-Heal] File ${fileId} was stuck in 'batch_ready' without an OpenAI batch_id! Reverting to 'pending'...`,
-        );
-
-        // Push the file back to pending so the UI orchestrator can restart it instantly
-        await prisma.processedFile.update({
-          where: { id: fileId },
-          data: { ai_status: "pending" },
-        });
-
-        return NextResponse.json(
-          {
-            success: true,
-            status: "reverted",
-            message:
-              "Ghost file reverted to pending to allow orchestrator to retry.",
-          },
-          { status: 200 },
+          `[Batch Poll] No active durable batch run for ${fileId}; leaving its coordinator state unchanged.`,
         );
       }
     }

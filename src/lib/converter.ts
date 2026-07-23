@@ -12,6 +12,7 @@ import {
 import mammoth from "mammoth";
 import * as xlsx from "xlsx";
 import { getCasePstFileIds } from "./case-utils";
+import { archiveCompletedCase } from "./history";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 import { repairMojibake } from "./text-encoding";
@@ -793,11 +794,17 @@ export async function convertToPdfBatch(
   )
     relativeSystemPath = fileId;
 
-  let deliverableRelativePath = path.dirname(relativeSystemPath);
-  if (deliverableRelativePath === "." || deliverableRelativePath === "")
+  const sourceParts = relativeSystemPath.split(/[\\/]/).filter(Boolean);
+  // Deliverables are scoped to the request, never to an eDiscovery export
+  // subfolder. Every PST under [case]/[request] therefore writes to the one
+  // consolidated [case]/[request]/Emails folder.
+  let deliverableRelativePath =
+    sourceParts.length >= 2
+      ? path.join(sourceParts[0], sourceParts[1])
+      : path.dirname(relativeSystemPath);
+  if (deliverableRelativePath === "." || deliverableRelativePath === "") {
     deliverableRelativePath = path.parse(relativeSystemPath).name;
-  if (path.basename(deliverableRelativePath).toLowerCase() === "pst")
-    deliverableRelativePath = path.dirname(deliverableRelativePath);
+  }
   const workingFolder = getPstWorkFolder({
     fileId,
     filepath: row.filepath,
@@ -939,6 +946,7 @@ export async function convertToPdfBatch(
       const emlPath = path.join(selectedDir, filename);
       const baseName = `Email ${String(idx + 1).padStart(padLength, "0")}`;
       const emailPdfPath = path.join(deliverablesDir, `${baseName}.pdf`);
+      let rendered = false;
 
       try {
         await withTimeout(
@@ -988,6 +996,9 @@ export async function convertToPdfBatch(
             if (parsed.attachments && parsed.attachments.length > 0) {
               await processNestedAttachments(parsed.attachments, baseName);
             }
+
+            rendered =
+              fs.existsSync(emailPdfPath) && fs.statSync(emailPdfPath).size > 0;
           })(),
           PER_EMAIL_TIMEOUT_MS,
           `Email render (${filename})`,
@@ -996,6 +1007,17 @@ export async function convertToPdfBatch(
         console.error(
           `Skipping ${filename}: ${err instanceof Error ? err.message : String(err)}`,
         );
+      }
+
+      // The selected EML is the source for this one deliverable. Once its PDF
+      // has been verified and its attachment pass finished, reclaim it now so
+      // a long Render phase does not hold every original until the last email.
+      if (rendered) {
+        try {
+          fs.rmSync(emlPath, { force: true });
+        } catch (error) {
+          console.warn(`[Converter] Could not reclaim ${filename}:`, error);
+        }
       }
 
       // Keep the API server responsive while processing large batches.
@@ -1035,6 +1057,7 @@ export async function convertToPdfBatch(
 
         const baseName = `Warning ${String(wi + 1).padStart(warnPad, "0")}`;
         const pdfPath = path.join(warningDir, `${baseName}.pdf`);
+        let rendered = false;
 
         try {
           await withTimeout(
@@ -1068,6 +1091,9 @@ export async function convertToPdfBatch(
                   true, // self-forwards are addressed to personal email — bypass keyword filter
                 );
               }
+
+              rendered =
+                fs.existsSync(pdfPath) && fs.statSync(pdfPath).size > 0;
             })(),
             PER_EMAIL_TIMEOUT_MS,
             `Warning email render (${email_hash})`,
@@ -1078,6 +1104,17 @@ export async function convertToPdfBatch(
               err instanceof Error ? err.message : String(err)
             }`,
           );
+        }
+
+        if (rendered) {
+          try {
+            fs.rmSync(emlPath, { force: true });
+          } catch (error) {
+            console.warn(
+              `[Converter] Could not reclaim warning email ${email_hash}:`,
+              error,
+            );
+          }
         }
 
         await yieldToEventLoop();
@@ -1114,6 +1151,7 @@ export async function convertToPdfBatch(
           ]
         : []),
     ]);
+    await archiveCompletedCase(fileId);
     // Once Render succeeds, the final PDFs no longer depend on raw EMLs or
     // batch payloads. Remove the hidden work tree to reclaim disk space.
     fs.rmSync(workingFolder, { recursive: true, force: true });

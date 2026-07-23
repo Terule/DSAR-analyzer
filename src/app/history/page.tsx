@@ -5,8 +5,9 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchRunHistory } from "@/lib/api";
 import type { CaseHistoryItem } from "@/lib/types";
 
-const EMAIL_REVIEW_MS = 30_000;
-const FILE_REVIEW_MS = 20_000;
+// A manual DSAR case typically takes about one month. Successful cases are
+// credited with that full avoided turnaround time instead of a per-item guess.
+const MANUAL_CASE_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 
 function formatLocalDate(value: string): string {
   const parsed = Date.parse(value);
@@ -23,6 +24,7 @@ function formatOutcome(outcome: CaseHistoryItem["terminal_outcome"]): string {
 function formatArchivedReason(
   reason: CaseHistoryItem["archived_reason"],
 ): string {
+  if (reason === "completed") return "Completed";
   if (reason === "manual_reset") return "Manual Reset";
   return "Source Deleted";
 }
@@ -52,10 +54,7 @@ function getDisplayRequest(item: CaseHistoryItem): string {
 }
 
 function estimateTimeSavedMs(item: CaseHistoryItem): number {
-  // Approximation: time a reviewer would have spent on excluded content.
-  const savedEmails = item.emails_discarded + item.duplicate_emails;
-  const savedFiles = item.files_skipped + item.files_duplicates;
-  return savedEmails * EMAIL_REVIEW_MS + savedFiles * FILE_REVIEW_MS;
+  return item.terminal_outcome === "success" ? MANUAL_CASE_DURATION_MS : 0;
 }
 
 export default function HistoryPage() {

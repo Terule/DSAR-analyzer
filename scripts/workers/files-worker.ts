@@ -6,6 +6,7 @@
  */
 
 import path from "node:path";
+import { archiveCompletedCase } from "../../src/lib/history";
 import { prisma } from "../../src/lib/prisma";
 import { runStandaloneBatch } from "../../src/lib/standalone-processor";
 
@@ -112,6 +113,7 @@ async function main() {
           files_duration_ms: durationMs,
         },
       });
+      await archiveCompletedCase(fileId);
       console.log(`[files-worker] Completed: ${fileId}`);
     } else {
       await prisma.processedFile.update({

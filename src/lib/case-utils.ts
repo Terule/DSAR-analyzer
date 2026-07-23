@@ -1,4 +1,4 @@
-import path from "node:path";
+import { getCaseKey } from "./format";
 import { prisma } from "./prisma";
 
 /**
@@ -6,8 +6,8 @@ import { prisma } from "./prisma";
  * across every PST file in a case/request. These helpers let the AI-completion
  * and Render steps treat that group as one unit.
  *
- * A "case" here = all `kind='pst'` rows whose PST files live in the same
- * directory (e.g. `[case]/[request]/PST`).
+ * A "case" here = all `kind='pst'` rows in the same `[case]/[request]`.
+ * Nested folders below the request are eDiscovery export containers only.
  */
 
 /** Ids of all PST rows in the same case/request directory as `fileId`. */
@@ -18,14 +18,14 @@ export async function getCasePstFileIds(fileId: string): Promise<string[]> {
   });
   if (!row?.filepath) return [fileId];
 
-  const caseDir = path.dirname(row.filepath);
+  const caseKey = getCaseKey(row.filepath);
   const rows = await prisma.processedFile.findMany({
     where: { kind: "pst" },
     select: { id: true, filepath: true },
   });
 
   const ids = rows
-    .filter((r) => r.filepath && path.dirname(r.filepath) === caseDir)
+    .filter((r) => r.filepath && getCaseKey(r.filepath) === caseKey)
     .map((r) => r.id);
 
   return ids.length > 0 ? ids : [fileId];

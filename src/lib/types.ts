@@ -105,7 +105,7 @@ export interface RunHistoryItem {
   pdf_duration_ms: number;
   files_duration_ms: number;
   terminal_outcome: "success" | "failed" | "partial";
-  archived_reason: "source_deleted" | "manual_reset";
+  archived_reason: "completed" | "source_deleted" | "manual_reset";
   finalized_at: string;
   created_at: string;
 }
@@ -141,7 +141,7 @@ export interface CaseHistoryItem {
   files_duration_ms: number;
   total_duration_ms: number;
   terminal_outcome: "success" | "failed" | "partial";
-  archived_reason: "source_deleted" | "manual_reset";
+  archived_reason: "completed" | "source_deleted" | "manual_reset";
   finalized_at: string;
   created_at: string;
 }

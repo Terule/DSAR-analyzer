@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { DEFAULT_MAX_TOKENS_PER_BATCH, generateBatchFile } from "@/lib/ai";
+import { fillAiBatchSlots } from "@/lib/ai";
 import { ensureBatchPollerRunning } from "@/lib/batch-scheduler";
 import { getCasePstFileIds } from "@/lib/case-utils";
 import {
@@ -89,26 +89,27 @@ export async function POST(request: Request) {
     // overhead (system prompt + schema + msg overhead) is added on top of the
     // raw payload token estimate; the batch worker self-corrects if exceeded.
     const casePstIds = await getCasePstFileIds(fileId);
-    const caseTotals = await prisma.processedFile.aggregate({
-      where: { id: { in: casePstIds } },
-      _sum: { estimated_tokens: true, unique_emails: true },
+    const incompleteExtraction = await prisma.processedFile.findFirst({
+      where: { id: { in: casePstIds }, status: { not: "completed" } },
+      select: { id: true },
     });
-
-    const PER_REQUEST_OVERHEAD_TOKENS = 650;
-    const estimatedRequestTokens =
-      (caseTotals._sum.estimated_tokens ?? 0) +
-      (caseTotals._sum.unique_emails ?? 0) * PER_REQUEST_OVERHEAD_TOKENS;
-    const estimatedBatches = Math.max(
-      1,
-      Math.ceil(estimatedRequestTokens / DEFAULT_MAX_TOKENS_PER_BATCH),
-    );
+    if (incompleteExtraction) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "Every PST in the request must finish extraction before AI starts.",
+        },
+        { status: 409 },
+      );
+    }
     await prisma.processedFile.update({
       where: { id: fileId },
       data: {
         ai_status: "processing",
         ai_started_at: BigInt(Date.now()),
         ai_duration_ms: 0,
-        ai_batches_total: estimatedBatches,
+        ai_batches_total: 0,
         ai_batches_done: 0,
       },
     });
@@ -126,7 +127,7 @@ export async function POST(request: Request) {
 
     // Trigger the Batch generation process safely in the background
     setTimeout(() => {
-      generateBatchFile(fileId, finalCriteria)
+      fillAiBatchSlots(fileId, finalCriteria)
         .then(() => {})
         .catch(async (err) => {
           console.error(`Batch generation crashed for file ${fileId}:`, err);

@@ -1,4 +1,4 @@
-import { Database, Eye, EyeOff, RefreshCw } from "lucide-react";
+import { Database, Eye, EyeOff, RefreshCw, Settings } from "lucide-react";
 import Link from "next/link";
 
 interface DashboardHeaderProps {
@@ -8,6 +8,7 @@ interface DashboardHeaderProps {
   onScan: () => void;
   privacyMode: boolean;
   onTogglePrivacy: () => void;
+  onOpenSettings: () => void;
 }
 
 export function DashboardHeader({
@@ -17,6 +18,7 @@ export function DashboardHeader({
   onScan,
   privacyMode,
   onTogglePrivacy,
+  onOpenSettings,
 }: DashboardHeaderProps) {
   return (
     <header className="mb-8 pb-6 flex flex-col sm:flex-row sm:items-end sm:justify-between gap-4">
@@ -31,6 +33,15 @@ export function DashboardHeader({
       </div>
 
       <div className="flex shrink-0 items-center gap-2">
+        <button
+          type="button"
+          onClick={onOpenSettings}
+          title="Pipeline settings"
+          aria-label="Open pipeline settings"
+          className="inline-flex size-10 items-center justify-center rounded-xl border border-slate-700 bg-slate-800 text-slate-200 shadow-sm transition-colors hover:bg-slate-700"
+        >
+          <Settings className="size-5" />
+        </button>
         <Link
           href="/history"
           className="inline-flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl font-semibold text-sm border shadow-sm transition-colors bg-slate-800 hover:bg-slate-700 text-slate-200 border-slate-700"

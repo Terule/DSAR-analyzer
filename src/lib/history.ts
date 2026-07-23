@@ -5,7 +5,7 @@ import { prisma } from "./prisma";
 import { serializeCaseHistory, serializeRunHistory } from "./serialize";
 import type { CaseHistoryItem, RunHistoryItem } from "./types";
 
-export type ArchiveReason = "source_deleted" | "manual_reset";
+export type ArchiveReason = "completed" | "source_deleted" | "manual_reset";
 
 type ProcessedRow = {
   id: string;
@@ -404,6 +404,32 @@ export async function insertCaseHistorySnapshots(
       if (await insertCaseHistorySnapshot(tx, caseKey, rows, reason))
         inserted++;
     }
+    return inserted;
+  });
+}
+
+/**
+ * Persists final case metrics as soon as every row in the request completes,
+ * independently of whether its source files are later removed from staging.
+ */
+export async function archiveCompletedCase(fileId: string): Promise<boolean> {
+  return prisma.$transaction(async (tx) => {
+    const caseRowsMap = await getCaseRowsFromFileIds(tx, [fileId]);
+    let inserted = false;
+
+    for (const [caseKey, rows] of caseRowsMap.entries()) {
+      if (rows.length === 0 || !rows.every(isRowSuccess)) continue;
+
+      for (const row of rows) {
+        if (await insertRunHistorySnapshotTx(tx, row.id, "completed")) {
+          inserted = true;
+        }
+      }
+      if (await insertCaseHistorySnapshot(tx, caseKey, rows, "completed")) {
+        inserted = true;
+      }
+    }
+
     return inserted;
   });
 }

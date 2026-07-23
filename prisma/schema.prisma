@@ -47,6 +47,7 @@ model ProcessedFile {
   files_started_at        BigInt?
 
   emails Email[] @relation("ProcessedFileEmails")
+  ai_batch_runs AiBatchRun[] @relation("CoordinatorAiBatchRuns")
 
   @@map("processed_files")
 }
@@ -62,11 +63,52 @@ model Email {
   is_attachment     Int     @default(0)
   ai_decision       String?
   ai_reason         String?
+  ai_batch_run_id   String?
 
   processed_file ProcessedFile? @relation("ProcessedFileEmails", fields: [file_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  ai_batch_run AiBatchRun? @relation("AiBatchRunEmails", fields: [ai_batch_run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
 
   @@index([file_id])
+  @@index([ai_batch_run_id])
   @@map("emails")
+}
+
+// Each OpenAI Batch submission has a durable row.  Email rows are claimed by
+// this row before upload, which makes parallel submission safe and lets us
+// retry only request lines that did not yield a decision.
+model AiBatchRun {
+  id             String   @id
+  coordinator_id String
+  openai_batch_id String? @unique
+  status         String   @default("claiming")
+  request_count  Int      @default(0)
+  estimated_tokens Int    @default(0)
+  retry_count    Int      @default(0)
+  error          String?
+  created_at     DateTime @default(now())
+  submitted_at   DateTime?
+  // The terminal timestamp reported by OpenAI, distinct from the time this
+  // application downloads and applies the output.
+  openai_completed_at DateTime?
+  completed_at   DateTime?
+
+  coordinator ProcessedFile @relation("CoordinatorAiBatchRuns", fields: [coordinator_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
+  emails Email[] @relation("AiBatchRunEmails")
+
+  @@index([coordinator_id, status])
+  @@map("ai_batch_runs")
+}
+
+// A single operator-managed row controls live pipeline throughput.  Workers
+// read this before filling slots, so adjustments take effect without restarting
+// already accepted OpenAI Batch jobs.
+model PipelineSettings {
+  id                          String   @id
+  ai_max_tokens_per_batch     Int      @default(2000000)
+  ai_max_concurrent_batches   Int      @default(4)
+  updated_at                  DateTime @updatedAt
+
+  @@map("pipeline_settings")
 }
 
 model RunHistory {

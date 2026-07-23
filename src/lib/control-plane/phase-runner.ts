@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { DEFAULT_MAX_TOKENS_PER_BATCH, generateBatchFile } from "@/lib/ai";
+import { fillAiBatchSlots } from "@/lib/ai";
 import { analyzePstDuplicates, scanFileMetadata } from "@/lib/analyzer";
 import { getCasePstFileIds } from "@/lib/case-utils";
 import {
@@ -10,6 +10,7 @@ import {
 import { enqueueFilePhase } from "@/lib/control-plane/pipeline";
 import { convertToPdfBatch } from "@/lib/converter";
 import { extractUniqueEmails } from "@/lib/exporter";
+import { archiveCompletedCase } from "@/lib/history";
 import { prisma } from "@/lib/prisma";
 import { getPstArtifactPaths } from "@/lib/pst-artifacts";
 import {
@@ -111,18 +112,6 @@ export async function runPhaseJob(
     });
     if (!unfinished) {
       const coordinatorId = [...caseIds].sort()[0];
-      const totals = await prisma.processedFile.aggregate({
-        where: { id: { in: caseIds } },
-        _sum: { estimated_tokens: true, unique_emails: true },
-      });
-      const estimated = Math.max(
-        1,
-        Math.ceil(
-          ((totals._sum.estimated_tokens ?? 0) +
-            (totals._sum.unique_emails ?? 0) * 650) /
-            DEFAULT_MAX_TOKENS_PER_BATCH,
-        ),
-      );
       await prisma.processedFile.update({
         where: { id: coordinatorId },
         data: {
@@ -131,7 +120,7 @@ export async function runPhaseJob(
           ai_status: "pending",
           ai_started_at: null,
           ai_duration_ms: 0,
-          ai_batches_total: estimated,
+          ai_batches_total: 0,
           ai_batches_done: 0,
         },
       });
@@ -160,7 +149,7 @@ export async function runPhaseJob(
         ai_started_at: row.ai_started_at || BigInt(Date.now()),
       },
     });
-    await generateBatchFile(fileId, {
+    await fillAiBatchSlots(fileId, {
       name: row.subject_name || "",
       email: row.subject_email || "",
       personalEmail: row.subject_personal_email || undefined,
@@ -192,6 +181,7 @@ export async function runPhaseJob(
       where: { id: fileId },
       data: { files_status: "completed" },
     });
+    await archiveCompletedCase(fileId);
     return { operation: "files-finalized", ...result };
   }
 
@@ -207,6 +197,7 @@ export async function runPhaseJob(
         where: { id: fileId },
         data: { files_status: "completed", files_total: 0 },
       });
+      await archiveCompletedCase(fileId);
       return { operation: "files-empty" };
     }
     const batches = Array.from(

@@ -1,8 +1,13 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
 import { getCasePstFileIds, markCaseAiCompleted } from "./case-utils";
+import {
+  DEFAULT_AI_BATCH_SETTINGS,
+  getAiBatchSettings,
+} from "./pipeline-settings";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 
@@ -10,8 +15,14 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 const MODEL_NAME = "gpt-4o-mini";
 const TOKENIZER = encodingForModel(MODEL_NAME);
 
-// Enforce max enqueued rate headroom
-export const DEFAULT_MAX_TOKENS_PER_BATCH = 900_000;
+// Parallel batches are intentionally bounded well below the 40M-token Tier 3
+// queue.  A 2M-token chunk keeps retries contained; four in flight gives the
+// API enough work to accelerate without turning a transient failure into a
+// case-wide replay.
+export const DEFAULT_MAX_TOKENS_PER_BATCH =
+  DEFAULT_AI_BATCH_SETTINGS.maxTokensPerBatch;
+export const DEFAULT_MAX_CONCURRENT_AI_BATCHES =
+  DEFAULT_AI_BATCH_SETTINGS.maxConcurrentBatches;
 const MAX_COMPLETION_TOKENS_PER_REQUEST = 150;
 const CHAT_MESSAGE_OVERHEAD_TOKENS = 12;
 const REQUEST_OVERHEAD_TOKENS = 24;
@@ -97,10 +108,13 @@ export async function generateBatchFile(
   },
   options?: { maxTokensPerBatch?: number },
 ) {
+  const configuredSettings = options?.maxTokensPerBatch
+    ? null
+    : await getAiBatchSettings();
   const maxTokensPerBatch =
     options?.maxTokensPerBatch && options.maxTokensPerBatch > 0
       ? Math.floor(options.maxTokensPerBatch)
-      : DEFAULT_MAX_TOKENS_PER_BATCH;
+      : (configuredSettings?.maxTokensPerBatch ?? DEFAULT_MAX_TOKENS_PER_BATCH);
 
   const row = await prisma.processedFile.findUnique({
     where: { id: fileId },
@@ -153,6 +167,7 @@ export async function generateBatchFile(
       file_id: { in: casePstIds },
       is_duplicate: 0,
       ai_decision: null,
+      ai_batch_run_id: null,
     },
     select: { email_hash: true },
   });
@@ -216,6 +231,11 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
   const subjectPatterns = subjectTokens.map(
     (t) => new RegExp(`(^|[^a-z0-9])${escapeRegExp(t)}($|[^a-z0-9])`, "i"),
   );
+
+  const batchRunId = randomUUID();
+  await prisma.aiBatchRun.create({
+    data: { id: batchRunId, coordinator_id: fileId, status: "claiming" },
+  });
 
   const batchFilePath = path.join(
     batchDir,
@@ -295,6 +315,18 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
       break;
     }
 
+    // Claim before writing/uploading.  This is the critical ownership barrier:
+    // another parallel slot can only select rows whose claim is still null.
+    const claim = await prisma.email.updateMany({
+      where: {
+        email_hash: hash,
+        ai_decision: null,
+        ai_batch_run_id: null,
+      },
+      data: { ai_batch_run_id: batchRunId },
+    });
+    if (claim.count === 0) continue;
+
     const request = {
       custom_id: hash,
       method: "POST",
@@ -324,28 +356,108 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
       typeof row.ai_started_at === "bigint"
         ? Math.max(0, Date.now() - Number(row.ai_started_at))
         : 0;
-    await markCaseAiCompleted(fileId, totalAiMs);
+    await prisma.aiBatchRun.delete({ where: { id: batchRunId } });
+    const activeBatches = await prisma.aiBatchRun.count({
+      where: {
+        coordinator_id: fileId,
+        status: { in: ["claiming", "submitted", "processing"] },
+      },
+    });
+    if (activeBatches === 0) await markCaseAiCompleted(fileId, totalAiMs);
     if (fs.existsSync(batchFilePath)) fs.unlinkSync(batchFilePath);
-    return;
+    return activeBatches === 0 ? "completed" : "no_work";
   }
 
   console.log(
     `[AI Engine] Uploading Chunk of ${addedCount} items (~${currentTokenCount} tokens) to OpenAI...`,
   );
 
-  const fileUpload = await openai.files.create({
-    file: fs.createReadStream(batchFilePath),
-    purpose: "batch",
-  });
+  try {
+    const fileUpload = await openai.files.create({
+      file: fs.createReadStream(batchFilePath),
+      purpose: "batch",
+    });
 
-  const batch = await openai.batches.create({
-    input_file_id: fileUpload.id,
-    endpoint: "/v1/chat/completions",
-    completion_window: "24h",
-  });
+    const batch = await openai.batches.create({
+      input_file_id: fileUpload.id,
+      endpoint: "/v1/chat/completions",
+      completion_window: "24h",
+    });
 
-  await prisma.processedFile.update({
-    where: { id: fileId },
-    data: { batch_id: batch.id, ai_status: "batch_ready" },
+    await prisma.$transaction([
+      prisma.aiBatchRun.update({
+        where: { id: batchRunId },
+        data: {
+          openai_batch_id: batch.id,
+          status: "submitted",
+          request_count: addedCount,
+          estimated_tokens: currentTokenCount,
+          submitted_at: new Date(),
+        },
+      }),
+      // `batch_id` remains a UI/backwards-compatible pointer only.  The
+      // durable ai_batch_runs rows are the source of truth for parallel work.
+      prisma.processedFile.update({
+        where: { id: fileId },
+        data: {
+          batch_id: batch.id,
+          ai_status: "batch_ready",
+          ai_batches_total: { increment: 1 },
+        },
+      }),
+    ]);
+    return "submitted";
+  } catch (error) {
+    await prisma.$transaction([
+      prisma.email.updateMany({
+        where: { ai_batch_run_id: batchRunId, ai_decision: null },
+        data: { ai_batch_run_id: null },
+      }),
+      prisma.aiBatchRun.delete({ where: { id: batchRunId } }),
+    ]);
+    throw error;
+  } finally {
+    if (fs.existsSync(batchFilePath)) fs.unlinkSync(batchFilePath);
+  }
+}
+
+/** Fill the bounded parallel window. Safe to call repeatedly from polling or
+ * restart reconciliation: claimed email rows prevent overlapping submissions. */
+export async function fillAiBatchSlots(
+  fileId: string,
+  subjectCriteria: {
+    name: string;
+    email: string;
+    personalEmail?: string;
+    aliases: string[];
+  },
+  options?: { maxTokensPerBatch?: number; maxConcurrentBatches?: number },
+): Promise<void> {
+  const configuredSettings =
+    options?.maxTokensPerBatch && options?.maxConcurrentBatches
+      ? null
+      : await getAiBatchSettings();
+  const maxConcurrent = Math.max(
+    1,
+    options?.maxConcurrentBatches ??
+      configuredSettings?.maxConcurrentBatches ??
+      DEFAULT_MAX_CONCURRENT_AI_BATCHES,
+  );
+  const maxTokensPerBatch =
+    options?.maxTokensPerBatch ??
+    configuredSettings?.maxTokensPerBatch ??
+    DEFAULT_MAX_TOKENS_PER_BATCH;
+  const active = await prisma.aiBatchRun.count({
+    where: {
+      coordinator_id: fileId,
+      status: { in: ["claiming", "submitted", "processing"] },
+    },
   });
+  const slots = Math.max(0, maxConcurrent - active);
+  for (let index = 0; index < slots; index++) {
+    const result = await generateBatchFile(fileId, subjectCriteria, {
+      maxTokensPerBatch,
+    });
+    if (result !== "submitted") break;
+  }
 }

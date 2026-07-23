@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { CaseCard } from "@/components/dashboard/CaseCard";
 import { DashboardHeader } from "@/components/dashboard/DashboardHeader";
 import { ConnectingState, EmptyState } from "@/components/dashboard/EmptyState";
+import { PipelineSettingsDialog } from "@/components/dashboard/PipelineSettingsDialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -27,6 +28,7 @@ export default function Dashboard() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [isHydrated, setIsHydrated] = useState(false);
   const [privacyMode, setPrivacyMode] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
 
   // Tracks Files phases already kicked off so the orchestrator doesn't
   // double-spawn a worker while the DB status catches up via SSE.
@@ -42,6 +44,9 @@ export default function Dashboard() {
   const [resettingCases, setResettingCases] = useState<Record<string, boolean>>(
     {},
   );
+  const [preparingUploadCases, setPreparingUploadCases] = useState<
+    Record<string, boolean>
+  >({});
   const [activeConfigCase, setActiveConfigCase] = useState<string | null>(null);
   const [launchingCase, setLaunchingCase] = useState<string | null>(null);
   const [wipeDialog, setWipeDialog] = useState<{
@@ -189,6 +194,31 @@ export default function Dashboard() {
     } catch (_e) {}
   }, []);
 
+  const handleResumeAi = useCallback(
+    async (caseName: string) => {
+      const coordinator = groupedCases[caseName]
+        ?.filter((file) => file.kind === "pst")
+        .sort((a, b) => a.id.localeCompare(b.id))[0];
+      if (!coordinator) return;
+      try {
+        const { remaining } = await api.resumeAiAudit(coordinator.id);
+        setNotification({
+          type: "success",
+          message: `Resumed AI audit for ${remaining.toLocaleString()} unfinished emails.`,
+        });
+      } catch (error) {
+        setNotification({
+          type: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Failed to resume AI audit.",
+        });
+      }
+    },
+    [groupedCases, setNotification],
+  );
+
   const handleProcessFiles = useCallback(
     async (fileId: string, config: AiConfig) => {
       try {
@@ -294,6 +324,33 @@ export default function Dashboard() {
     (caseName: string, fileIds: string[]) =>
       setWipeDialog({ caseName, fileIds }),
     [],
+  );
+
+  const handlePrepareUpload = useCallback(
+    async (caseName: string, fileIds: string[]) => {
+      setPreparingUploadCases((prev) => ({ ...prev, [caseName]: true }));
+      try {
+        const { removed } = await api.prepareUpload(fileIds);
+        setNotification({
+          type: "success",
+          message:
+            removed > 0
+              ? `Removed ${removed} .DS_Store file${removed === 1 ? "" : "s"}. Ready for SharePoint.`
+              : "No .DS_Store files found. Ready for SharePoint.",
+        });
+      } catch (error) {
+        setNotification({
+          type: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "Failed to prepare the SharePoint upload.",
+        });
+      } finally {
+        setPreparingUploadCases((prev) => ({ ...prev, [caseName]: false }));
+      }
+    },
+    [setNotification],
   );
 
   const confirmResetCase = useCallback(() => {
@@ -511,6 +568,11 @@ export default function Dashboard() {
 
   return (
     <main className="min-h-screen bg-slate-900 text-slate-100 p-4 sm:p-8 font-sans">
+      <PipelineSettingsDialog
+        open={settingsOpen}
+        onOpenChange={setSettingsOpen}
+        onSaved={(message) => setNotification({ type: "success", message })}
+      />
       <AlertDialog
         open={Boolean(wipeDialog)}
         onOpenChange={(open) => {
@@ -543,6 +605,7 @@ export default function Dashboard() {
           onScan={handleScanDirectory}
           privacyMode={privacyMode}
           onTogglePrivacy={togglePrivacy}
+          onOpenSettings={() => setSettingsOpen(true)}
         />
 
         {loading && !isRefreshing ? (
@@ -567,6 +630,7 @@ export default function Dashboard() {
                 }
                 isSyncing={!!syncingCases[caseName]}
                 isResetting={!!resettingCases[caseName]}
+                isPreparingUpload={!!preparingUploadCases[caseName]}
                 isMetricsOpen={!!openMetrics[caseName]}
                 isConfigOpen={activeConfigCase === caseName}
                 onToggleMetrics={() => toggleMetrics(caseName)}
@@ -574,10 +638,12 @@ export default function Dashboard() {
                 onCloseConfig={() => setActiveConfigCase(null)}
                 onSync={(ids) => handleSyncBatch(caseName, ids)}
                 onReset={(ids) => requestResetCase(caseName, ids)}
+                onPrepareUpload={(ids) => handlePrepareUpload(caseName, ids)}
                 onStartSequence={(action) => startSequence(caseName, action)}
                 onSubmitAiConfig={(config) =>
                   submitAiConfigAndStart(caseName, config)
                 }
+                onResumeAi={() => handleResumeAi(caseName)}
               />
             ))}
           </div>

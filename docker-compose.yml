@@ -12,6 +12,10 @@ services:
       EXTRACTED_PATH: /data/extracted-emails
       EXECUTION_PROVIDER: ${EXECUTION_PROVIDER:-local-process}
       QUEUE_PROVIDER: ${QUEUE_PROVIDER:-bullmq}
+      # The app must use the same durable AI submission path as the dispatcher.
+      # Otherwise it can start a legacy direct Batch while the dispatcher also
+      # recovers and submits the same AI coordinator.
+      CONTROL_PLANE_PIPELINE_ENABLED: "true"
       POSTGRES_URL: ${POSTGRES_URL_DOCKER:-postgres://pst:pst@postgres:5432/pst_analyser}
       REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379}
     command:

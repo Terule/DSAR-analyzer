@@ -11,18 +11,25 @@ export function getPstArtifactPaths(input: {
   stagingPath: string;
   extractedPath: string;
 }): { caseFolder: string; rawEmlFolder: string; sourceRelativePath: string } {
-  let relativeDirectory = "";
+  let sourceRelativePath = "";
   if (input.filepath.startsWith(input.stagingPath)) {
-    relativeDirectory = path.dirname(
-      path.relative(input.stagingPath, input.filepath),
-    );
+    sourceRelativePath = path.relative(input.stagingPath, input.filepath);
   } else {
-    relativeDirectory = input.fileId;
+    sourceRelativePath = input.fileId;
   }
 
-  if (relativeDirectory === "." || relativeDirectory === "") {
-    relativeDirectory = path.parse(input.filepath).name;
+  if (sourceRelativePath === "." || sourceRelativePath === "") {
+    sourceRelativePath = path.parse(input.filepath).name;
   }
+
+  const sourceParts = sourceRelativePath.split(/[\\/]/).filter(Boolean);
+  // A request is always the first two staging levels: `[case]/[request]`.
+  // Deeper eDiscovery export folders group input files but do not split the
+  // request's shared Parse → Extract → AI → Render working set.
+  const requestRelativePath =
+    sourceParts.length >= 2
+      ? path.join(sourceParts[0], sourceParts[1])
+      : path.dirname(sourceRelativePath);
 
   const extractionKey = crypto
     .createHash("sha256")
@@ -33,15 +40,15 @@ export function getPstArtifactPaths(input: {
   // under a dot-folder so Finder only shows Emails/Documents/Messages.
   const caseFolder = path.join(
     input.extractedPath,
-    path.dirname(relativeDirectory),
+    requestRelativePath,
     ".work",
-    path.basename(relativeDirectory),
+    "PST",
   );
 
   return {
     caseFolder,
     rawEmlFolder: path.join(caseFolder, `.pst-eml-${extractionKey}`),
-    sourceRelativePath: relativeDirectory,
+    sourceRelativePath,
   };
 }
 

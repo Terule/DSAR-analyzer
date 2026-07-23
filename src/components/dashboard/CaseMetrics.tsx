@@ -8,7 +8,7 @@ import {
   FolderOpen,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { formatBytes } from "@/lib/format";
 import type { CaseStats, StagedFile } from "@/lib/types";
 import { Duration } from "./Duration";
@@ -77,12 +77,34 @@ export function CaseMetrics({
       f.kind !== "files" &&
       !["completed", "failed"].includes((f.ai_status || "").toLowerCase()),
   );
+  const [now, setNow] = useState(() => Date.now());
+
+  // AI duration is committed to the database only once the whole case settles.
+  // Tick locally while it runs so telemetry remains useful between Batch
+  // completions instead of showing a blank card for many hours.
+  useEffect(() => {
+    if (!aiStillRunning) return;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [aiStillRunning]);
+
+  const aiStartedAt = Math.min(
+    ...caseFiles
+      .filter((file) => file.kind !== "files" && !!file.ai_started_at)
+      .map((file) => file.ai_started_at as number),
+  );
+  const liveAiTime =
+    aiStillRunning && Number.isFinite(aiStartedAt)
+      ? Math.max(0, now - aiStartedAt)
+      : 0;
+  const displayedAiTime = Math.max(stats.aiTime, liveAiTime);
 
   const emailElapsed =
     stats.metadataTime +
     stats.analyzeTime +
     stats.extractTime +
-    stats.aiTime +
+    displayedAiTime +
     stats.pdfTime;
   const filesElapsed = filesRow?.files_duration_ms || 0;
   const totalElapsed = emailElapsed + filesElapsed;
@@ -189,7 +211,10 @@ export function CaseMetrics({
                     ms={stats.metadataTime + stats.analyzeTime}
                   />
                   <TimeCard label="Extract" ms={stats.extractTime} />
-                  <TimeCard label="AI" ms={stats.aiTime} />
+                  <TimeCard
+                    label={aiStillRunning ? "AI (Live)" : "AI"}
+                    ms={displayedAiTime}
+                  />
                   <TimeCard label="Render" ms={stats.pdfTime} />
                 </div>
               </div>

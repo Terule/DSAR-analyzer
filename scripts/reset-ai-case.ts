@@ -1,5 +1,8 @@
+import fs from "node:fs";
+import path from "node:path";
 import { getCaseKey } from "../src/lib/format";
 import { prisma } from "../src/lib/prisma";
+import { getPstWorkFolder } from "../src/lib/pst-artifacts";
 
 function parseArg(name: string): string | undefined {
   const idx = process.argv.indexOf(name);
@@ -40,7 +43,82 @@ async function main() {
     process.exit(1);
   }
 
+  const coordinator = [...targetPstIds].sort()[0];
+  const sourcePath = rows.find((row) => row.id === coordinator)?.filepath;
+  if (!sourcePath) {
+    throw new Error("AI reset could not resolve the request working folder.");
+  }
+
+  const stagingPath =
+    process.env.STAGING_PATH || "/Users/rgomes/Projects/staging-area";
+  const extractedPath =
+    process.env.EXTRACTED_PATH || "/Users/rgomes/Projects/extracted_emails";
+  const workingFolder = getPstWorkFolder({
+    fileId: coordinator,
+    filepath: sourcePath,
+    stagingPath,
+    extractedPath,
+  });
+  const uniqueEmailsFolder = path.join(workingFolder, ".unique-emails");
+
+  // AI routes EMLs by moving them out of raw-emails. Return those artifacts
+  // first, so an AI-only reset remains possible without re-running extraction.
+  const rawEmailsFolder = path.join(uniqueEmailsFolder, "raw-emails");
+  fs.mkdirSync(rawEmailsFolder, { recursive: true });
+  for (const folder of ["selected", "discarded"]) {
+    const sourceFolder = path.join(uniqueEmailsFolder, folder);
+    if (!fs.existsSync(sourceFolder)) continue;
+    for (const filename of fs.readdirSync(sourceFolder)) {
+      if (!filename.toLowerCase().endsWith(".eml")) continue;
+      const source = path.join(sourceFolder, filename);
+      const target = path.join(rawEmailsFolder, filename);
+      if (fs.existsSync(target)) fs.rmSync(target, { force: true });
+      fs.renameSync(source, target);
+    }
+  }
+
+  // Preserve Parse/Extract inputs (raw EMLs and JSON payloads), while removing
+  // only outputs that the next AI pass will recreate.
+  for (const folder of ["selected", "discarded"]) {
+    fs.rmSync(path.join(uniqueEmailsFolder, folder), {
+      recursive: true,
+      force: true,
+    });
+  }
+  fs.rmSync(path.join(path.dirname(path.dirname(workingFolder)), "Emails"), {
+    recursive: true,
+    force: true,
+  });
+
+  // These decisions are made before AI payload generation, and some have no
+  // JSON payload to re-audit. Keep them intact when restarting AI.
+  const extractionExclusions = {
+    OR: [
+      { ai_reason: { startsWith: "Pre-filter:" } },
+      { ai_reason: { startsWith: "System Discard: Draft" } },
+      { ai_reason: { startsWith: "Self-forward:" } },
+    ],
+  };
+  const retainedDiscards = await prisma.email.count({
+    where: {
+      file_id: { in: targetPstIds },
+      is_duplicate: 0,
+      ai_decision: "discard",
+      ...extractionExclusions,
+    },
+  });
+
   await prisma.$transaction([
+    // Clear durable Batch claims before allowing a new AI run.  Any remote
+    // batches from the previous run must be cancelled separately; this reset
+    // intentionally never reuses their request ownership.
+    prisma.email.updateMany({
+      where: { file_id: { in: targetPstIds } },
+      data: { ai_batch_run_id: null },
+    }),
+    prisma.aiBatchRun.deleteMany({
+      where: { coordinator_id: coordinator },
+    }),
     // Reset AI/PDF states so orchestration resumes from AI for these PST rows.
     prisma.processedFile.updateMany({
       where: { id: { in: targetPstIds } },
@@ -57,10 +135,17 @@ async function main() {
         pdf_duration_ms: 0,
       },
     }),
-    // Clear AI decisions only for emails tied to this case's PST rows.
+    // Keep extraction-time exclusions; clear all decisions made by the AI pass.
     prisma.email.updateMany({
-      where: { file_id: { in: targetPstIds } },
+      where: {
+        file_id: { in: targetPstIds },
+        NOT: extractionExclusions,
+      },
       data: { ai_decision: null, ai_reason: null },
+    }),
+    prisma.processedFile.update({
+      where: { id: coordinator },
+      data: { ai_discarded_count: retainedDiscards },
     }),
   ]);
 
@@ -70,8 +155,9 @@ async function main() {
         ok: true,
         caseKey: nonNullKey,
         pstRowsReset: targetPstIds.length,
+        retainedExtractionExclusions: retainedDiscards,
         message:
-          "AI/PDF state reset for selected case. Re-run from UI to continue at AI phase.",
+          "AI/PDF state reset; Parse and Extract artifacts were preserved. Re-run from UI to continue at AI phase.",
       },
       null,
       2,

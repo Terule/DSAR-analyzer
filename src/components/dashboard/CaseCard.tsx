@@ -8,8 +8,10 @@ import {
   Play,
   RefreshCw,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { memo, useMemo } from "react";
+import { Button } from "@/components/ui/button";
 import { maskCaseName } from "@/lib/format";
 import type { AiConfig, CaseStats, StagedFile } from "@/lib/types";
 import { AiConfigForm } from "./AiConfigForm";
@@ -28,6 +30,7 @@ interface CaseCardProps {
   isBlockedByAnotherCase: boolean;
   isSyncing: boolean;
   isResetting: boolean;
+  isPreparingUpload: boolean;
   isMetricsOpen: boolean;
   isConfigOpen: boolean;
   onToggleMetrics: () => void;
@@ -35,8 +38,10 @@ interface CaseCardProps {
   onCloseConfig: () => void;
   onSync: (fileIds: string[]) => void;
   onReset: (fileIds: string[]) => void;
+  onPrepareUpload: (fileIds: string[]) => void;
   onStartSequence: (action: string) => void;
   onSubmitAiConfig: (config: AiConfig) => void;
+  onResumeAi: () => void;
 }
 
 function computeStats(caseFiles: StagedFile[]): CaseStats {
@@ -81,6 +86,7 @@ function CaseCardComponent({
   isBlockedByAnotherCase,
   isSyncing,
   isResetting,
+  isPreparingUpload,
   isMetricsOpen,
   isConfigOpen,
   onToggleMetrics,
@@ -88,8 +94,10 @@ function CaseCardComponent({
   onCloseConfig,
   onSync,
   onReset,
+  onPrepareUpload,
   onStartSequence,
   onSubmitAiConfig,
+  onResumeAi,
 }: CaseCardProps) {
   const stats = useMemo(() => computeStats(caseFiles), [caseFiles]);
 
@@ -107,6 +115,8 @@ function CaseCardComponent({
     [caseFiles],
   );
   const hasPst = pstFiles.length > 0;
+  const isRenderComplete =
+    hasPst && pstFiles.every((file) => file.pdf_status === "completed");
   const hasFiles = !!filesRow;
 
   const phaseProgress = useMemo(() => {
@@ -279,14 +289,29 @@ function CaseCardComponent({
   };
 
   if (isFaulted) {
-    btnConfig = {
-      text: "Pipeline Faulted",
-      action: "",
-      icon: AlertCircle,
-      color:
-        "bg-rose-900/50 text-rose-400 border border-rose-500/30 cursor-not-allowed",
-      spin: false,
-    };
+    const canResumeAi =
+      extractDone &&
+      pstFiles.some((file) => file.ai_status === "failed") &&
+      !pstFiles.some(
+        (file) => file.status === "failed" || file.pdf_status === "failed",
+      );
+    btnConfig = canResumeAi
+      ? {
+          text: "Resume AI Audit",
+          action: "resume_ai",
+          icon: RefreshCw,
+          color:
+            "bg-indigo-600 hover:bg-indigo-500 text-white shadow-indigo-900/20",
+          spin: false,
+        }
+      : {
+          text: "Pipeline Faulted",
+          action: "",
+          icon: AlertCircle,
+          color:
+            "bg-rose-900/50 text-rose-400 border border-rose-500/30 cursor-not-allowed",
+          spin: false,
+        };
   } else if (isCompleted) {
     btnConfig = {
       text: "Pipeline Complete",
@@ -438,6 +463,8 @@ function CaseCardComponent({
       if (hasAiConfig) onStartSequence("metadata");
       else if (isConfigOpen) onCloseConfig();
       else onOpenConfig();
+    } else if (btnConfig.action === "resume_ai") {
+      onResumeAi();
     } else if (btnConfig.action) {
       onStartSequence(btnConfig.action);
     }
@@ -447,6 +474,22 @@ function CaseCardComponent({
     <div className="relative overflow-hidden bg-slate-800 rounded-4xl shadow-xl border border-slate-700 p-8 flex flex-col items-center">
       {/* Top Right Mini Tools */}
       <div className="absolute top-6 right-6 flex items-center gap-2">
+        {isRenderComplete && (
+          <Button
+            type="button"
+            variant="outline"
+            size="icon"
+            onClick={() => onPrepareUpload(caseFiles.map((file) => file.id))}
+            disabled={isPreparingUpload}
+            title="Prepare for SharePoint upload"
+          >
+            {isPreparingUpload ? (
+              <Loader2 className="animate-spin" />
+            ) : (
+              <Upload />
+            )}
+          </Button>
+        )}
         {filesToSync.length > 0 && (
           <button
             type="button"

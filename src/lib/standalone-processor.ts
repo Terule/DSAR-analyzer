@@ -1281,6 +1281,18 @@ export async function runStandaloneBatch(
         processedHashes.add(fileHash); // Lock this hash so future duplicates are dropped
         processedCount++;
         console.log(`[Standalone Engine] Exported: ${seqName}.pdf`);
+
+        // The deliverable has passed the non-empty output guard above. Reclaim
+        // the original staged MSG/EML/document/spreadsheet immediately rather
+        // than holding all source files until the Files phase ends.
+        try {
+          fs.rmSync(filePath, { force: true });
+        } catch (cleanupError) {
+          console.warn(
+            `[Standalone Engine] Could not reclaim source ${file}:`,
+            cleanupError,
+          );
+        }
       } else {
         skippedCount++;
       }
