@@ -1,5 +1,17 @@
 export function getRelativePath(filepath: string): string {
   if (!filepath) return "";
+  // Managed cases use the configured staging root (normally `/data/Staging`),
+  // not the legacy `staging-area` directory name. Resolve it first so the
+  // corresponding output root is always `[case]/[request]`.
+  const stagingRoot = process.env.STAGING_PATH;
+  if (stagingRoot) {
+    const normalizedRoot = stagingRoot.replace(/[\\/]+$/, "");
+    const normalizedPath = filepath.replace(/\\/g, "/");
+    const rootWithSlash = `${normalizedRoot.replace(/\\/g, "/")}/`;
+    if (normalizedPath.startsWith(rootWithSlash)) {
+      return normalizedPath.slice(rootWithSlash.length);
+    }
+  }
   return filepath.split(/staging-area[/\\]/)[1] || filepath;
 }
 
@@ -17,6 +29,12 @@ export function getCaseKey(filepath: string): string {
 // [case]/[request] separator structure so cards stay distinguishable.
 export function maskCaseName(name: string): string {
   return name.replace(/[^/\\]/g, "•");
+}
+
+export function maskSubjectInformation(name: string, email: string): string {
+  const maskedName = name.replace(/[^\s]/g, "•");
+  const maskedEmail = email.replace(/[^@.]/g, "•");
+  return `${maskedName} · ${maskedEmail}`;
 }
 
 export function formatBytes(bytes: number): string {

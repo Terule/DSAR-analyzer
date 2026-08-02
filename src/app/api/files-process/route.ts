@@ -59,6 +59,7 @@ export async function POST(request: Request) {
       data: {
         files_status: "processing",
         files_started_at: BigInt(Date.now()),
+        files_paused_ms: 0,
         files_duration_ms: 0,
       },
     });

@@ -2,29 +2,12 @@ import { Pool } from "pg";
 
 let pool: Pool | null = null;
 
-function parseBoolean(
-  value: string | undefined,
-  defaultValue = false,
-): boolean {
-  if (!value) return defaultValue;
-  return /^(1|true|yes|on)$/i.test(value);
-}
-
 export function isControlPlaneEnabled(): boolean {
-  const explicit = process.env.CONTROL_PLANE_ENABLED;
-  if (typeof explicit === "string" && explicit.trim().length > 0) {
-    return parseBoolean(explicit, false);
-  }
-
-  return Boolean(process.env.POSTGRES_URL || process.env.POSTGRES_URL_DOCKER);
+  return true;
 }
 
 function getPostgresUrl(): string {
-  const url =
-    process.env.POSTGRES_URL ||
-    process.env.POSTGRES_URL_DOCKER ||
-    "postgres://pst:pst@localhost:5432/pst_analyser";
-  return url;
+  return "postgres://pst:pst@postgres:5432/pst_analyser";
 }
 
 export function getControlPlanePool(): Pool {

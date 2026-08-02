@@ -17,8 +17,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PST Analyser",
-  description: "Analyze PST files with ease",
+  title: "AIDA — Automated Intelligent Data Auditor",
+  description:
+    "Automated intelligent data auditing for DSAR email and document collections.",
 };
 
 export default function RootLayout({

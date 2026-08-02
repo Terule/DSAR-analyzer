@@ -1,34 +1,30 @@
 services:
   app:
-    image: pst-analyser:local
+    image: aida:local
     build:
       context: .
       dockerfile: Dockerfile
     init: true
-    env_file:
-      - .env
     environment:
-      STAGING_PATH: /data/staging-area
-      EXTRACTED_PATH: /data/extracted-emails
-      EXECUTION_PROVIDER: ${EXECUTION_PROVIDER:-local-process}
-      QUEUE_PROVIDER: ${QUEUE_PROVIDER:-bullmq}
+      STAGING_PATH: /data/Staging
+      EXTRACTED_PATH: /data/Results
       # The app must use the same durable AI submission path as the dispatcher.
       # Otherwise it can start a legacy direct Batch while the dispatcher also
       # recovers and submits the same AI coordinator.
       CONTROL_PLANE_PIPELINE_ENABLED: "true"
-      POSTGRES_URL: ${POSTGRES_URL_DOCKER:-postgres://pst:pst@postgres:5432/pst_analyser}
-      REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379}
+      POSTGRES_URL: postgres://pst:pst@postgres:5432/pst_analyser
+      REDIS_URL: redis://redis:6379
     command:
       [
         "sh",
         "-lc",
-        "node scripts/docker-check.mjs && npm run dev -- --hostname 0.0.0.0 --port 3000",
+        "npx prisma migrate deploy && node scripts/docker-check.mjs && npm run dev -- --hostname 0.0.0.0 --port 3000",
       ]
     ports:
       - "3000:3000"
     volumes:
-      - ${HOST_STAGING_PATH:-./staging-area}:/data/staging-area
-      - ${HOST_EXTRACTED_PATH:-./extracted-emails}:/data/extracted-emails
+      - /Users/rgomes/DSAR:/data
+      - aida_secrets:/run/aida-secrets
       - ./logs:/workspace/logs
       - ./batches:/workspace/batches
     depends_on:
@@ -51,24 +47,27 @@ services:
     restart: unless-stopped
 
   dispatcher:
-    image: pst-analyser:local
+    image: aida:local
     init: true
-    env_file:
-      - .env
     environment:
-      STAGING_PATH: /data/staging-area
-      EXTRACTED_PATH: /data/extracted-emails
+      STAGING_PATH: /data/Staging
+      EXTRACTED_PATH: /data/Results
       CONTROL_PLANE_PIPELINE_ENABLED: "true"
-      POSTGRES_URL: ${POSTGRES_URL_DOCKER:-postgres://pst:pst@postgres:5432/pst_analyser}
-      REDIS_URL: ${REDIS_URL_DOCKER:-redis://redis:6379}
-      WORKER_IMAGE: pst-analyser:local
+      POSTGRES_URL: postgres://pst:pst@postgres:5432/pst_analyser
+      REDIS_URL: redis://redis:6379
+      WORKER_IMAGE: aida:local
+      # Normal Files work stays parallel. Large Office files are scheduled in a
+      # deferred, one-worker lane with a larger container memory limit.
+      FILES_CONCURRENCY: "2"
+      LARGE_FILES_JOB_MEMORY_MB: "3072"
+      OFFICE_WORKER_HEAP_MB: "2048"
       # Compose's stable project-default network. Override only when the stack
       # is intentionally started with a different project/network name.
-      WORKER_NETWORK: ${WORKER_NETWORK:-pst-analyser_default}
+      WORKER_NETWORK: pst-analyser_default
     command: ["node", "--import", "tsx", "scripts/orchestrator/dispatcher.ts"]
     volumes:
-      - ${HOST_STAGING_PATH:-./staging-area}:/data/staging-area
-      - ${HOST_EXTRACTED_PATH:-./extracted-emails}:/data/extracted-emails
+      - /Users/rgomes/DSAR:/data
+      - aida_secrets:/run/aida-secrets
       - ./logs:/workspace/logs
       - ./batches:/workspace/batches
       - /var/run/docker.sock:/var/run/docker.sock
@@ -111,3 +110,4 @@ services:
 
 volumes:
   postgres_data:
+  aida_secrets:

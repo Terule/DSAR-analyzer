@@ -9,10 +9,18 @@ import {
   markCaseAiFailed,
 } from "./case-utils";
 import { enqueueFilePhase } from "./control-plane/pipeline";
+import { runtimeCredentials } from "./credentials";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let openai: OpenAI | null = null;
+async function getOpenAi(): Promise<OpenAI> {
+  if (openai) return openai;
+  const key = (await runtimeCredentials()).openAiKey;
+  if (!key) throw new Error("Configure the OpenAI API key in Settings.");
+  openai = new OpenAI({ apiKey: key });
+  return openai;
+}
 const adaptiveTokenCapByFile = new Map<string, number>();
 const MIN_RETRY_BATCH_TOKENS = 25_000;
 const TOKEN_BACKOFF_FACTOR = 0.8;
@@ -268,7 +276,7 @@ Rules:
 
 Return JSON only: {"decision":"keep"|"discard","reason":"brief"}`;
 
-  const response = await openai.chat.completions.create({
+  const response = await (await getOpenAi()).chat.completions.create({
     model: "gpt-4o-mini",
     temperature: 0.0,
     max_completion_tokens: 80,
@@ -390,7 +398,7 @@ async function pollSingleBatchStatus(
   fs.mkdirSync(discardedFolder, { recursive: true });
 
   console.log(`[Batch Worker] Checking status of batch: ${batchId}...`);
-  const batch = await openai.batches.retrieve(batchId);
+  const batch = await (await getOpenAi()).batches.retrieve(batchId);
   console.log(`[Batch Worker] Status returned from OpenAI: ${batch.status}`);
 
   if (batch.status === "completed") {
@@ -408,7 +416,9 @@ async function pollSingleBatchStatus(
       );
       if (batch.error_file_id) {
         try {
-          const errRes = await openai.files.content(batch.error_file_id);
+          const errRes = await (await getOpenAi()).files.content(
+            batch.error_file_id,
+          );
           const errText = await errRes.text();
           console.error(`[Batch Worker] OpenAI Error Log:\n`, errText);
         } catch (e) {
@@ -441,7 +451,9 @@ async function pollSingleBatchStatus(
     console.log(
       `[Batch Worker] Downloading results from file ${batch.output_file_id}...`,
     );
-    const fileResponse = await openai.files.content(batch.output_file_id);
+    const fileResponse = await (await getOpenAi()).files.content(
+      batch.output_file_id,
+    );
     const content = await fileResponse.text();
     const lines = content.trim().split("\n");
 

@@ -41,11 +41,19 @@ export interface StagedFile {
   kind?: "pst" | "files";
   files_status?: "pending" | "processing" | "completed" | "failed";
   files_total?: number;
+  files_progress_total?: number;
+  files_progress_handled?: number;
   files_processed?: number;
   files_skipped?: number;
   files_duplicates?: number;
   files_duration_ms?: number;
   files_started_at?: number;
+  files_paused_ms?: number;
+  upload_status?: "idle" | "pending" | "processing" | "completed" | "failed";
+  upload_total?: number;
+  upload_uploaded?: number;
+  upload_error?: string;
+  upload_heartbeat_at?: number;
 }
 
 export interface AiConfig {

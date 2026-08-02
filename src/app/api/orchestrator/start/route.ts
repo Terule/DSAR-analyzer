@@ -25,9 +25,8 @@ function caseKeyForPath(filepath: string | null): string {
   const stagingPath = process.env.STAGING_PATH || "";
   const relative =
     filepath && stagingPath ? path.relative(stagingPath, filepath) : "";
-  return (
-    relative.split(path.sep).find((part) => part && part !== "..") || "unknown"
-  );
+  const parts = relative.split(path.sep).filter((part) => part && part !== "..");
+  return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : parts[0] || "unknown";
 }
 
 /** Starts an entire case; all later phase transitions are backend-owned. */

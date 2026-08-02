@@ -24,12 +24,15 @@ async function main(): Promise<void> {
     await fs.mkdir(path.dirname(resultPath), { recursive: true });
     await fs.writeFile(resultPath, JSON.stringify({ success: true }));
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
     await fs.mkdir(path.dirname(resultPath), { recursive: true });
     await fs.writeFile(
       resultPath,
       JSON.stringify({
         success: false,
-        error: error instanceof Error ? error.message : String(error),
+        error: message,
+        // Configuration cannot be repaired by retrying the same worker.
+        retryable: !message.startsWith("Configuration required:"),
       }),
     );
     throw error;

@@ -29,6 +29,26 @@ function killFilesWorker(fileId: string): Promise<void> {
   });
 }
 
+function killSharePointUploadWorker(fileId: string): Promise<void> {
+  return new Promise((resolve) => {
+    execFile(
+      "pkill",
+      ["-9", "-f", `scripts/workers/sharepoint-upload-worker.ts.*${fileId}`],
+      () => resolve(),
+    );
+  });
+}
+
+function killSharePointArtifactWorker(): Promise<void> {
+  return new Promise((resolve) => {
+    execFile(
+      "pkill",
+      ["-9", "-f", "scripts/workers/sharepoint-artifact-worker.ts"],
+      () => resolve(),
+    );
+  });
+}
+
 async function waitForWorkerCancellation(fileIds: string[]): Promise<boolean> {
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
@@ -140,7 +160,13 @@ export async function POST(request: Request) {
     // is reset and the operator can safely retry rather than getting a partial
     // reset that needs manual repair.
     // It can't keep writing progress counters after the wipe (orphan prevention).
-    await Promise.all(filesToReset.map((file) => killFilesWorker(file.id)));
+    await Promise.all(
+      filesToReset.flatMap((file) => [
+        killFilesWorker(file.id),
+        killSharePointUploadWorker(file.id),
+      ]),
+    );
+    await killSharePointArtifactWorker();
     deleteCaseOutput(filesToReset, stagingPath, extractedPath);
 
     const archivedRuns = await insertRunHistorySnapshots(
@@ -153,6 +179,9 @@ export async function POST(request: Request) {
     );
 
     await prisma.$transaction([
+      prisma.sharePointUploadArtifact.deleteMany({
+        where: { source_file_id: { in: fileIds } },
+      }),
       // 1. Delete all child emails from the database for this case
       prisma.email.deleteMany({ where: { file_id: { in: fileIds } } }),
 
@@ -185,6 +214,11 @@ export async function POST(request: Request) {
           pdf_processed: 0,
           ai_started_at: null,
           batch_id: null,
+          upload_status: "idle",
+          upload_total: 0,
+          upload_uploaded: 0,
+          upload_error: null,
+          upload_heartbeat_at: null,
         },
       }),
 
@@ -206,6 +240,11 @@ export async function POST(request: Request) {
           files_duplicates: 0,
           files_duration_ms: 0,
           files_started_at: null,
+          upload_status: "idle",
+          upload_total: 0,
+          upload_uploaded: 0,
+          upload_error: null,
+          upload_heartbeat_at: null,
         },
       }),
     ]);

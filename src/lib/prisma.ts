@@ -6,10 +6,9 @@ declare global {
   var __prisma: PrismaClient | undefined;
 }
 
-const connectionString =
-  process.env.POSTGRES_URL ||
-  process.env.POSTGRES_URL_DOCKER ||
-  "postgres://pst:pst@localhost:5432/pst_analyser";
+// AIDA is a coordinated Docker stack: application containers always use the
+// Compose service DNS name, never operator-provided connection strings.
+const connectionString = "postgres://pst:pst@postgres:5432/pst_analyser";
 
 const adapter = new PrismaPg({ connectionString });
 

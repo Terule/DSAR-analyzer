@@ -78,6 +78,25 @@ export interface BatchPollResult {
 export interface AiBatchSettings {
   maxTokensPerBatch: number;
   maxConcurrentBatches: number;
+  sharePointSiteUrl: string;
+  sharePointFolderId: string;
+  sharePointFolderPath: string;
+  stagingRoot?: string;
+  deliverablesRoot?: string;
+  hasOpenAiKey?: boolean;
+  hasAzureTenantId?: boolean;
+  hasAzureClientId?: boolean;
+  hasAzureClientSecret?: boolean;
+  openAiKey?: string;
+  azureTenantId?: string;
+  azureClientId?: string;
+  azureClientSecret?: string;
+}
+
+export interface SharePointFolder {
+  id: string;
+  name: string;
+  path: string;
 }
 
 export interface AiBatchSettingsLimits {
@@ -114,6 +133,24 @@ export async function updatePipelineSettings(
   return data.settings;
 }
 
+export async function listSharePointFolderChildren(
+  parentId?: string,
+): Promise<SharePointFolder[]> {
+  const params = new URLSearchParams();
+  if (parentId) params.set("parentId", parentId);
+  const res = await fetch(`/api/sharepoint/folders?${params}`, {
+    cache: "no-store",
+  });
+  const data = (await res.json().catch(() => ({}))) as {
+    folders?: SharePointFolder[];
+    error?: string;
+  };
+  if (!res.ok) {
+    throw new Error(data.error || "Could not search SharePoint folders.");
+  }
+  return data.folders || [];
+}
+
 export async function pollBatch(fileId: string): Promise<BatchPollResult> {
   const res = await postJson("/api/batch-poll", { fileId });
   return res.json();
@@ -129,14 +166,15 @@ export async function wipeCase(
 
 export async function prepareUpload(
   fileIds: string[],
-): Promise<{ removed: number }> {
+): Promise<{ removed: number; filesUploaded: number }> {
   const res = await postJson("/api/prepare-upload", { fileIds });
   const data = (await res.json().catch(() => ({}))) as {
     removed?: number;
+    uploadTotal?: number;
     error?: string;
   };
   if (!res.ok) throw new Error(data.error || "Failed to prepare upload.");
-  return { removed: data.removed || 0 };
+  return { removed: data.removed || 0, filesUploaded: data.uploadTotal || 0 };
 }
 
 export async function processFiles(

@@ -7,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import { simpleParser } from "mailparser";
 import { normalizeHtmlForPdf } from "./converter";
+import { stripEmailSignature } from "./email-content";
 import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
 
 export interface StandaloneBatchParams {
@@ -30,6 +31,54 @@ export interface StandaloneBatchResult {
 export interface FilesDeliverableRenameResult {
   documents: number;
   messages: number;
+}
+
+export interface UnconvertedFilesResult {
+  copied: number;
+  missing: number;
+}
+
+const MESSAGE_EXTENSIONS = new Set([".html", ".htm", ".eml", ".msg"]);
+
+/**
+ * Preserve files whose conversion worker could not complete after retries.
+ * They intentionally live below Unconverted so clean PDF deliverables retain
+ * their stable Document/Message numbering during finalization.
+ */
+export async function copyUnconvertedStandaloneFiles(input: {
+  filePaths: string[];
+  messagesDir: string;
+  documentsDir: string;
+}): Promise<UnconvertedFilesResult> {
+  let copied = 0;
+  let missing = 0;
+
+  for (const filePath of input.filePaths) {
+    if (!fs.existsSync(filePath)) {
+      missing++;
+      continue;
+    }
+    const extension = path.extname(filePath).toLowerCase();
+    const category = MESSAGE_EXTENSIONS.has(extension)
+      ? input.messagesDir
+      : input.documentsDir;
+    const destinationDir = path.join(category, "Unconverted");
+    await fs.promises.mkdir(destinationDir, { recursive: true });
+    // Include the source-path hash so two exported files with the same basename
+    // are both retained without overwriting each other.
+    const destinationName = `${crypto
+      .createHash("sha256")
+      .update(path.resolve(filePath))
+      .digest("hex")
+      .slice(0, 12)}-${path.basename(filePath)}`;
+    await fs.promises.copyFile(
+      filePath,
+      path.join(destinationDir, destinationName),
+    );
+    copied++;
+  }
+
+  return { copied, missing };
 }
 
 // Recursive file scanner to handle messy nested export folders
@@ -70,7 +119,9 @@ function renameDeliverableFolder(folder: string, prefix: string): number {
     .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
     .map((entry) => entry.name)
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
-  const padLength = Math.max(4, String(files.length).length);
+  // Keep names compact while preserving natural lexical ordering: 1–9 needs
+  // no padding, 10–99 needs two digits, and so on.
+  const padLength = String(Math.max(1, files.length)).length;
   const temporaryNames = files.map((name, index) => {
     const temporary = `.__finalizing-${index}-${name}`;
     fs.renameSync(path.join(folder, name), path.join(folder, temporary));
@@ -97,6 +148,20 @@ export function finalizeStandaloneDeliverables(input: {
   };
 }
 
+/** Excludes fallback originals below `Unconverted/` from deliverables/upload. */
+export function listFinalizedStandaloneDeliverables(input: {
+  messagesDir: string;
+  documentsDir: string;
+}): string[] {
+  return [input.messagesDir, input.documentsDir].flatMap((folder) => {
+    if (!fs.existsSync(folder)) return [];
+    return fs
+      .readdirSync(folder, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+      .map((entry) => path.join(folder, entry.name));
+  });
+}
+
 function escapeHtml(text: string): string {
   return text
     .replaceAll("&", "&amp;")
@@ -118,6 +183,19 @@ function buildEmailHtml(rawBody: string, sourceName: string): string {
       <body>
         <h2 style="margin: 0 0 12px;">${escapeHtml(sourceName)}</h2>
         <pre style="white-space: pre-wrap; word-break: break-word; margin: 0;">${safeBody}</pre>
+      </body>
+    </html>
+  `);
+}
+
+function buildTextDocumentHtml(rawText: string, sourceName: string): string {
+  return normalizeHtmlForPdf(`
+    <!DOCTYPE html>
+    <html>
+      <head><meta charset="utf-8" /><title>${escapeHtml(sourceName)}</title></head>
+      <body>
+        <h2>${escapeHtml(sourceName)}</h2>
+        <pre style="white-space: pre-wrap; overflow-wrap: anywhere; font-family: sans-serif;">${escapeHtml(rawText)}</pre>
       </body>
     </html>
   `);
@@ -321,10 +399,17 @@ async function convertOfficeInWorker(
     process.cwd(),
     "scripts/workers/office-worker.ts",
   );
+  // Keep enough headroom for legitimate large workbooks while retaining a
+  // deterministic ceiling inside the Files job container.
+  const maxOldGenerationSizeMb = Math.max(
+    256,
+    Number(process.env.OFFICE_WORKER_HEAP_MB || 1024),
+  );
 
   return await new Promise<OfficeConversionOutcome>((resolve, reject) => {
     const worker = new Worker(workerPath, {
       execArgv: ["--import", "tsx"],
+      resourceLimits: { maxOldGenerationSizeMb },
       workerData: { kind, filePath, outputPath, criteria, docTitle },
     });
 
@@ -757,6 +842,7 @@ export interface StandaloneBatchProgress {
   duplicates: number;
   index: number;
   total: number;
+  outputPath?: string;
 }
 
 export async function runStandaloneBatch(
@@ -774,16 +860,16 @@ export async function runStandaloneBatch(
 
   // 1. Build Criteria & Exclusion Arrays (Added trim for safety)
   const aliases = subjectCriteria.aliases || [];
-  const criteria = [subjectCriteria.name, ...aliases]
+  const subjectEmail = (subjectCriteria.personalEmail || "")
+    .trim()
+    .toLowerCase();
+  const criteria = [subjectCriteria.name, subjectEmail, ...aliases]
     .map((c) => c.trim().toLowerCase())
     .filter(Boolean);
   const subjectNameTokens = buildSubjectNameTokens(
     subjectCriteria.name,
     aliases,
   );
-  const subjectEmail = (subjectCriteria.personalEmail || "")
-    .trim()
-    .toLowerCase();
 
   // Shared privileged/confidential keyword filter (see src/lib/exclusions.ts)
   // so the Files pipeline stays in lockstep with the PST pipeline.
@@ -835,6 +921,18 @@ export async function runStandaloneBatch(
     // Skip hidden system files and JSON metadata files
     if (file.startsWith(".") || file.toLowerCase().endsWith(".json")) continue;
 
+    // A laptop sleep can interrupt a batch after it has created a verified
+    // deliverable and reclaimed its source, but before the batch's result was
+    // durably acknowledged. Its retry receives the original manifest, so a
+    // missing source here is an already-completed item, not a new failure.
+    if (!fs.existsSync(filePath)) {
+      processedCount++;
+      console.log(
+        `[Standalone Engine] Already completed before retry: ${file}`,
+      );
+      continue;
+    }
+
     console.log(
       `[Standalone Engine] (${fileIndex}/${allFiles.length}) Processing: ${file}`,
     );
@@ -871,7 +969,7 @@ export async function runStandaloneBatch(
       // Only read the file into memory for handlers that run in-process
       // (HTML/EML/MSG). PDFs and Office documents are parsed in separate worker
       // threads so their heavy/synchronous parsing can't block this loop.
-      const inProcessExts = new Set([".html", ".htm", ".eml", ".msg"]);
+      const inProcessExts = new Set([".html", ".htm", ".eml", ".msg", ".txt"]);
       const buffer = inProcessExts.has(ext)
         ? await withTimeout(
             fs.promises.readFile(filePath),
@@ -887,12 +985,7 @@ export async function runStandaloneBatch(
       let isMessage = false;
 
       // Route files to appropriate folders
-      if (
-        ext === ".html" ||
-        ext === ".htm" ||
-        ext === ".eml" ||
-        ext === ".msg"
-      ) {
+      if (MESSAGE_EXTENSIONS.has(ext)) {
         targetDir = deliverablesDirMessages;
         isMessage = true;
       }
@@ -954,7 +1047,8 @@ export async function runStandaloneBatch(
           continue;
         }
         const rawHtml = buffer.toString("utf-8");
-        const plainText = toPlainTextFromHtml(rawHtml);
+        const rawPlainText = toPlainTextFromHtml(rawHtml);
+        const plainText = stripEmailSignature(rawPlainText);
         const structuredText = toStructuredPlainTextFromHtml(rawHtml);
         const hasExplicitSubjectHeader = hasSubjectHeaderPattern(
           structuredText,
@@ -989,8 +1083,17 @@ export async function runStandaloneBatch(
           senderOfFirstMessageIsSubject ||
           topMessageFromSubject ||
           isAuthoredBySubject(plainText, subjectNameTokens);
+        // Client-facing mail frequently includes a generic confidentiality
+        // footer. A message sent directly to the data subject is still
+        // responsive, matching the PST pipeline's direct-recipient rule.
+        const sentToSubjectEmail =
+          subjectEmail.length > 0 &&
+          new RegExp(
+            `\\b(?:to|cc|bcc)\\s*:[^\\n]*${subjectEmail.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}`,
+            "i",
+          ).test(rawPlainText);
 
-        if (exclusionsRegex.test(plainText)) {
+        if (exclusionsRegex.test(plainText) && !sentToSubjectEmail) {
           console.log(
             `[Standalone Filter] Discarded HTML ${file}: Contains excluded keyword.`,
           );
@@ -1053,7 +1156,9 @@ export async function runStandaloneBatch(
         // Read both UTF-8 (for EML) and UTF-16 (for MSG blobs), then strip null bytes.
         const rawUtf8 = buffer.toString("utf-8").toLowerCase();
         const rawUtf16 = buffer.toString("utf16le").toLowerCase();
-        const rawText = `${rawUtf8} ${rawUtf16}`.replace(/\0/g, " ");
+        const rawText = stripEmailSignature(
+          `${rawUtf8} ${rawUtf16}`.replace(/\0/g, " "),
+        );
         const hasExplicitSubjectHeader = hasSubjectHeaderPattern(
           rawText,
           subjectCriteria.name,
@@ -1169,7 +1274,40 @@ export async function runStandaloneBatch(
         }
       }
 
-      // --- HANDLER 5: Raw PDFs ---
+      // --- HANDLER 5: Plain-text documents ---
+      else if (ext === ".txt") {
+        if (!buffer) {
+          skippedCount++;
+          continue;
+        }
+        const rawText = buffer.toString("utf-8");
+        const normalizedText = rawText.toLowerCase();
+        if (!criteria.some((criterion) => normalizedText.includes(criterion))) {
+          console.log(
+            `[Standalone Filter] Discarded TXT ${file}: Data subject not mentioned.`,
+          );
+        } else if (isDuplicateContent(normalizedText, processedHashes)) {
+          console.log(
+            `[Standalone Filter] Discarded Duplicate TXT ${file} (Content Match).`,
+          );
+          duplicatesCount++;
+          skippedCount++;
+          continue;
+        } else {
+          await withTimeout(
+            renderHtmlToPdfWeasyPrint(
+              buildTextDocumentHtml(rawText, seqName),
+              pdfOutputPath,
+              file,
+            ),
+            file,
+          );
+          success = true;
+          producedPath = pdfOutputPath;
+        }
+      }
+
+      // --- HANDLER 6: Raw PDFs ---
       else if (ext === ".pdf") {
         try {
           const rawText = (
@@ -1281,6 +1419,14 @@ export async function runStandaloneBatch(
         processedHashes.add(fileHash); // Lock this hash so future duplicates are dropped
         processedCount++;
         console.log(`[Standalone Engine] Exported: ${seqName}.pdf`);
+        onProgress?.({
+          processed: processedCount,
+          skipped: skippedCount,
+          duplicates: duplicatesCount,
+          index: fileIndex,
+          total: allFiles.length,
+          outputPath: producedPath || undefined,
+        });
 
         // The deliverable has passed the non-empty output guard above. Reclaim
         // the original staged MSG/EML/document/spreadsheet immediately rather

@@ -107,6 +107,7 @@ export async function POST(request: Request) {
         data: {
           files_status: "pending",
           files_started_at: null,
+          files_paused_ms: 0,
           files_total: 0,
           files_processed: 0,
           files_skipped: 0,

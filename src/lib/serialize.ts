@@ -39,12 +39,23 @@ export function serializeProcessedFile(row: ProcessedFile): StagedFile {
     kind: row.kind as StagedFile["kind"],
     files_status: row.files_status as StagedFile["files_status"],
     files_total: row.files_total,
+    files_progress_total: row.files_progress_total,
+    files_progress_handled: row.files_progress_handled,
     files_processed: row.files_processed,
     files_skipped: row.files_skipped,
     files_duplicates: row.files_duplicates,
     files_duration_ms: row.files_duration_ms,
     files_started_at:
       row.files_started_at !== null ? Number(row.files_started_at) : undefined,
+    files_paused_ms: row.files_paused_ms,
+    upload_status: row.upload_status as StagedFile["upload_status"],
+    upload_total: row.upload_total,
+    upload_uploaded: row.upload_uploaded,
+    upload_error: row.upload_error || undefined,
+    upload_heartbeat_at:
+      row.upload_heartbeat_at !== null
+        ? Number(row.upload_heartbeat_at)
+        : undefined,
   };
 }
 

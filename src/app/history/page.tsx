@@ -5,8 +5,8 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { fetchRunHistory } from "@/lib/api";
 import type { CaseHistoryItem } from "@/lib/types";
 
-// A manual DSAR case typically takes about one month. Successful cases are
-// credited with that full avoided turnaround time instead of a per-item guess.
+// A manual DSAR case typically takes about one month. The saved time is that
+// baseline less the processing time actually spent on the request.
 const MANUAL_CASE_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 
 function formatLocalDate(value: string): string {
@@ -54,7 +54,8 @@ function getDisplayRequest(item: CaseHistoryItem): string {
 }
 
 function estimateTimeSavedMs(item: CaseHistoryItem): number {
-  return item.terminal_outcome === "success" ? MANUAL_CASE_DURATION_MS : 0;
+  if (item.terminal_outcome !== "success") return 0;
+  return Math.max(0, MANUAL_CASE_DURATION_MS - item.total_duration_ms);
 }
 
 export default function HistoryPage() {
@@ -117,7 +118,7 @@ export default function HistoryPage() {
         <header className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
           <div>
             <h1 className="text-3xl font-bold tracking-tight text-white">
-              Case History
+              AIDA History
             </h1>
             <p className="text-slate-400 mt-2 font-medium">
               Archived case metrics for efficiency tracking over time.
@@ -261,6 +262,12 @@ export default function HistoryPage() {
                       Email Duplicates
                     </th>
                     <th className="text-left px-4 py-3 font-semibold">
+                      AI Selected Emails
+                    </th>
+                    <th className="text-left px-4 py-3 font-semibold">
+                      AI Discarded Emails
+                    </th>
+                    <th className="text-left px-4 py-3 font-semibold">
                       Total Files
                     </th>
                     <th className="text-left px-4 py-3 font-semibold">
@@ -336,6 +343,12 @@ export default function HistoryPage() {
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         {item.duplicate_emails}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap font-semibold text-emerald-300">
+                        {item.emails_selected}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        {item.emails_discarded}
                       </td>
                       <td className="px-4 py-3 whitespace-nowrap">
                         {item.files_total}

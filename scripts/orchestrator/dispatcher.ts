@@ -19,6 +19,7 @@ import {
   claimNextJob,
   completeJob,
   failJob,
+  getFilesFallbackSourceState,
   getFilesFinalizerState,
   getJob,
   getLatestFilesBatchParentState,
@@ -26,6 +27,7 @@ import {
   heartbeatJob,
   listActiveCaseKeys,
   listAwaitingExternalAiJobs,
+  listFailedFilesBatches,
   markJobAwaitingExternal,
   markJobRunning,
   requeueDispatcherOrphans,
@@ -78,12 +80,26 @@ function memoryMbForPhase(phase: ControlPhase): number {
   return Number(configured || process.env.JOB_MEMORY_MB || defaults[phase]);
 }
 
+function memoryMbForJob(job: ControlJobRecord): number {
+  if (
+    job.phase === "files" &&
+    job.payload.metadata?.largeOfficeBatch === true
+  ) {
+    return Number(
+      process.env.LARGE_FILES_JOB_MEMORY_MB ||
+        process.env.FILES_JOB_MEMORY_MB ||
+        3072,
+    );
+  }
+  return memoryMbForPhase(job.phase);
+}
+
 function cpuNanoForPhase(phase: ControlPhase): number {
   const configured = process.env[`${phase.toUpperCase()}_JOB_CPU_NANO`];
   return Number(configured || process.env.JOB_CPU_NANO || 1_000_000_000);
 }
 const network = process.env.WORKER_NETWORK || "pst-analyser-network";
-const image = process.env.WORKER_IMAGE || "pst-analyser:local";
+const image = process.env.WORKER_IMAGE || "aida:local";
 const dispatcherContainer = process.env.HOSTNAME || "";
 let workerBinds: string[] | null = null;
 const workerEnvironment = [
@@ -98,6 +114,7 @@ const workerEnvironment = [
   "QUEUE_PROVIDER",
   "ORCHESTRATOR_QUEUE_NAME",
   "PDF_FONT_DIR",
+  "OFFICE_WORKER_HEAP_MB",
 ].flatMap((name) => {
   const value = process.env[name];
   return value === undefined ? [] : [`${name}=${value}`];
@@ -153,6 +170,7 @@ async function startOne(phase: ControlPhase): Promise<boolean> {
     workerId,
     Math.ceil(phaseTimeoutMs / 1000) + 60,
     activeCaseKey,
+    phase === "files",
   );
   if (!job) return false;
   if (!(await markJobRunning(job.id, workerId))) return false;
@@ -161,7 +179,7 @@ async function startOne(phase: ControlPhase): Promise<boolean> {
       jobId: job.id,
       phase,
       cpuNano: cpuNanoForPhase(phase),
-      memoryBytes: memoryMbForPhase(phase) * 1024 * 1024,
+      memoryBytes: memoryMbForJob(job) * 1024 * 1024,
       network,
       binds: workerBinds || [],
       image,
@@ -199,13 +217,21 @@ async function startOne(phase: ControlPhase): Promise<boolean> {
   }
 }
 
-async function reap(entry: Running, message?: string): Promise<void> {
+async function reap(
+  entry: Running,
+  failure?: { message: string; retryable: boolean },
+): Promise<void> {
   const logs = await containerLogs(entry.containerId).catch(
     () => "No worker logs available.",
   );
   const logPath = await writeLog(entry.job.id, logs);
-  if (message)
-    await failJob(entry.job.id, workerId, `${message}; logs: ${logPath}`);
+  if (failure)
+    await failJob(
+      entry.job.id,
+      workerId,
+      `${failure.message}; logs: ${logPath}`,
+      failure.retryable,
+    );
   else if (entry.job.phase === "ai") {
     const aiState = entry.job.payload.fileId
       ? await prisma.processedFile.findUnique({
@@ -224,18 +250,30 @@ async function reap(entry: Running, message?: string): Promise<void> {
   running.delete(entry.job.id);
 }
 
-async function resultMessage(jobId: string): Promise<string | undefined> {
+async function resultMessage(
+  jobId: string,
+): Promise<{ message: string; retryable: boolean } | undefined> {
   try {
     const raw = await fs.readFile(
       path.join(process.cwd(), "logs", "jobs", `${jobId}.result.json`),
       "utf8",
     );
-    const result = JSON.parse(raw) as { success?: boolean; error?: string };
+    const result = JSON.parse(raw) as {
+      success?: boolean;
+      error?: string;
+      retryable?: boolean;
+    };
     return result.success
       ? undefined
-      : result.error || "Worker failed without an error message.";
+      : {
+          message: result.error || "Worker failed without an error message.",
+          retryable: result.retryable !== false,
+        };
   } catch {
-    return "Worker container disappeared before reporting a result.";
+    return {
+      message: "Worker container disappeared before reporting a result.",
+      retryable: true,
+    };
   }
 }
 
@@ -255,7 +293,10 @@ async function observeRunning(): Promise<void> {
     );
     if (Date.now() - entry.startedAt > entry.timeoutMs) {
       await removeContainer(entry.containerId).catch(() => undefined);
-      await reap(entry, `Worker timed out after ${entry.timeoutMs}ms`);
+      await reap(entry, {
+        message: `Worker timed out after ${entry.timeoutMs}ms`,
+        retryable: true,
+      });
       continue;
     }
     try {
@@ -265,7 +306,10 @@ async function observeRunning(): Promise<void> {
         entry,
         state.State.ExitCode === 0
           ? undefined
-          : `Worker exited ${state.State.ExitCode}: ${state.State.Error || "unknown error"}`,
+          : {
+              message: `Worker exited ${state.State.ExitCode}: ${state.State.Error || "unknown error"}`,
+              retryable: true,
+            },
       );
     } catch {
       // AutoRemove can remove the container before inspection; the one-shot
@@ -309,13 +353,55 @@ async function settleFilesBatches(): Promise<void> {
   for (const row of filesRows) {
     const state = await getLatestFilesBatchParentState(row.id);
     if (!state) continue;
-    if (state.active > 0) continue;
-    if (state.failed > 0) {
+    if (state.active > 0) {
+      // A previous batch may already be dead-lettered, but the durable queue
+      // can still have hundreds of independent batches progressing. Keep the
+      // case row truthful until that active work drains; otherwise the UI
+      // reports a terminal fault and hides its live progress.
       await prisma.processedFile.updateMany({
-        where: { id: row.id, files_status: "processing" },
-        data: { files_status: "failed" },
+        where: { id: row.id, files_status: "failed" },
+        data: { files_status: "processing" },
       });
       continue;
+    }
+    if (state.failed > 0) {
+      const failedBatches = await listFailedFilesBatches(row.id, state.runKey);
+      const fallback = await getFilesFallbackSourceState(row.id, state.runKey);
+      const missingFallbacks = failedBatches.filter(
+        (batch) =>
+          !fallback.completedSourceJobIds.has(batch.id) &&
+          !fallback.activeSourceJobIds.has(batch.id),
+      );
+      await Promise.all(
+        missingFallbacks.map((batch) =>
+          enqueueFilePhase({
+            fileId: row.id,
+            phase: "files",
+            dedupeKey: `files-fallback:${row.id}:${state.runKey}:${batch.id}`,
+            metadata: {
+              filesFallback: true,
+              runKey: state.runKey,
+              sourceJobId: batch.id,
+              paths: batch.paths,
+            },
+            priority: 50,
+          }),
+        ),
+      );
+      if (missingFallbacks.length > 0 || fallback.activeSourceJobIds.size > 0) {
+        await prisma.processedFile.updateMany({
+          where: { id: row.id, files_status: "failed" },
+          data: { files_status: "processing" },
+        });
+        continue;
+      }
+      if (fallback.failedSourceJobIds.size > 0) {
+        await prisma.processedFile.update({
+          where: { id: row.id },
+          data: { files_status: "failed" },
+        });
+        continue;
+      }
     }
     if (state.completed > 0) {
       const finalizer = await getFilesFinalizerState(row.id, state.runKey);
@@ -417,6 +503,10 @@ async function reconcileInterruptedWork(): Promise<void> {
   });
   for (const row of filesRows) {
     if (await hasActiveJobForFilePhase(row.id, "files")) continue;
+    // A completed/faulted batch fan-out is still a durable Files run. It must
+    // be settled (or explicitly retried), never reinterpreted as an interrupted
+    // coordinator simply because no batch is currently active.
+    if (await getLatestFilesBatchParentState(row.id)) continue;
     await enqueueFilePhase({ fileId: row.id, phase: "files" });
   }
 }

@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { fillAiBatchSlots } from "@/lib/ai";
 import { getCasePstFileIds } from "@/lib/case-utils";
+import { encryptSetting } from "@/lib/credentials";
 import {
   AI_BATCH_SETTINGS_LIMITS,
   getAiBatchSettings,
@@ -20,11 +21,48 @@ export async function PATCH(request: Request) {
     const body = (await request.json()) as {
       maxTokensPerBatch?: number;
       maxConcurrentBatches?: number;
+      sharePointSiteUrl?: string;
+      sharePointFolderId?: string;
+      sharePointFolderPath?: string;
+      openAiKey?: string;
+      azureTenantId?: string;
+      azureClientId?: string;
+      azureClientSecret?: string;
     };
     const settings = await updateAiBatchSettings({
       maxTokensPerBatch: Number(body.maxTokensPerBatch),
       maxConcurrentBatches: Number(body.maxConcurrentBatches),
+      sharePointSiteUrl: body.sharePointSiteUrl || "",
+      sharePointFolderId: body.sharePointFolderId || "",
+      sharePointFolderPath: body.sharePointFolderPath || "",
     });
+    const encrypted = await Promise.all([
+      body.openAiKey?.trim()
+        ? encryptSetting(body.openAiKey.trim())
+        : undefined,
+      body.azureTenantId?.trim()
+        ? encryptSetting(body.azureTenantId.trim())
+        : undefined,
+      body.azureClientId?.trim()
+        ? encryptSetting(body.azureClientId.trim())
+        : undefined,
+      body.azureClientSecret?.trim()
+        ? encryptSetting(body.azureClientSecret.trim())
+        : undefined,
+    ]);
+    if (encrypted.some(Boolean)) {
+      await prisma.pipelineSettings.update({
+        where: { id: "global" },
+        data: {
+          ...(encrypted[0] ? { openai_api_key_encrypted: encrypted[0] } : {}),
+          ...(encrypted[1] ? { azure_tenant_id_encrypted: encrypted[1] } : {}),
+          ...(encrypted[2] ? { azure_client_id_encrypted: encrypted[2] } : {}),
+          ...(encrypted[3]
+            ? { azure_client_secret_encrypted: encrypted[3] }
+            : {}),
+        },
+      });
+    }
 
     // Raising the window should take effect now, rather than waiting for a
     // currently submitted Batch to finish. Existing accepted Batches remain

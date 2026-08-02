@@ -87,7 +87,7 @@ export function listPhaseJobContainers(): Promise<DockerContainerSummary[]> {
     "/containers/json?all=1",
   ).then((containers) =>
     containers.filter(
-      (container) => container.Labels?.["pst-analyser.role"] === "phase-job",
+      (container) => container.Labels?.["aida.role"] === "phase-job",
     ),
   );
 }
@@ -99,6 +99,8 @@ export function dockerHostCpuCount(): Promise<number> {
 }
 
 interface DockerMount {
+  Type?: "bind" | "volume" | "tmpfs";
+  Name?: string;
   Source: string;
   Destination: string;
   Mode?: string;
@@ -127,9 +129,9 @@ export async function createJobContainer(input: {
     Tty: true,
     Env: input.environment,
     Labels: {
-      "pst-analyser.role": "phase-job",
-      "pst-analyser.job-id": input.jobId,
-      "pst-analyser.phase": input.phase,
+      "aida.role": "phase-job",
+      "aida.job-id": input.jobId,
+      "aida.phase": input.phase,
     },
     HostConfig: {
       AutoRemove: true,
@@ -145,7 +147,7 @@ export async function createJobContainer(input: {
   return created.Id;
 }
 
-/** Copy data mounts from the dispatcher without leaking its Docker socket. */
+/** Copy required data/secret mounts without leaking the Docker socket. */
 export async function safeDispatcherBinds(
   containerId: string,
 ): Promise<string[]> {
@@ -158,15 +160,15 @@ export async function safeDispatcherBinds(
       (mount) =>
         mount.Destination !== "/var/run/docker.sock" &&
         [
-          "/data/staging-area",
-          "/data/extracted-emails",
+          "/data",
+          "/run/aida-secrets",
           "/workspace/logs",
           "/workspace/batches",
         ].includes(mount.Destination),
     )
     .map(
       (mount) =>
-        `${mount.Source}:${mount.Destination}${mount.RW === false ? ":ro" : ""}`,
+        `${mount.Type === "volume" && mount.Name ? mount.Name : mount.Source}:${mount.Destination}${mount.RW === false ? ":ro" : ""}`,
     );
 }
 

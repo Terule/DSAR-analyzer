@@ -5,9 +5,12 @@
  * using the shared standalone processor, updating its status + metrics in the DB.
  */
 
+import fs from "node:fs";
 import path from "node:path";
 import { archiveCompletedCase } from "../../src/lib/history";
 import { prisma } from "../../src/lib/prisma";
+import { queueSharePointArtifacts } from "../../src/lib/sharepoint-artifact-outbox";
+import { startSharePointArtifactWorker } from "../../src/lib/sharepoint-artifact-queue";
 import { runStandaloneBatch } from "../../src/lib/standalone-processor";
 
 interface FilesRow {
@@ -81,6 +84,18 @@ async function main() {
         },
       },
       (progress) => {
+        if (progress.outputPath) {
+          queueSharePointArtifacts(fileId, [progress.outputPath])
+            .then((queued) => {
+              if (queued > 0) startSharePointArtifactWorker();
+            })
+            .catch((error) =>
+              console.error(
+                "[files-worker] Could not queue SharePoint artifact:",
+                error,
+              ),
+            );
+        }
         // Throttle live progress writes so a large batch doesn't hammer the DB.
         const now = Date.now();
         if (now - lastProgressWrite < 1500) return;
@@ -103,6 +118,25 @@ async function main() {
     const durationMs = Date.now() - startedAt;
 
     if (result.success) {
+      const finalized = [messagesDir, documentsDir].flatMap((directory) =>
+        fs.existsSync(directory)
+          ? fs
+              .readdirSync(directory, { recursive: true })
+              .map((entry) => path.join(directory, String(entry)))
+              .filter(
+                (entry) => fs.existsSync(entry) && fs.statSync(entry).isFile(),
+              )
+          : [],
+      );
+      try {
+        const queued = await queueSharePointArtifacts(fileId, finalized);
+        if (queued > 0) startSharePointArtifactWorker();
+      } catch (error) {
+        console.error(
+          "[files-worker] Could not queue final SharePoint artifacts:",
+          error,
+        );
+      }
       await prisma.processedFile.update({
         where: { id: fileId },
         data: {

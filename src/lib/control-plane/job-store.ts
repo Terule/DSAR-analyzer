@@ -105,6 +105,7 @@ export async function claimNextJob(
   workerId: string,
   leaseSeconds = DEFAULT_LEASE_SECONDS,
   caseKey?: string,
+  deferLargeFiles = false,
 ): Promise<ControlJobRecord | null> {
   const pool = getControlPlanePool();
 
@@ -121,12 +122,42 @@ export async function claimNextJob(
          AND status = 'queued'
          AND available_at <= NOW()
          AND ($4::text IS NULL OR payload->>'caseKey' = $4)
+         -- Large Office files are deliberately deferred until every regular
+         -- Files batch in their run has settled. Once that lane opens, only
+         -- one large batch may run at a time to protect Docker's memory cap.
+         AND (
+           NOT $5::boolean
+           OR phase <> 'files'
+           OR payload->'metadata'->>'largeOfficeBatch' IS DISTINCT FROM 'true'
+           OR (
+             NOT EXISTS (
+               SELECT 1
+               FROM orchestrator_jobs regular_batch
+               WHERE regular_batch.phase = 'files'
+                 AND regular_batch.payload->>'fileId' = orchestrator_jobs.payload->>'fileId'
+                 AND regular_batch.payload->'metadata'->>'runKey' = orchestrator_jobs.payload->'metadata'->>'runKey'
+                 AND regular_batch.payload->'metadata'->>'filesBatch' = 'true'
+                 AND regular_batch.payload->'metadata'->>'largeOfficeBatch' IS DISTINCT FROM 'true'
+                 AND regular_batch.status IN ('queued', 'leased', 'running')
+             )
+             AND NOT EXISTS (
+               SELECT 1
+               FROM orchestrator_jobs active_large_batch
+               WHERE active_large_batch.phase = 'files'
+                 AND active_large_batch.id <> orchestrator_jobs.id
+                 AND active_large_batch.payload->>'fileId' = orchestrator_jobs.payload->>'fileId'
+                 AND active_large_batch.payload->'metadata'->>'runKey' = orchestrator_jobs.payload->'metadata'->>'runKey'
+                 AND active_large_batch.payload->'metadata'->>'largeOfficeBatch' = 'true'
+                 AND active_large_batch.status IN ('leased', 'running')
+             )
+           )
+         )
        ORDER BY priority ASC, created_at ASC
        FOR UPDATE SKIP LOCKED
        LIMIT 1
      )
      RETURNING *`,
-    [workerId, String(leaseSeconds), phase, caseKey ?? null],
+    [workerId, String(leaseSeconds), phase, caseKey ?? null, deferLargeFiles],
   );
 
   if (result.rows.length === 0) return null;
@@ -263,6 +294,17 @@ export interface FilesFinalizerState {
   completed: number;
 }
 
+export interface FailedFilesBatch {
+  id: string;
+  paths: string[];
+}
+
+export interface FilesFallbackSourceState {
+  activeSourceJobIds: Set<string>;
+  completedSourceJobIds: Set<string>;
+  failedSourceJobIds: Set<string>;
+}
+
 /**
  * Status fan-in for the most recently created batch run of a Files row.
  * Historical/cancelled runs must never decide the state of a later retry.
@@ -282,6 +324,7 @@ export async function getLatestFilesBatchParentState(
        WHERE phase = 'files'
          AND payload->>'fileId' = $1
          AND payload->'metadata'->>'filesBatch' = 'true'
+         AND payload->'metadata'->>'superseded' IS DISTINCT FROM 'true'
          AND payload->'metadata'->>'runKey' IS NOT NULL
        GROUP BY payload->'metadata'->>'runKey'
        ORDER BY MAX(created_at) DESC
@@ -297,6 +340,7 @@ export async function getLatestFilesBatchParentState(
      WHERE orchestrator_jobs.phase = 'files'
        AND orchestrator_jobs.payload->>'fileId' = $1
        AND orchestrator_jobs.payload->'metadata'->>'filesBatch' = 'true'
+       AND orchestrator_jobs.payload->'metadata'->>'superseded' IS DISTINCT FROM 'true'
      GROUP BY latest_run.run_key`,
     [fileId],
   );
@@ -336,6 +380,92 @@ export async function getFilesFinalizerState(
     failed: Number(row?.failed || 0),
     completed: Number(row?.completed || 0),
   };
+}
+
+export async function listFailedFilesBatches(
+  fileId: string,
+  runKey: string,
+): Promise<FailedFilesBatch[]> {
+  const result = await getControlPlanePool().query<{
+    id: string;
+    paths: unknown;
+  }>(
+    `SELECT id, payload->'metadata'->'paths' AS paths
+     FROM orchestrator_jobs
+     WHERE phase = 'files'
+       AND payload->>'fileId' = $1
+       AND payload->'metadata'->>'filesBatch' = 'true'
+       AND payload->'metadata'->>'runKey' = $2
+       AND status IN ('dead_letter', 'cancelled')`,
+    [fileId, runKey],
+  );
+  return result.rows.map((row) => ({
+    id: row.id,
+    paths: Array.isArray(row.paths)
+      ? row.paths.filter((item): item is string => typeof item === "string")
+      : [],
+  }));
+}
+
+export async function getFilesFallbackState(
+  fileId: string,
+  runKey: string,
+): Promise<FilesFinalizerState> {
+  const result = await getControlPlanePool().query<{
+    active: string;
+    failed: string;
+    completed: string;
+  }>(
+    `SELECT COUNT(*) FILTER (WHERE status IN ('queued', 'leased', 'running'))::text AS active,
+            COUNT(*) FILTER (WHERE status IN ('dead_letter', 'cancelled'))::text AS failed,
+            COUNT(*) FILTER (WHERE status = 'completed')::text AS completed
+     FROM orchestrator_jobs
+     WHERE phase = 'files'
+       AND payload->>'fileId' = $1
+       AND payload->'metadata'->>'filesFallback' = 'true'
+       AND payload->'metadata'->>'runKey' = $2`,
+    [fileId, runKey],
+  );
+  const row = result.rows[0];
+  return {
+    active: Number(row?.active || 0),
+    failed: Number(row?.failed || 0),
+    completed: Number(row?.completed || 0),
+  };
+}
+
+export async function getFilesFallbackSourceState(
+  fileId: string,
+  runKey: string,
+): Promise<FilesFallbackSourceState> {
+  const result = await getControlPlanePool().query<{
+    source_job_id: string | null;
+    status: string;
+  }>(
+    `SELECT payload->'metadata'->>'sourceJobId' AS source_job_id, status
+     FROM orchestrator_jobs
+     WHERE phase = 'files'
+       AND payload->>'fileId' = $1
+       AND payload->'metadata'->>'filesFallback' = 'true'
+       AND payload->'metadata'->>'runKey' = $2`,
+    [fileId, runKey],
+  );
+  const state: FilesFallbackSourceState = {
+    activeSourceJobIds: new Set(),
+    completedSourceJobIds: new Set(),
+    failedSourceJobIds: new Set(),
+  };
+  for (const row of result.rows) {
+    if (!row.source_job_id) continue;
+    if (["queued", "leased", "running"].includes(row.status)) {
+      state.activeSourceJobIds.add(row.source_job_id);
+    } else if (row.status === "completed") {
+      state.completedSourceJobIds.add(row.source_job_id);
+    } else if (["dead_letter", "cancelled"].includes(row.status)) {
+      state.failedSourceJobIds.add(row.source_job_id);
+    }
+  }
+  return state;
 }
 
 /**

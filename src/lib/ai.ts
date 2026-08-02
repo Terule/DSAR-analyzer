@@ -4,6 +4,8 @@ import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
 import { getCasePstFileIds, markCaseAiCompleted } from "./case-utils";
+import { runtimeCredentials } from "./credentials";
+import { stripEmailSignature } from "./email-content";
 import {
   DEFAULT_AI_BATCH_SETTINGS,
   getAiBatchSettings,
@@ -11,8 +13,38 @@ import {
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+let openai: OpenAI | null = null;
+async function getOpenAi(): Promise<OpenAI> {
+  if (openai) return openai;
+  const key = (await runtimeCredentials()).openAiKey;
+  if (!key) throw new Error("Configure the OpenAI API key in Settings.");
+  openai = new OpenAI({ apiKey: key });
+  return openai;
+}
 const MODEL_NAME = "gpt-4o-mini";
+
+/** Best-effort cancellation of external Batch work before a case is removed. */
+export async function cancelOpenAiBatchesForFiles(fileIds: string[]) {
+  if (fileIds.length === 0) return;
+  const batches = await prisma.processedFile.findMany({
+    where: {
+      id: { in: fileIds },
+      batch_id: { not: null },
+      ai_status: { in: ["processing", "batch_ready"] },
+    },
+    select: { batch_id: true },
+  });
+  if (batches.length === 0) return;
+  const client = await getOpenAi().catch(() => null);
+  if (!client) return;
+  await Promise.all(
+    batches.map(({ batch_id }) =>
+      batch_id
+        ? client.batches.cancel(batch_id).catch(() => undefined)
+        : undefined,
+    ),
+  );
+}
 const TOKENIZER = encodingForModel(MODEL_NAME);
 
 // Parallel batches are intentionally bounded well below the 40M-token Tier 3
@@ -43,6 +75,23 @@ const RESPONSE_FORMAT = {
     },
   },
 } as const;
+
+function stripPayloadSignatures(content: Record<string, unknown>): void {
+  for (const key of ["first_email", "second_email"]) {
+    const email = content[key];
+    if (email && typeof email === "object" && "body" in email) {
+      const body = (email as { body?: unknown }).body;
+      if (typeof body === "string")
+        (email as { body: string }).body = stripEmailSignature(body);
+    }
+  }
+  const chain = content.rest_of_chain;
+  if (chain && typeof chain === "object" && "text" in chain) {
+    const text = (chain as { text?: unknown }).text;
+    if (typeof text === "string")
+      (chain as { text: string }).text = stripEmailSignature(text);
+  }
+}
 
 function countTokens(text: string): number {
   return TOKENIZER.encode(text).length;
@@ -252,7 +301,11 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
     if (!unprocessedHashes.has(hash)) continue;
 
     const filePath = path.join(jsonFolder, file);
-    const content = JSON.parse(fs.readFileSync(filePath, "utf-8"));
+    const content = JSON.parse(fs.readFileSync(filePath, "utf-8")) as Record<
+      string,
+      unknown
+    >;
+    stripPayloadSignatures(content);
     const userContent = JSON.stringify(content);
 
     // Pre-filter: skip the AI call entirely when the subject is not referenced
@@ -373,12 +426,13 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
   );
 
   try {
-    const fileUpload = await openai.files.create({
+    const client = await getOpenAi();
+    const fileUpload = await client.files.create({
       file: fs.createReadStream(batchFilePath),
       purpose: "batch",
     });
 
-    const batch = await openai.batches.create({
+    const batch = await client.batches.create({
       input_file_id: fileUpload.id,
       endpoint: "/v1/chat/completions",
       completion_window: "24h",

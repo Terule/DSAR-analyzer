@@ -118,6 +118,10 @@ function CaseCardComponent({
   const isRenderComplete =
     hasPst && pstFiles.every((file) => file.pdf_status === "completed");
   const hasFiles = !!filesRow;
+  const uploadRow = caseFiles.find((file) =>
+    ["pending", "processing"].includes(file.upload_status || ""),
+  );
+  const isUploading = !!uploadRow;
 
   const phaseProgress = useMemo(() => {
     if (pstFiles.length === 0) {
@@ -259,16 +263,23 @@ function CaseCardComponent({
   const filesStarted = hasFiles && filesStatus !== "pending";
   const filesDone = filesStatus === "completed";
   const filesFaulted = filesStatus === "failed";
+  // A Files-only request has no Render phase to unlock the upload action.
+  // Let its completed Files phase use the same deliverables upload workflow.
+  const canPrepareUpload = isRenderComplete || (!hasPst && filesDone);
   const filesHandled =
+    filesRow?.files_progress_handled ||
     (filesRow?.files_processed || 0) + (filesRow?.files_skipped || 0);
-  const filesTotal = filesRow?.files_total || 0;
+  const filesTotal =
+    filesRow?.files_progress_total || filesRow?.files_total || 0;
+  // Progress is a persisted counter, independent from the terminal state.
+  // A failed batch must not make an already-handled Files count display as 0%.
   const filesProgress = filesDone
     ? 100
-    : isFilesPhase
-      ? filesTotal > 0 && filesHandled > 0
-        ? Math.min(99, Math.round((filesHandled / filesTotal) * 100))
-        : 5
-      : 0;
+    : filesTotal > 0 && filesHandled > 0
+      ? Math.min(99, Math.round((filesHandled / filesTotal) * 100))
+      : isFilesPhase
+        ? 5
+        : 0;
 
   const isFaulted =
     pstFiles.some(
@@ -474,16 +485,20 @@ function CaseCardComponent({
     <div className="relative overflow-hidden bg-slate-800 rounded-4xl shadow-xl border border-slate-700 p-8 flex flex-col items-center">
       {/* Top Right Mini Tools */}
       <div className="absolute top-6 right-6 flex items-center gap-2">
-        {isRenderComplete && (
+        {canPrepareUpload && (
           <Button
             type="button"
             variant="outline"
             size="icon"
             onClick={() => onPrepareUpload(caseFiles.map((file) => file.id))}
-            disabled={isPreparingUpload}
-            title="Prepare for SharePoint upload"
+            disabled={isPreparingUpload || isUploading}
+            title={
+              isUploading
+                ? `Uploading ${uploadRow.upload_uploaded || 0}/${uploadRow.upload_total || 0} files to SharePoint`
+                : "Upload deliverable to SharePoint"
+            }
           >
-            {isPreparingUpload ? (
+            {isPreparingUpload || isUploading ? (
               <Loader2 className="animate-spin" />
             ) : (
               <Upload />
@@ -517,6 +532,13 @@ function CaseCardComponent({
           )}
         </button>
       </div>
+      {isUploading && (
+        <div className="absolute top-18 right-6 flex items-center gap-1.5 rounded-md border border-indigo-500/40 bg-indigo-500/10 px-2 py-1 text-[10px] font-semibold tabular-nums text-indigo-200">
+          <Loader2 className="size-3 animate-spin" />
+          Uploading {uploadRow.upload_uploaded || 0}/
+          {uploadRow.upload_total || 0}
+        </div>
+      )}
 
       {/* Central Header */}
       <div className="w-16 h-16 bg-indigo-500/10 rounded-2xl flex items-center justify-center mb-4 mt-2">

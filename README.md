@@ -1,4 +1,4 @@
-# PST Analyser
+# AIDA — Automated Intelligent Data Auditor
 
 A Next.js web application for performing **Data Subject Access Request (DSAR)** compliance audits on PST archives, Teams message exports, and loose document sets.
 
@@ -118,7 +118,9 @@ Important:
 npm run docker:up
 ```
 
-Then open [http://localhost:3000](http://localhost:3000).
+Run `npm run docker:up` (or `npm run docker:rebuild` after code changes).
+The command prints AIDA's actual host URL after Compose starts, including when
+Docker assigns a random host port.
 
 Useful commands:
 

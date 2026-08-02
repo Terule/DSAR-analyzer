@@ -13,6 +13,7 @@ import fs from "node:fs";
 import { parentPort, workerData } from "node:worker_threads";
 import * as xlsx from "xlsx";
 import { processDocxToPdf, processExcelToPdf } from "../../src/lib/converter";
+import { normalizeSpreadsheetText } from "../../src/lib/text-encoding";
 
 interface OfficeWorkerData {
   kind: "docx" | "excel";
@@ -32,20 +33,19 @@ function excelContentKey(buffer: Buffer): string {
   const workbook = xlsx.read(buffer, { type: "buffer", cellText: true });
   const sheets = workbook.SheetNames.map((name) => {
     const sheet = workbook.Sheets[name];
-    const range = sheet?.["!ref"]
-      ? xlsx.utils.decode_range(sheet["!ref"])
-      : null;
-    const cells: string[][] = [];
-    if (range) {
-      for (let row = range.s.r; row <= range.e.r; row++) {
-        const values: string[] = [];
-        for (let column = range.s.c; column <= range.e.c; column++) {
-          const cell = sheet[xlsx.utils.encode_cell({ r: row, c: column })];
-          values.push(cell ? xlsx.utils.format_cell(cell).trim() : "");
-        }
-        cells.push(values);
-      }
-    }
+    // Some workbooks retain formatting to Excel's last row, making !ref
+    // enormous even though only a small number of cells contain values. Hash
+    // the visible populated cells instead of expanding the rectangular range.
+    const cells = Object.entries(sheet || {})
+      .filter(([address, cell]) => !address.startsWith("!") && !!cell)
+      .map(([address, cell]) => [
+        address,
+        normalizeSpreadsheetText(
+          xlsx.utils.format_cell(cell as xlsx.CellObject),
+        ),
+      ])
+      .filter(([, value]) => value.length > 0)
+      .sort(([left], [right]) => left.localeCompare(right));
     return { name, cells };
   });
   return `office:${crypto

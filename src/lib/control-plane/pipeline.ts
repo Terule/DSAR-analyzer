@@ -24,7 +24,13 @@ function caseParts(filepath: string | null): {
   const parts = relative
     .split(path.sep)
     .filter((part) => part && part !== "..");
-  return { caseKey: parts[0] || "unknown", requestKey: parts[1] };
+  const requestKey = parts[1];
+  return {
+    // Admission is per request. This preserves internal PST fan-out while
+    // ensuring separate requests (even within one case) never run together.
+    caseKey: requestKey ? `${parts[0] || "unknown"}/${requestKey}` : parts[0] || "unknown",
+    requestKey,
+  };
 }
 
 /**
@@ -36,6 +42,7 @@ export async function enqueueFilePhase(input: {
   phase: ControlPhase;
   metadata?: Record<string, unknown>;
   dedupeKey?: string;
+  priority?: number;
 }): Promise<string> {
   const row = await prisma.processedFile.findUnique({
     where: { id: input.fileId },
@@ -57,6 +64,7 @@ export async function enqueueFilePhase(input: {
     phase: input.phase,
     dedupeKey: input.dedupeKey || `${input.phase}:${input.fileId}`,
     payload,
+    priority: input.priority,
   });
 
   return job.id;

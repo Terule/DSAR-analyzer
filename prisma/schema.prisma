@@ -40,16 +40,95 @@ model ProcessedFile {
   kind                    String   @default("pst")
   files_status            String   @default("pending")
   files_total             Int      @default(0)
+  files_progress_total    Int      @default(0)
+  files_progress_handled  Int      @default(0)
   files_processed         Int      @default(0)
   files_skipped           Int      @default(0)
   files_duplicates        Int      @default(0)
   files_duration_ms       Int      @default(0)
   files_started_at        BigInt?
+  files_paused_ms         Int      @default(0)
+  upload_status           String   @default("idle")
+  upload_total            Int      @default(0)
+  upload_uploaded         Int      @default(0)
+  upload_error            String?
+  upload_heartbeat_at     BigInt?
+  case_request_id         String?
 
   emails Email[] @relation("ProcessedFileEmails")
   ai_batch_runs AiBatchRun[] @relation("CoordinatorAiBatchRuns")
+  sharepoint_upload_artifacts SharePointUploadArtifact[]
+  case_request CaseRequest? @relation(fields: [case_request_id], references: [id], onDelete: Cascade)
 
   @@map("processed_files")
+}
+
+model ManagedCase {
+  id                    String        @id
+  name                  String        @unique
+  subject_name          String
+  subject_email         String
+  subject_personal_email String?
+  subject_aliases       String?
+  status                String        @default("active")
+  archived_at           DateTime?
+  created_at            DateTime      @default(now())
+  updated_at            DateTime      @updatedAt
+  requests              CaseRequest[]
+
+  @@map("managed_cases")
+}
+
+model CaseRequest {
+  id                    String        @id
+  case_id               String
+  name                  String
+  scope                 String
+  status                String        @default("ready")
+  staging_path          String
+  deliverable_path      String
+  pst_count             Int           @default(0)
+  pst_size_bytes        BigInt        @default(0)
+  files_count           Int           @default(0)
+  files_size_bytes      BigInt        @default(0)
+  deliverable_files     Int           @default(0)
+  deliverable_size_bytes BigInt       @default(0)
+  total_emails          Int           @default(0)
+  emails_exported       Int           @default(0)
+  files_exported        Int           @default(0)
+  error                 String?
+  started_at            DateTime?
+  completed_at          DateTime?
+  created_at            DateTime      @default(now())
+  updated_at            DateTime      @updatedAt
+  case                  ManagedCase   @relation(fields: [case_id], references: [id], onDelete: Cascade)
+  processed_files       ProcessedFile[]
+
+  @@unique([case_id, name])
+  @@index([status, created_at])
+  @@map("case_requests")
+}
+
+model SharePointUploadArtifact {
+  id                  String   @id
+  source_file_id      String
+  request_key         String
+  local_path          String   @unique
+  relative_path       String
+  file_size_bytes     BigInt
+  modified_at         BigInt
+  status              String   @default("pending")
+  attempts            Int      @default(0)
+  error_message       String?
+  heartbeat_at        BigInt?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  source_file ProcessedFile @relation(fields: [source_file_id], references: [id], onDelete: Cascade)
+
+  @@index([status, heartbeat_at])
+  @@index([source_file_id, status])
+  @@map("sharepoint_upload_artifacts")
 }
 
 model Email {
@@ -106,6 +185,17 @@ model PipelineSettings {
   id                          String   @id
   ai_max_tokens_per_batch     Int      @default(2000000)
   ai_max_concurrent_batches   Int      @default(4)
+  sharepoint_site_url         String?
+  sharepoint_folder_id        String?
+  sharepoint_folder_path      String?
+  sharepoint_upload_lease_owner String?
+  sharepoint_upload_lease_until BigInt?
+  staging_root                  String?
+  deliverables_root             String?
+  openai_api_key_encrypted      String?
+  azure_tenant_id_encrypted     String?
+  azure_client_id_encrypted     String?
+  azure_client_secret_encrypted String?
   updated_at                  DateTime @updatedAt
 
   @@map("pipeline_settings")

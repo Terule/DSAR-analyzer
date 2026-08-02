@@ -1,11 +1,6 @@
 import fs from "node:fs";
 
-const required = [
-  "POSTGRES_URL",
-  "STAGING_PATH",
-  "EXTRACTED_PATH",
-  "OPENAI_API_KEY",
-];
+const required = ["POSTGRES_URL", "STAGING_PATH", "EXTRACTED_PATH"];
 
 const missing = required.filter((name) => {
   const value = process.env[name];
@@ -29,7 +24,7 @@ const stagingPath = process.env.STAGING_PATH;
 const extractedPath = process.env.EXTRACTED_PATH;
 
 const checks = [
-  ["STAGING_PATH", stagingPath, true],
+  ["STAGING_PATH", stagingPath, false],
   ["EXTRACTED_PATH", extractedPath, false],
 ];
 

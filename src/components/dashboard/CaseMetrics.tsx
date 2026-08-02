@@ -77,17 +77,32 @@ export function CaseMetrics({
       f.kind !== "files" &&
       !["completed", "failed"].includes((f.ai_status || "").toLowerCase()),
   );
+  const isCaseRunning = caseFiles.some((file) => {
+    if (file.kind === "files") return file.files_status === "processing";
+
+    return (
+      [
+        "scanning_metadata",
+        "processing",
+        "pending_analysis",
+        "analyzed",
+        "extracting",
+      ].includes(file.status) ||
+      ["processing", "batch_ready"].includes(file.ai_status || "") ||
+      file.pdf_status === "processing"
+    );
+  });
   const [now, setNow] = useState(() => Date.now());
 
-  // AI duration is committed to the database only once the whole case settles.
-  // Tick locally while it runs so telemetry remains useful between Batch
-  // completions instead of showing a blank card for many hours.
+  // Phase durations measure cumulative worker time and therefore grow faster
+  // than wall-clock time when several PSTs run in parallel. Tick the clock for
+  // the headline elapsed-time metric while any phase is active.
   useEffect(() => {
-    if (!aiStillRunning) return;
+    if (!isCaseRunning) return;
     setNow(Date.now());
     const timer = window.setInterval(() => setNow(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [aiStillRunning]);
+  }, [isCaseRunning]);
 
   const aiStartedAt = Math.min(
     ...caseFiles
@@ -106,8 +121,23 @@ export function CaseMetrics({
     stats.extractTime +
     displayedAiTime +
     stats.pdfTime;
-  const filesElapsed = filesRow?.files_duration_ms || 0;
-  const totalElapsed = emailElapsed + filesElapsed;
+  const filesElapsed = Math.max(
+    0,
+    (filesRow?.files_duration_ms || 0) - (filesRow?.files_paused_ms || 0),
+  );
+  const cumulativeWorkTime = emailElapsed + filesElapsed;
+  const caseStartedAt = Math.min(
+    ...caseFiles
+      .map((file) => Date.parse(file.created_at || ""))
+      .filter(Number.isFinite),
+  );
+  const hasCaseStart = Number.isFinite(caseStartedAt);
+  const totalElapsed =
+    isCaseRunning && hasCaseStart
+      ? Math.max(0, now - caseStartedAt)
+      : cumulativeWorkTime;
+  const totalTimeLabel =
+    isCaseRunning && hasCaseStart ? "Elapsed Time" : "Cumulative Work";
 
   const availableTabs: MetricsTab[] = [];
   if (hasPst) availableTabs.push("emails");
@@ -123,7 +153,10 @@ export function CaseMetrics({
       {/* General metrics — always visible breakdown header */}
       <div className="grid grid-cols-2 gap-3">
         <StatCard label="Total Size" value={formatBytes(stats.size)} />
-        <StatCard label="Total Time" value={<Duration ms={totalElapsed} />} />
+        <StatCard
+          label={totalTimeLabel}
+          value={<Duration ms={totalElapsed} />}
+        />
       </div>
 
       <button

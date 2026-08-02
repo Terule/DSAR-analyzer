@@ -63,3 +63,36 @@ export function repairMojibake(value: string): string {
     return value;
   }
 }
+
+/**
+ * Spreadsheet exports often contain invisible Unicode joiners, soft hyphens,
+ * and non-breaking spacing used by CRM HTML-to-XLSX exporters. They are not
+ * content and can render as mojibake in a PDF, so remove/normalize them after
+ * the conservative encoding repair.
+ */
+export function normalizeSpreadsheetText(value: string): string {
+  const normalized = repairMojibake(value).normalize("NFKC");
+  return [...normalized]
+    .map((character) => {
+      const codePoint = character.codePointAt(0) || 0;
+      const isControl =
+        (codePoint >= 0x00 && codePoint <= 0x08) ||
+        codePoint === 0x0b ||
+        codePoint === 0x0c ||
+        (codePoint >= 0x0e && codePoint <= 0x1f) ||
+        (codePoint >= 0x7f && codePoint <= 0x9f);
+      const isInvisible =
+        codePoint === 0x00ad ||
+        codePoint === 0x034f ||
+        codePoint === 0x061c ||
+        (codePoint >= 0x200b && codePoint <= 0x200f) ||
+        (codePoint >= 0x202a && codePoint <= 0x202e) ||
+        codePoint === 0x2060 ||
+        codePoint === 0xfeff;
+      if (isControl || isInvisible) return "";
+      return character;
+    })
+    .join("")
+    .replace(/\s{2,}/g, " ")
+    .trim();
+}

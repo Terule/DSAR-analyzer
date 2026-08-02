@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { type AddressObject, simpleParser } from "mailparser";
+import { stripEmailSignature } from "./email-content";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
 
@@ -226,10 +227,9 @@ export async function extractUniqueEmails(
           from: fromFormatted,
           to: toFormatted,
           subject,
-          body: extractVisibleBody(stripQuotedHeaders(firstBlock)).substring(
-            0,
-            12000,
-          ),
+          body: stripEmailSignature(
+            extractVisibleBody(stripQuotedHeaders(firstBlock)),
+          ).substring(0, 12000),
         };
 
         const secondEmail = secondBlock
@@ -238,8 +238,8 @@ export async function extractUniqueEmails(
               to: extractHeaderValue(secondBlock, "To") || "Unknown",
               subject:
                 extractHeaderValue(secondBlock, "Subject") || "(No Subject)",
-              body: extractVisibleBody(
-                stripQuotedHeaders(secondBlock),
+              body: stripEmailSignature(
+                extractVisibleBody(stripQuotedHeaders(secondBlock)),
               ).substring(0, 6000),
             }
           : null;
@@ -262,7 +262,7 @@ export async function extractUniqueEmails(
           first_email: firstEmail,
           second_email: secondEmail,
           rest_of_chain: {
-            text: restText.substring(0, 10000),
+            text: stripEmailSignature(restText).substring(0, 10000),
           },
           attachments,
         };

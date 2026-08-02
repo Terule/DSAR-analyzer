@@ -25,10 +25,11 @@ export function DashboardHeader({
       <div>
         <h1 className="text-3xl font-bold tracking-tight text-white flex items-center gap-3">
           <Database className="w-8 h-8 text-indigo-500" />
-          DSAR Workspace
+          AIDA
         </h1>
         <p className="text-slate-400 mt-2 font-medium">
-          Automated data extraction, deduplication, and compliance filtering.
+          Automated Intelligent Data Auditor — DSAR extraction, review, and
+          compliance filtering.
         </p>
       </div>
 
