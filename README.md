@@ -43,7 +43,7 @@ Create a `.env.local` file in the project root:
 
 ```env
 OPENAI_API_KEY=sk-...
-DATABASE_PATH=/path/to/pst_analyzer.db
+POSTGRES_URL=postgres://pst:pst@localhost:5432/pst_analyser
 STAGING_PATH=/path/to/staging-area
 EXTRACTED_PATH=/path/to/extracted_emails
 ```

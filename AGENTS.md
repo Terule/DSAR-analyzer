@@ -67,7 +67,7 @@ Same applies to `searchParams` in page components.
 - **Background workers**: worker entry points live under `scripts/workers/`. Detached legacy workers must be cleaned up on wipe/reset (`/api/wipe` kills matching `scripts/workers/files-worker.ts` processes). Their stdout/stderr is piped to `logs/<name>.log` via `openWorkerLogFd` — never spawn them with `stdio: 'ignore'`. Synchronous CPU-heavy parsing (DOCX/XLSX) must go through `scripts/workers/office-worker.ts` so `withTimeout` can actually interrupt it.
 - **Pipeline phases**: Parse → Extract → AI → Render → Files. Rows carry a `kind` of `'pst'` or `'files'`; email phases apply only to `kind='pst'` rows.
 - **Staging/output layout**: input `STAGING_PATH/[case]/[request]/{PST,Files}`; output `EXTRACTED_PATH/[case]/[request]/{Emails,Messages,Documents}`. Row id is a hash of the full path, so moving a file orphans its row — `syncStagingArea` prunes rows whose backing file/folder no longer exists.
-- **Environment variables**: `OPENAI_API_KEY`, `DATABASE_PATH`, `STAGING_PATH`, `EXTRACTED_PATH` — always read from `process.env`, never hardcode paths.
+- **Environment variables**: `OPENAI_API_KEY`, `POSTGRES_URL`, `STAGING_PATH`, `EXTRACTED_PATH` — always read from `process.env`, never hardcode paths.
 - **No hardcoded absolute paths** in committed code.
 
 ---
