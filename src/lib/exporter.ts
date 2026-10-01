@@ -111,9 +111,13 @@ export async function extractUniqueEmails(
 ) {
   const row = await prisma.processedFile.findUnique({
     where: { id: fileId },
-    select: { filepath: true },
+    select: {
+      filepath: true,
+      case_request: { select: { case: { select: { case_type: true } } } },
+    },
   });
   if (!row?.filepath) throw new Error("File target missing");
+  const isClientCase = row.case_request?.case.case_type === "client";
 
   await prisma.processedFile.update({
     where: { id: fileId },
@@ -173,6 +177,23 @@ export async function extractUniqueEmails(
         // Normalization hands the EML to the case-level raw folder. It is a
         // move so a large PST email is never retained twice between stages.
         fs.renameSync(emlPath, finalEmlPath);
+
+        // Client cases retain every unique message. Move it straight into the
+        // shared render input and mark the AI stage as deliberately skipped.
+        if (isClientCase) {
+          fs.renameSync(
+            finalEmlPath,
+            path.join(selectedFolder, `${record.email_hash}.eml`),
+          );
+          await prisma.email.update({
+            where: { id: record.id },
+            data: {
+              ai_decision: "keep",
+              ai_reason: "Client case: deduplication only",
+            },
+          });
+          continue;
+        }
 
         const rawEml = fs.readFileSync(finalEmlPath);
         const parsed = await simpleParser(rawEml);

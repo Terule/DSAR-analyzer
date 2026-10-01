@@ -38,6 +38,166 @@ function hasDirectRecipientAddress(text: string, criteria: string[]): boolean {
   );
 }
 
+interface SpreadsheetCellValue {
+  row: number;
+  column: number;
+  value: string;
+}
+
+function decodeXmlText(value: string): string {
+  return value
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) =>
+      String.fromCodePoint(Number.parseInt(hex, 16)),
+    )
+    .replace(/&#(\d+);/g, (_, decimal: string) =>
+      String.fromCodePoint(Number.parseInt(decimal, 10)),
+    )
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'");
+}
+
+/**
+ * Some Salesforce exports write literal values as `<c t="str"><v>…</v></c>`.
+ * SheetJS intentionally treats those as formula-string cells and can omit
+ * their values when no formula is present. Read only those missing cells from
+ * the OOXML worksheet so the normal parser remains the primary source.
+ */
+function readMissingStringCells(
+  buffer: Buffer,
+  sheetIndex: number,
+  existing: Map<string, SpreadsheetCellValue>,
+): Map<string, SpreadsheetCellValue> {
+  try {
+    const packageFiles = xlsx.CFB.read(buffer, { type: "buffer" });
+    const sheetPath = `Root Entry/xl/worksheets/sheet${sheetIndex + 1}.xml`;
+    const entry = xlsx.CFB.find(packageFiles, sheetPath);
+    if (!entry?.content) return existing;
+
+    const xml = Buffer.from(entry.content).toString("utf-8");
+    // Alternation consumes self-closing cells (`<c r="A1" s="2"/>`) on
+    // their own so they cannot swallow the next real cell.
+    const cellPattern = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+    for (const match of xml.matchAll(cellPattern)) {
+      const [, attributes, content] = match;
+      if (content === undefined) continue;
+      if (!/\bt=(?:"str"|'str')/.test(attributes)) continue;
+
+      const address = /\br=(?:"([A-Z]+\d+)"|'([A-Z]+\d+)')/i.exec(
+        attributes,
+      )?.[1];
+      const rawValue = /<v\b[^>]*>([\s\S]*?)<\/v>/.exec(content)?.[1];
+      if (!address || rawValue === undefined || existing.has(address)) continue;
+
+      const position = xlsx.utils.decode_cell(address);
+      const value = normalizeSpreadsheetText(decodeXmlText(rawValue)).trim();
+      if (value.length > 0) {
+        existing.set(address, {
+          row: position.r,
+          column: position.c,
+          value,
+        });
+      }
+    }
+  } catch {
+    // A malformed package should retain the standard SheetJS behavior.
+  }
+
+  return existing;
+}
+
+function readSpreadsheetCells(
+  buffer: Buffer,
+  workbook: xlsx.WorkBook,
+): Map<string, SpreadsheetCellValue[]> {
+  const cellsBySheet = new Map<string, SpreadsheetCellValue[]>();
+
+  for (const [sheetIndex, sheetName] of workbook.SheetNames.entries()) {
+    const cellsByAddress = new Map<string, SpreadsheetCellValue>();
+    for (const [address, cell] of Object.entries(
+      workbook.Sheets[sheetName] || {},
+    )) {
+      if (address.startsWith("!") || !cell) continue;
+
+      const position = xlsx.utils.decode_cell(address);
+      const value = normalizeSpreadsheetText(
+        xlsx.utils.format_cell(cell as xlsx.CellObject),
+      ).trim();
+      if (value.length > 0) {
+        cellsByAddress.set(address, {
+          row: position.r,
+          column: position.c,
+          value,
+        });
+      }
+    }
+
+    readMissingStringCells(buffer, sheetIndex, cellsByAddress);
+    cellsBySheet.set(
+      sheetName,
+      [...cellsByAddress.values()].sort((left, right) =>
+        left.row === right.row
+          ? left.column - right.column
+          : left.row - right.row,
+      ),
+    );
+  }
+
+  return cellsBySheet;
+}
+
+function isHtmlBodyColumn(header: string): boolean {
+  return /(?:^|[_\s])html(?:[_\s]|$)|htmlbody|bodyhtml/i.test(header);
+}
+
+/**
+ * CRM email exports commonly store a full HTML email in a spreadsheet cell.
+ * Rendering that source literally exposes invisible Litmus preheader markup
+ * (often thousands of zero-width spaces) as blank lines. Convert only those
+ * recognised HTML-body fields to readable text before the spreadsheet PDF is
+ * generated; every other cell retains its original value.
+ */
+function normalizeHtmlSpreadsheetBody(value: string): string {
+  const withoutHiddenContent = value
+    .replace(/<(script|style|head)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
+    .replace(
+      /<([a-z][\w:-]*)\b[^>]*(?:\bhidden\b|aria-hidden\s*=\s*["']?true|style\s*=\s*["'][^"']*display\s*:\s*none)[^>]*>[\s\S]*?<\/\1\s*>/gi,
+      "",
+    );
+
+  const text = withoutHiddenContent
+    .replace(/<br\s*\/?\s*>/gi, "\n")
+    .replace(/<\/(?:p|div|tr|li|h[1-6])\s*>/gi, "\n")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&#x([0-9a-f]+);/gi, (_, hex: string) =>
+      String.fromCodePoint(Number.parseInt(hex, 16)),
+    )
+    .replace(/&#(\d+);/g, (_, decimal: string) =>
+      String.fromCodePoint(Number.parseInt(decimal, 10)),
+    )
+    .replaceAll("&nbsp;", " ")
+    .replaceAll("&zwnj;", "")
+    .replaceAll("&shy;", "")
+    .replaceAll("&amp;", "&")
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&lsquo;", "‘")
+    .replaceAll("&rsquo;", "’")
+    .replaceAll("&ldquo;", "“")
+    .replaceAll("&rdquo;", "”")
+    .replaceAll("&ndash;", "–")
+    .replaceAll("&mdash;", "—")
+    .replaceAll("&hellip;", "…")
+    .replaceAll("&copy;", "©")
+    .replaceAll("&reg;", "®")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&#39;", "'");
+
+  return normalizeSpreadsheetText(text);
+}
+
 function toFontUrl(fileName: string): string {
   return pathToFileURL(path.join(FONT_FOLDER, fileName)).toString();
 }
@@ -181,8 +341,44 @@ function sanitizeFontsForPdf(html: string): string {
         height: auto !important;
         margin: 0 !important;
         padding: 0 !important;
+        max-width: 100% !important;
+        overflow-wrap: anywhere !important;
       }
-      table { page-break-inside: auto !important; }
+      /* Some Outlook exports put the fixed width or nowrap on a nested div,
+         paragraph, or span rather than the table cell. Constrain descendants
+         too, otherwise their intrinsic width can still make a parent table
+         overflow the printable area. Preserve explicit preformatted content
+         below, but re-enable normal wrapping for regular email markup. */
+      body * {
+        min-width: 0 !important;
+        max-width: 100% !important;
+        overflow-wrap: anywhere !important;
+        word-wrap: break-word !important;
+        word-break: break-all !important;
+      }
+      body :not(pre) {
+        white-space: normal !important;
+      }
+      /* Outlook frequently uses fixed-width layout tables that are wider than
+         the printable A4 area. Give every table a fixed layout inside the
+         available width so WeasyPrint reflows it instead of clipping its right
+         edge. This also covers tables nested inside the email body. */
+      table {
+        width: 100% !important;
+        max-width: 100% !important;
+        table-layout: fixed !important;
+        page-break-inside: auto !important;
+      }
+      table, td, th {
+        box-sizing: border-box !important;
+        max-width: 100% !important;
+      }
+      td, th, pre {
+        white-space: pre-wrap !important;
+        overflow-wrap: break-word !important;
+        word-wrap: break-word !important;
+        word-break: break-all !important;
+      }
       /* Outlook HTML often carries absolute image dimensions far wider than
          an A4 page. Constrain only the rendered image, retaining its aspect
          ratio so normal signatures and inline content keep their native size. */
@@ -563,32 +759,11 @@ export async function processExcelToPdf(
 
     const wb = xlsx.read(buffer, { type: "buffer" });
     const loweredCriteria = criteria.map((c) => c.toLowerCase());
-    const sheetCells = new Map<
-      string,
-      Array<{ row: number; column: number; value: string }>
-    >();
+    const sheetCells = readSpreadsheetCells(buffer, wb);
     const exclusionText: string[] = [];
 
     for (const sheetName of wb.SheetNames) {
-      const cells = Object.entries(wb.Sheets[sheetName] || {})
-        .filter(([address, cell]) => !address.startsWith("!") && !!cell)
-        .map(([address, cell]) => {
-          const position = xlsx.utils.decode_cell(address);
-          return {
-            row: position.r,
-            column: position.c,
-            value: normalizeSpreadsheetText(
-              xlsx.utils.format_cell(cell as xlsx.CellObject),
-            ).trim(),
-          };
-        })
-        .filter((cell) => cell.value.length > 0)
-        .sort((left, right) =>
-          left.row === right.row
-            ? left.column - right.column
-            : left.row - right.row,
-        );
-      sheetCells.set(sheetName, cells);
+      const cells = sheetCells.get(sheetName) || [];
       exclusionText.push(...cells.map((cell) => cell.value));
     }
 
@@ -656,7 +831,12 @@ export async function processExcelToPdf(
           return raw.length > 0 ? raw : `Column ${toExcelColumnLabel(column)}`;
         });
         const normalizedRows = matchedRows.map((row) =>
-          columns.map((column) => row.get(column) || ""),
+          columns.map((column, colIdx) => {
+            const value = row.get(column) || "";
+            return isHtmlBodyColumn(normalizedHeaders[colIdx])
+              ? normalizeHtmlSpreadsheetBody(value)
+              : value;
+          }),
         );
 
         const sheetColumns = sheet["!cols"] || [];
@@ -802,10 +982,12 @@ export async function convertToPdfBatch(
       subject_email: true,
       subject_personal_email: true,
       subject_aliases: true,
+      case_request: { select: { case: { select: { case_type: true } } } },
     },
   });
 
   if (!row?.filepath) throw new Error(`File ID not found: ${fileId}`);
+  const isClientCase = row.case_request?.case.case_type === "client";
 
   const stagingPath =
     process.env.STAGING_PATH || "/Users/rgomes/Projects/staging-area";
@@ -1048,8 +1230,9 @@ export async function convertToPdfBatch(
             // Bypass keyword filter when email was addressed to the subject's personal email.
             const toValues = getAddressValues(parsed.to);
             const bypassAttachmentKeywords =
-              subjectPersonalEmail.length > 0 &&
-              toValues.includes(subjectPersonalEmail);
+              isClientCase ||
+              (subjectPersonalEmail.length > 0 &&
+                toValues.includes(subjectPersonalEmail));
             const processNestedAttachments = async (
               attachments: Attachment[],
               currentBaseName: string,
@@ -1082,18 +1265,6 @@ export async function convertToPdfBatch(
       // has been verified and its attachment pass finished, reclaim it now so
       // a long Render phase does not hold every original until the last email.
       if (rendered) {
-        // The PDF is closed and verified at this point, so it is safe to send
-        // independently while later emails continue rendering.
-        queueSharePointArtifacts(fileId, [emailPdfPath])
-          .then((queued) => {
-            if (queued > 0) startSharePointArtifactWorker();
-          })
-          .catch((error) =>
-            console.error(
-              "[Converter] Could not queue SharePoint artifact:",
-              error,
-            ),
-          );
         try {
           fs.rmSync(emlPath, { force: true });
         } catch (error) {
@@ -1216,6 +1387,14 @@ export async function convertToPdfBatch(
           pdf_status: "completed",
           pdf_duration_ms: durationMs,
           pdf_processed: emlFiles.length,
+          ...(isClientCase
+            ? {
+                upload_status: "idle",
+                upload_total: 0,
+                upload_uploaded: 0,
+                upload_error: null,
+              }
+            : {}),
         },
       }),
       ...(siblingIds.length > 0
@@ -1238,14 +1417,16 @@ export async function convertToPdfBatch(
       .readdirSync(deliverablesDir, { recursive: true })
       .map((entry) => path.join(deliverablesDir, String(entry)))
       .filter((entry) => fs.existsSync(entry) && fs.statSync(entry).isFile());
-    try {
-      const queued = await queueSharePointArtifacts(fileId, finalized);
-      if (queued > 0) startSharePointArtifactWorker();
-    } catch (error) {
-      console.error(
-        "[Converter] Could not queue final SharePoint artifacts:",
-        error,
-      );
+    if (!isClientCase) {
+      try {
+        const queued = await queueSharePointArtifacts(fileId, finalized);
+        if (queued > 0) startSharePointArtifactWorker();
+      } catch (error) {
+        console.error(
+          "[Converter] Could not queue final SharePoint artifacts:",
+          error,
+        );
+      }
     }
     await archiveCompletedCase(fileId);
     // Once Render succeeds, the final PDFs no longer depend on raw EMLs or

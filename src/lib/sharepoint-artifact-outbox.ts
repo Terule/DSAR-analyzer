@@ -41,9 +41,26 @@ export async function queueSharePointArtifacts(
 ): Promise<number> {
   const row = await prisma.processedFile.findUnique({
     where: { id: fileId },
-    select: { filepath: true },
+    select: {
+      filepath: true,
+      case_request: { select: { case: { select: { case_type: true } } } },
+    },
   });
   if (!row?.filepath) return 0;
+  // Client deliverables are sent manually to OneTrust. This guard protects
+  // every caller, including legacy render and recovery paths.
+  if (row.case_request?.case.case_type === "client") {
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: {
+        upload_status: "idle",
+        upload_total: 0,
+        upload_uploaded: 0,
+        upload_error: null,
+      },
+    });
+    return 0;
+  }
   const outputRoot = process.env.EXTRACTED_PATH;
   if (!outputRoot) throw new Error("EXTRACTED_PATH is not configured.");
   const requestKey = getCaseKey(row.filepath);

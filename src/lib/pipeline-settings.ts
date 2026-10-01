@@ -28,6 +28,16 @@ export interface AiBatchSettings {
   hasAzureTenantId?: boolean;
   hasAzureClientId?: boolean;
   hasAzureClientSecret?: boolean;
+  oneTrustTenantUrl: string;
+  oneTrustTemplateId: string;
+  oneTrustPublicWebFormUrl: string;
+  oneTrustLanguage: string;
+  oneTrustRequestType: string;
+  oneTrustSubjectType: string;
+  oneTrustDateRaisedFieldKey: string;
+  oneTrustSystemLabel: string;
+  hasOneTrustClientId?: boolean;
+  hasOneTrustClientSecret?: boolean;
 }
 
 function normalizeOptionalUrl(value: string): string {
@@ -37,6 +47,16 @@ function normalizeOptionalUrl(value: string): string {
   const url = new URL(trimmed);
   if (url.protocol !== "https:" || !url.hostname.endsWith(".sharepoint.com")) {
     throw new Error("SharePoint site must be an HTTPS sharepoint.com URL.");
+  }
+  return url.toString().replace(/\/$/, "");
+}
+
+function normalizeOneTrustUrl(value: string): string {
+  const trimmed = value.trim();
+  if (!trimmed) return "";
+  const url = new URL(trimmed);
+  if (url.protocol !== "https:" || !url.hostname.endsWith(".onetrust.com")) {
+    throw new Error("OneTrust tenant must be an HTTPS onetrust.com URL.");
   }
   return url.toString().replace(/\/$/, "");
 }
@@ -76,6 +96,24 @@ export function validateAiBatchSettings(
   if ((sharePointFolderId || sharePointFolderPath) && !sharePointSiteUrl) {
     throw new Error("Configure a SharePoint site before selecting a folder.");
   }
+  const oneTrustTenantUrl = normalizeOneTrustUrl(input.oneTrustTenantUrl || "");
+  const oneTrustTemplateId = input.oneTrustTemplateId?.trim() || "";
+  const oneTrustPublicWebFormUrl = normalizeOneTrustUrl(
+    input.oneTrustPublicWebFormUrl || "",
+  );
+  const oneTrustLanguage = input.oneTrustLanguage?.trim() || "en-gb";
+  const oneTrustRequestType = "RequestType3";
+  const oneTrustSubjectType =
+    input.oneTrustSubjectType?.trim() || "SubjectType3";
+  const oneTrustDateRaisedFieldKey =
+    input.oneTrustDateRaisedFieldKey?.trim() || "formField81";
+  const oneTrustSystemLabel = input.oneTrustSystemLabel?.trim() || "AIDA";
+  // Only user-supplied values count: request/subject type always have defaults.
+  if (oneTrustTemplateId && !oneTrustTenantUrl) {
+    throw new Error(
+      "Configure a OneTrust tenant before saving OneTrust defaults.",
+    );
+  }
 
   return {
     maxTokensPerBatch,
@@ -89,6 +127,16 @@ export function validateAiBatchSettings(
     hasAzureTenantId: input.hasAzureTenantId,
     hasAzureClientId: input.hasAzureClientId,
     hasAzureClientSecret: input.hasAzureClientSecret,
+    oneTrustTenantUrl,
+    oneTrustTemplateId,
+    oneTrustPublicWebFormUrl,
+    oneTrustLanguage,
+    oneTrustRequestType,
+    oneTrustSubjectType,
+    oneTrustDateRaisedFieldKey,
+    oneTrustSystemLabel,
+    hasOneTrustClientId: input.hasOneTrustClientId,
+    hasOneTrustClientSecret: input.hasOneTrustClientSecret,
   };
 }
 
@@ -114,6 +162,17 @@ export async function getAiBatchSettings(): Promise<AiBatchSettings> {
     hasAzureTenantId: Boolean(row.azure_tenant_id_encrypted),
     hasAzureClientId: Boolean(row.azure_client_id_encrypted),
     hasAzureClientSecret: Boolean(row.azure_client_secret_encrypted),
+    oneTrustTenantUrl: row.onetrust_tenant_url || "",
+    oneTrustTemplateId: row.onetrust_template_id || "",
+    oneTrustPublicWebFormUrl: row.onetrust_public_webform_url || "",
+    oneTrustLanguage: row.onetrust_language || "en-gb",
+    oneTrustRequestType: "RequestType3",
+    oneTrustSubjectType: row.onetrust_subject_type || "SubjectType3",
+    oneTrustDateRaisedFieldKey:
+      row.onetrust_date_raised_field_key || "formField81",
+    oneTrustSystemLabel: row.onetrust_system_label || "AIDA",
+    hasOneTrustClientId: Boolean(row.onetrust_client_id_encrypted),
+    hasOneTrustClientSecret: Boolean(row.onetrust_client_secret_encrypted),
   };
 }
 
@@ -132,6 +191,15 @@ export async function updateAiBatchSettings(
       sharepoint_folder_path: settings.sharePointFolderPath || null,
       staging_root: settings.stagingRoot,
       deliverables_root: settings.deliverablesRoot,
+      onetrust_tenant_url: settings.oneTrustTenantUrl || null,
+      onetrust_template_id: settings.oneTrustTemplateId || null,
+      onetrust_public_webform_url: settings.oneTrustPublicWebFormUrl || null,
+      onetrust_language: settings.oneTrustLanguage,
+      onetrust_request_type: settings.oneTrustRequestType || null,
+      onetrust_subject_type: settings.oneTrustSubjectType || null,
+      onetrust_date_raised_field_key:
+        settings.oneTrustDateRaisedFieldKey || null,
+      onetrust_system_label: settings.oneTrustSystemLabel,
     },
     update: {
       ai_max_tokens_per_batch: settings.maxTokensPerBatch,
@@ -141,6 +209,15 @@ export async function updateAiBatchSettings(
       sharepoint_folder_path: settings.sharePointFolderPath || null,
       staging_root: settings.stagingRoot,
       deliverables_root: settings.deliverablesRoot,
+      onetrust_tenant_url: settings.oneTrustTenantUrl || null,
+      onetrust_template_id: settings.oneTrustTemplateId || null,
+      onetrust_public_webform_url: settings.oneTrustPublicWebFormUrl || null,
+      onetrust_language: settings.oneTrustLanguage,
+      onetrust_request_type: settings.oneTrustRequestType || null,
+      onetrust_subject_type: settings.oneTrustSubjectType || null,
+      onetrust_date_raised_field_key:
+        settings.oneTrustDateRaisedFieldKey || null,
+      onetrust_system_label: settings.oneTrustSystemLabel,
     },
   });
   return {
@@ -155,5 +232,16 @@ export async function updateAiBatchSettings(
     hasAzureTenantId: Boolean(row.azure_tenant_id_encrypted),
     hasAzureClientId: Boolean(row.azure_client_id_encrypted),
     hasAzureClientSecret: Boolean(row.azure_client_secret_encrypted),
+    oneTrustTenantUrl: row.onetrust_tenant_url || "",
+    oneTrustTemplateId: row.onetrust_template_id || "",
+    oneTrustPublicWebFormUrl: row.onetrust_public_webform_url || "",
+    oneTrustLanguage: row.onetrust_language || "en-gb",
+    oneTrustRequestType: "RequestType3",
+    oneTrustSubjectType: row.onetrust_subject_type || "SubjectType3",
+    oneTrustDateRaisedFieldKey:
+      row.onetrust_date_raised_field_key || "formField81",
+    oneTrustSystemLabel: row.onetrust_system_label || "AIDA",
+    hasOneTrustClientId: Boolean(row.onetrust_client_id_encrypted),
+    hasOneTrustClientSecret: Boolean(row.onetrust_client_secret_encrypted),
   };
 }

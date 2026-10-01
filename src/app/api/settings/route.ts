@@ -28,13 +28,38 @@ export async function PATCH(request: Request) {
       azureTenantId?: string;
       azureClientId?: string;
       azureClientSecret?: string;
+      oneTrustTenantUrl?: string;
+      oneTrustTemplateId?: string;
+      oneTrustPublicWebFormUrl?: string;
+      oneTrustLanguage?: string;
+      oneTrustRequestType?: string;
+      oneTrustSubjectType?: string;
+      oneTrustDateRaisedFieldKey?: string;
+      oneTrustSystemLabel?: string;
+      oneTrustClientId?: string;
+      oneTrustClientSecret?: string;
     };
+    const current = await getAiBatchSettings();
     const settings = await updateAiBatchSettings({
       maxTokensPerBatch: Number(body.maxTokensPerBatch),
       maxConcurrentBatches: Number(body.maxConcurrentBatches),
-      sharePointSiteUrl: body.sharePointSiteUrl || "",
-      sharePointFolderId: body.sharePointFolderId || "",
-      sharePointFolderPath: body.sharePointFolderPath || "",
+      sharePointSiteUrl: body.sharePointSiteUrl ?? current.sharePointSiteUrl,
+      sharePointFolderId: body.sharePointFolderId ?? current.sharePointFolderId,
+      sharePointFolderPath:
+        body.sharePointFolderPath ?? current.sharePointFolderPath,
+      oneTrustTenantUrl: body.oneTrustTenantUrl ?? current.oneTrustTenantUrl,
+      oneTrustTemplateId: body.oneTrustTemplateId ?? current.oneTrustTemplateId,
+      oneTrustPublicWebFormUrl:
+        body.oneTrustPublicWebFormUrl ?? current.oneTrustPublicWebFormUrl,
+      oneTrustLanguage: body.oneTrustLanguage ?? current.oneTrustLanguage,
+      oneTrustRequestType:
+        body.oneTrustRequestType ?? current.oneTrustRequestType,
+      oneTrustSubjectType:
+        body.oneTrustSubjectType ?? current.oneTrustSubjectType,
+      oneTrustDateRaisedFieldKey:
+        body.oneTrustDateRaisedFieldKey ?? current.oneTrustDateRaisedFieldKey,
+      oneTrustSystemLabel:
+        body.oneTrustSystemLabel ?? current.oneTrustSystemLabel,
     });
     const encrypted = await Promise.all([
       body.openAiKey?.trim()
@@ -49,6 +74,12 @@ export async function PATCH(request: Request) {
       body.azureClientSecret?.trim()
         ? encryptSetting(body.azureClientSecret.trim())
         : undefined,
+      body.oneTrustClientId?.trim()
+        ? encryptSetting(body.oneTrustClientId.trim())
+        : undefined,
+      body.oneTrustClientSecret?.trim()
+        ? encryptSetting(body.oneTrustClientSecret.trim())
+        : undefined,
     ]);
     if (encrypted.some(Boolean)) {
       await prisma.pipelineSettings.update({
@@ -59,6 +90,12 @@ export async function PATCH(request: Request) {
           ...(encrypted[2] ? { azure_client_id_encrypted: encrypted[2] } : {}),
           ...(encrypted[3]
             ? { azure_client_secret_encrypted: encrypted[3] }
+            : {}),
+          ...(encrypted[4]
+            ? { onetrust_client_id_encrypted: encrypted[4] }
+            : {}),
+          ...(encrypted[5]
+            ? { onetrust_client_secret_encrypted: encrypted[5] }
             : {}),
         },
       });

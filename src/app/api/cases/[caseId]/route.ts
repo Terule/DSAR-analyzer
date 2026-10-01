@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { cancelOpenAiBatchesForFiles } from "@/lib/ai";
-import { configureManagedCase, removeRequestFolders } from "@/lib/cases";
+import {
+  configureManagedCase,
+  removeEmptyCaseRoots,
+  removeRequestFolders,
+} from "@/lib/cases";
 import {
   cancelJobsForFiles,
   countPendingCancellation,
@@ -88,7 +92,10 @@ export async function DELETE(
         requests: { include: { processed_files: { select: { id: true } } } },
       },
     });
-    if (!item) throw new Error("Case not found.");
+    // DELETE is idempotent: a second click or a delayed retry after the first
+    // request succeeds must not surface Prisma's missing-record error.
+    if (!item)
+      return NextResponse.json({ success: true, alreadyDeleted: true });
     if (confirmation !== item.name)
       throw new Error("Type the exact case name to confirm deletion.");
     if (
@@ -103,6 +110,7 @@ export async function DELETE(
     );
     if (ids.length) await cancelJobsForFiles(ids, "Deleted by user");
     await removeRequestFolders(item.requests, true);
+    await removeEmptyCaseRoots(item.requests);
     await prisma.$transaction([
       prisma.sharePointUploadArtifact.deleteMany({
         where: { source_file_id: { in: ids } },
@@ -110,7 +118,11 @@ export async function DELETE(
       prisma.email.deleteMany({ where: { file_id: { in: ids } } }),
       prisma.aiBatchRun.deleteMany({ where: { coordinator_id: { in: ids } } }),
     ]);
-    await prisma.managedCase.delete({ where: { id: caseId } });
+    const deleted = await prisma.managedCase.deleteMany({
+      where: { id: caseId },
+    });
+    if (deleted.count === 0)
+      return NextResponse.json({ success: true, alreadyDeleted: true });
     return NextResponse.json({ success: true });
   } catch (error) {
     return NextResponse.json(

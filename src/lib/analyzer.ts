@@ -77,6 +77,7 @@ export async function analyzePstDuplicates(
       filepath: true,
       subject_email: true,
       subject_personal_email: true,
+      case_request: { select: { case: { select: { case_type: true } } } },
     },
   });
   if (!row?.filepath) throw new Error("File metadata not found.");
@@ -87,6 +88,7 @@ export async function analyzePstDuplicates(
   //   and are routed to Emails/Warning/ by the converter.
   const subjectEmail = (row.subject_personal_email || "").trim().toLowerCase();
   const subjectCompanyEmail = (row.subject_email || "").trim().toLowerCase();
+  const isClientCase = row.case_request?.case.case_type === "client";
 
   await prisma.processedFile.update({
     where: { id: fileId },
@@ -403,7 +405,11 @@ export async function analyzePstDuplicates(
       fromAddresses.includes(subjectCompanyEmail) &&
       toAddresses.includes(subjectEmail);
 
-    if (PRIVILEGED_KEYWORDS_RE.test(subject) && !sentToSubjectEmail) {
+    if (
+      !isClientCase &&
+      PRIVILEGED_KEYWORDS_RE.test(subject) &&
+      !sentToSubjectEmail
+    ) {
       const emailId = crypto.randomUUID();
       const sentDate = parsed.date ? parsed.date.toISOString() : "no-date";
       await prisma.email.create({
@@ -449,7 +455,7 @@ export async function analyzePstDuplicates(
         is_duplicate: 0,
         parent_email_hash: parentHash,
         is_attachment: parentHash ? 1 : 0,
-        ...(isSelfForward
+        ...(!isClientCase && isSelfForward
           ? {
               ai_decision: "warning",
               ai_reason:

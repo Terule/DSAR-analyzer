@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { isPstFilename } from "./file-types";
 import {
   insertCaseHistorySnapshots,
   insertRunHistorySnapshot,
@@ -25,7 +26,7 @@ async function getAllPstFiles(
 
     if (entry.isDirectory()) {
       arrayOfFiles = await getAllPstFiles(fullPath, arrayOfFiles);
-    } else if (entry.name.toLowerCase().endsWith(".pst")) {
+    } else if (isPstFilename(entry.name)) {
       arrayOfFiles.push(fullPath);
     }
   }

@@ -91,6 +91,18 @@ export interface AiBatchSettings {
   azureTenantId?: string;
   azureClientId?: string;
   azureClientSecret?: string;
+  oneTrustTenantUrl?: string;
+  oneTrustTemplateId?: string;
+  oneTrustPublicWebFormUrl?: string;
+  oneTrustLanguage?: string;
+  oneTrustRequestType?: string;
+  oneTrustSubjectType?: string;
+  oneTrustDateRaisedFieldKey?: string;
+  oneTrustSystemLabel?: string;
+  hasOneTrustClientId?: boolean;
+  hasOneTrustClientSecret?: boolean;
+  oneTrustClientId?: string;
+  oneTrustClientSecret?: string;
 }
 
 export interface SharePointFolder {

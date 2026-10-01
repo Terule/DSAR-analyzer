@@ -5,6 +5,7 @@ import {
   ChevronDown,
   Cpu,
   Database,
+  ExternalLink,
   Eye,
   EyeOff,
   FileText,
@@ -15,8 +16,10 @@ import {
   Settings,
   ShieldCheck,
   Trash2,
+  Upload,
 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -45,6 +48,7 @@ type RequestItem = {
   id: string;
   name: string;
   scope: Scope;
+  case_type?: "employee" | "client";
   status: string;
   pst_count: number;
   pst_size_bytes: number;
@@ -55,7 +59,7 @@ type RequestItem = {
   total_emails: number;
   emails_exported: number;
   phaseProgress?: Record<
-    "parse" | "extract" | "ai" | "render" | "files",
+    "parse" | "extract" | "ai" | "render" | "files" | "upload",
     PhaseState
   >;
   phaseTiming?: PhaseTiming;
@@ -66,6 +70,13 @@ type CaseItem = {
   subject_name: string;
   subject_email: string;
   status: string;
+  case_type: "employee" | "client";
+  onetrust_status: string;
+  onetrust_request_id?: string | null;
+  onetrust_url?: string | null;
+  onetrust_error?: string | null;
+  onetrust_uploaded: number;
+  onetrust_total: number;
   requests: RequestItem[];
 };
 
@@ -144,6 +155,9 @@ function phaseCards(request: RequestItem) {
     );
   }
   if (request.scope !== "mail") phases.push({ name: "Files", key: "files" });
+  if (request.case_type !== "client") {
+    phases.push({ name: "Upload", key: "upload" });
+  }
   return phases.map((phase) => {
     const state = request.phaseProgress?.[phase.key];
     const complete = state?.status === "completed";
@@ -164,14 +178,20 @@ function phaseCards(request: RequestItem) {
       name: phase.name,
       progress,
       detail:
-        state && state.total > 0 ? `${state.done}/${state.total}` : undefined,
+        state && state.total > 0
+          ? phase.key === "ai"
+            ? `${state.done}/${state.total} batches complete`
+            : `${state.done}/${state.total}`
+          : undefined,
       label: complete
         ? "Complete"
         : state?.status === "failed"
           ? "Failed"
-          : active
-            ? "In progress"
-            : "Waiting",
+          : phase.key === "ai" && state?.status === "batch_ready"
+            ? "Waiting on OpenAI"
+            : active
+              ? "In progress"
+              : "Waiting",
     };
   });
 }
@@ -181,9 +201,9 @@ export function CaseManager() {
   const [cases, setCases] = useState<CaseItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [message, setMessage] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [caseName, setCaseName] = useState("");
+  const [caseType, setCaseType] = useState<"employee" | "client">("employee");
   const [configureTarget, setConfigureTarget] = useState<CaseItem | null>(null);
   const [newRequestFor, setNewRequestFor] = useState<string | null>(null);
   const [configuration, setConfiguration] = useState(initialConfiguration);
@@ -212,12 +232,18 @@ export function CaseManager() {
         const response = await fetch(`/api/cases?status=${tab}`, {
           cache: "no-store",
         });
-        const data = await response.json();
+        const body = await response.text();
+        let data: { cases?: CaseItem[]; error?: string } = {};
+        try {
+          data = body ? (JSON.parse(body) as typeof data) : {};
+        } catch {
+          throw new Error("The case list returned an invalid response.");
+        }
         if (!response.ok)
           throw new Error(data.error || "Unable to load cases.");
-        setCases(data.cases);
+        setCases(data.cases || []);
       } catch (error) {
-        setMessage(
+        toast.error(
           error instanceof Error ? error.message : "Unable to load cases.",
         );
       } finally {
@@ -234,8 +260,10 @@ export function CaseManager() {
   useEffect(() => {
     if (
       !cases.some((item) =>
-        item.requests.some((request) =>
-          ["queued", "running"].includes(request.status),
+        item.requests.some(
+          (request) =>
+            ["queued", "running"].includes(request.status) ||
+            request.phaseProgress?.upload.status === "processing",
         ),
       )
     )
@@ -273,7 +301,6 @@ export function CaseManager() {
   }, [tab]);
   const call = async (key: string, url: string, init?: RequestInit) => {
     setBusy(key);
-    setMessage(null);
     try {
       const response = await fetch(url, {
         ...init,
@@ -287,7 +314,7 @@ export function CaseManager() {
       await refresh();
       return data;
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : "Request failed.");
+      toast.error(error instanceof Error ? error.message : "Request failed.");
       return null;
     } finally {
       setBusy(null);
@@ -296,10 +323,11 @@ export function CaseManager() {
   const create = async () => {
     const result = await call("create", "/api/cases", {
       method: "POST",
-      body: JSON.stringify({ name: caseName }),
+      body: JSON.stringify({ name: caseName, caseType }),
     });
     if (result) {
       setCaseName("");
+      setCaseType("employee");
       setCreateOpen(false);
     }
   };
@@ -340,6 +368,26 @@ export function CaseManager() {
       setNewRequestFor(null);
     }
   };
+  const sendToOneTrust = async (item: CaseItem) => {
+    const result = await call(
+      `onetrust-${item.id}`,
+      `/api/cases/${item.id}/onetrust`,
+      { method: "POST" },
+    );
+    if (result) {
+      const parts = [
+        result.uploaded ? `${result.uploaded} uploaded` : null,
+        result.skipped ? `${result.skipped} oversized` : null,
+        result.failed ? `${result.failed} failed` : null,
+      ].filter(Boolean);
+      const detail = parts.join(", ") || "no files to upload";
+      if (result.status === "completed") {
+        toast.success(`OneTrust completed: ${detail}.`);
+      } else {
+        toast.warning(`OneTrust ${result.status}: ${detail}.`);
+      }
+    }
+  };
   const stopBeforeDelete = async () => {
     if (!deleteTarget) return;
     const result = await call(
@@ -360,11 +408,11 @@ export function CaseManager() {
             }
           : null,
       );
-      setMessage(
+      toast.success(
         "All work has stopped. You can now permanently delete the case.",
       );
     } else if (result) {
-      setMessage(
+      toast.info(
         "Stopping background workers. Select Stop all work again to check progress.",
       );
     }
@@ -441,11 +489,6 @@ export function CaseManager() {
             Archived cases
           </Button>
         </div>
-        {message && (
-          <p className="rounded-lg border border-rose-500/40 bg-rose-950/40 p-3 text-sm text-rose-200">
-            {message}
-          </p>
-        )}
         {loading ? (
           <div className="flex justify-center py-24">
             <Loader2 className="animate-spin text-indigo-300" />
@@ -455,7 +498,7 @@ export function CaseManager() {
             No {tab} cases.
           </div>
         ) : (
-          <div className="grid items-start gap-5 lg:grid-cols-2">
+          <div className="flex flex-col gap-5">
             {tab === "active" && (
               <button
                 type="button"
@@ -471,298 +514,375 @@ export function CaseManager() {
                 <span className="text-sm">Add a case, then configure it</span>
               </button>
             )}
-            {cases.map((item) => {
-              const configured = Boolean(
-                item.subject_name.trim() && item.subject_email.trim(),
-              );
-              const collapsed = collapsedCaseIds.has(item.id);
-              return (
-                // biome-ignore lint/a11y/useSemanticElements: The card contains its own buttons, so it cannot be a native button.
-                <div
-                  key={item.id}
-                  className={`relative rounded-2xl bg-[#1a2742] p-6 ${collapsed ? "h-52" : ""}`}
-                  onClick={(event) => {
-                    if (
-                      (event.target as HTMLElement).closest(
-                        "button,input,select,label",
+            <div className="grid items-start gap-5 lg:grid-cols-2">
+              {cases.map((item) => {
+                const configured = Boolean(
+                  item.subject_name.trim() && item.subject_email.trim(),
+                );
+                const collapsed = collapsedCaseIds.has(item.id);
+                return (
+                  // biome-ignore lint/a11y/useSemanticElements: The card contains its own buttons, so it cannot be a native button.
+                  <div
+                    key={item.id}
+                    className={`relative rounded-2xl bg-[#1a2742] p-6 ${collapsed ? "h-52" : ""}`}
+                    onClick={(event) => {
+                      if (
+                        (event.target as HTMLElement).closest(
+                          "button,input,select,label",
+                        )
                       )
-                    )
-                      return;
-                    const requestCard = (
-                      event.target as HTMLElement
-                    ).closest<HTMLElement>("[data-request-id]");
-                    if (requestCard) {
-                      setStatisticsRequest(
-                        item.requests.find(
-                          (request) =>
-                            request.id === requestCard.dataset.requestId,
-                        ) || null,
-                      );
-                    } else setStatisticsRequest(null);
-                    setStatisticsTarget(item);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter" || event.key === " ") {
-                      event.preventDefault();
+                        return;
+                      const requestCard = (
+                        event.target as HTMLElement
+                      ).closest<HTMLElement>("[data-request-id]");
+                      if (requestCard) {
+                        setStatisticsRequest(
+                          item.requests.find(
+                            (request) =>
+                              request.id === requestCard.dataset.requestId,
+                          ) || null,
+                        );
+                      } else setStatisticsRequest(null);
                       setStatisticsTarget(item);
-                    }
-                  }}
-                  role="button"
-                  tabIndex={0}
-                  aria-label={`View statistics for ${item.name}`}
-                >
-                  <div className="pr-24">
-                    <div>
-                      <div className="mb-2 inline-flex rounded-full border border-indigo-400/20 bg-indigo-500/10 px-2.5 py-1 text-xs font-bold uppercase tracking-wider text-indigo-200">
-                        {item.status}
+                    }}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" || event.key === " ") {
+                        event.preventDefault();
+                        setStatisticsTarget(item);
+                      }
+                    }}
+                    role="button"
+                    tabIndex={0}
+                    aria-label={`View statistics for ${item.name}`}
+                  >
+                    <div className="pr-24">
+                      <div>
+                        <div className="mb-2 inline-flex rounded-full border border-indigo-400/20 bg-indigo-500/10 px-2.5 py-1 text-xs font-bold uppercase tracking-wider text-indigo-200">
+                          {item.status}
+                        </div>
+                        <span className="mb-2 ml-2 inline-flex rounded-full border border-slate-500/30 bg-slate-800 px-2.5 py-1 text-xs font-bold uppercase tracking-wider text-slate-300">
+                          {item.case_type}
+                        </span>
+                        <h2 className="text-2xl font-bold tracking-tight">
+                          {privacyMode ? maskCaseName(item.name) : item.name}
+                        </h2>
+                        <p className="text-sm text-slate-400">
+                          {configured
+                            ? privacyMode
+                              ? maskSubjectInformation(
+                                  item.subject_name,
+                                  item.subject_email,
+                                )
+                              : `${item.subject_name} · ${item.subject_email}`
+                            : "Draft case — configuration is required before it can run."}
+                        </p>
                       </div>
-                      <h2 className="text-2xl font-bold tracking-tight">
-                        {privacyMode ? maskCaseName(item.name) : item.name}
-                      </h2>
-                      <p className="text-sm text-slate-400">
-                        {configured
-                          ? privacyMode
-                            ? maskSubjectInformation(
-                                item.subject_name,
-                                item.subject_email,
-                              )
-                            : `${item.subject_name} · ${item.subject_email}`
-                          : "Draft case — configuration is required before it can run."}
-                      </p>
-                    </div>
-                    {tab === "active" && (
-                      <div className="mt-4 flex flex-wrap gap-2">
-                        {!configured && (
+                      {tab === "active" && (
+                        <div className="mt-4 flex flex-wrap gap-2">
+                          {!configured && (
+                            <Button
+                              type="button"
+                              onClick={() => setConfigureTarget(item)}
+                            >
+                              <Settings data-icon="inline-start" /> Configure
+                              case
+                            </Button>
+                          )}
                           <Button
                             type="button"
-                            onClick={() => setConfigureTarget(item)}
+                            variant="outline"
+                            className="border-emerald-400/40 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20 hover:text-white disabled:border-slate-800 disabled:bg-slate-900/45 disabled:text-slate-600"
+                            disabled={
+                              !configured ||
+                              (item.case_type === "client" &&
+                                item.requests.length > 0)
+                            }
+                            onClick={() => setNewRequestFor(item.id)}
                           >
-                            <Settings data-icon="inline-start" /> Configure case
+                            <Plus data-icon="inline-start" />{" "}
+                            {item.requests.length
+                              ? item.case_type === "client"
+                                ? "Client request added"
+                                : "Add request"
+                              : "Add first request"}
                           </Button>
-                        )}
+                          {item.case_type === "client" && (
+                            <Button
+                              type="button"
+                              variant="outline"
+                              className="border-sky-400/45 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20 hover:text-white disabled:border-slate-800 disabled:bg-slate-900/45 disabled:text-slate-600"
+                              disabled={
+                                busy === `onetrust-${item.id}` ||
+                                item.requests.length !== 1 ||
+                                item.requests[0]?.status !== "completed"
+                              }
+                              onClick={() => void sendToOneTrust(item)}
+                              title={
+                                item.requests[0]?.status !== "completed"
+                                  ? "Complete the client request before sending deliverables to OneTrust"
+                                  : "Create or update the OneTrust Results Summary"
+                              }
+                            >
+                              {busy === `onetrust-${item.id}` ? (
+                                <Loader2
+                                  data-icon="inline-start"
+                                  className="animate-spin"
+                                />
+                              ) : (
+                                <Upload data-icon="inline-start" />
+                              )}
+                              {item.onetrust_status === "completed"
+                                ? "Sync OneTrust"
+                                : "Send to OneTrust"}
+                            </Button>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                    {tab === "active" && (
+                      <div className="absolute right-5 top-5 flex gap-1 p-1">
                         <Button
                           type="button"
-                          variant="outline"
-                          className="border-emerald-400/40 bg-emerald-500/10 text-emerald-100 hover:bg-emerald-500/20 hover:text-white disabled:border-slate-800 disabled:bg-slate-900/45 disabled:text-slate-600"
-                          disabled={!configured}
-                          onClick={() => setNewRequestFor(item.id)}
+                          variant="ghost"
+                          size="icon-sm"
+                          onClick={() =>
+                            setCollapsedCaseIds((current) => {
+                              const next = new Set(current);
+                              if (next.has(item.id)) next.delete(item.id);
+                              else next.add(item.id);
+                              return next;
+                            })
+                          }
+                          aria-expanded={!collapsed}
+                          aria-controls={`case-content-${item.id}`}
+                          title={collapsed ? "Expand case" : "Collapse case"}
+                          aria-label={
+                            collapsed ? "Expand case" : "Collapse case"
+                          }
                         >
-                          <Plus data-icon="inline-start" />{" "}
-                          {item.requests.length
-                            ? "Add request"
-                            : "Add first request"}
+                          <ChevronDown
+                            className={
+                              collapsed
+                                ? "-rotate-90 transition-transform"
+                                : "transition-transform"
+                            }
+                          />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="ghost"
+                          size="icon-sm"
+                          disabled={
+                            !configured ||
+                            !item.requests.length ||
+                            item.requests.some(
+                              (request) => request.status !== "completed",
+                            )
+                          }
+                          onClick={() => setArchiveTarget(item)}
+                          title="Archive case"
+                          aria-label="Archive case"
+                        >
+                          <Archive />
+                        </Button>
+                        <Button
+                          type="button"
+                          variant="destructive"
+                          size="icon-sm"
+                          disabled={privacyMode}
+                          onClick={() => {
+                            setDeleteConfirmation("");
+                            setDeleteTarget(item);
+                          }}
+                          title={
+                            privacyMode
+                              ? "Show case names before deleting a case"
+                              : "Delete case"
+                          }
+                          aria-label="Delete case"
+                        >
+                          <Trash2 />
                         </Button>
                       </div>
                     )}
-                  </div>
-                  {tab === "active" && (
-                    <div className="absolute right-5 top-5 flex gap-1 p-1">
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        onClick={() =>
-                          setCollapsedCaseIds((current) => {
-                            const next = new Set(current);
-                            if (next.has(item.id)) next.delete(item.id);
-                            else next.add(item.id);
-                            return next;
-                          })
-                        }
-                        aria-expanded={!collapsed}
-                        aria-controls={`case-content-${item.id}`}
-                        title={collapsed ? "Expand case" : "Collapse case"}
-                        aria-label={collapsed ? "Expand case" : "Collapse case"}
-                      >
-                        <ChevronDown
-                          className={
-                            collapsed
-                              ? "-rotate-90 transition-transform"
-                              : "transition-transform"
-                          }
-                        />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="ghost"
-                        size="icon-sm"
-                        disabled={
-                          !configured ||
-                          !item.requests.length ||
-                          item.requests.some(
-                            (request) => request.status !== "completed",
-                          )
-                        }
-                        onClick={() => setArchiveTarget(item)}
-                        title="Archive case"
-                        aria-label="Archive case"
-                      >
-                        <Archive />
-                      </Button>
-                      <Button
-                        type="button"
-                        variant="destructive"
-                        size="icon-sm"
-                        disabled={privacyMode}
-                        onClick={() => {
-                          setDeleteConfirmation("");
-                          setDeleteTarget(item);
-                        }}
-                        title={
-                          privacyMode
-                            ? "Show case names before deleting a case"
-                            : "Delete case"
-                        }
-                        aria-label="Delete case"
-                      >
-                        <Trash2 />
-                      </Button>
-                    </div>
-                  )}
-                  <div id={`case-content-${item.id}`} hidden={collapsed}>
-                    {!configured && (
-                      <div className="mt-5 rounded-xl border border-dashed border-indigo-400/35 bg-indigo-500/5 p-5">
-                        <p className="font-semibold text-indigo-100">
-                          Configuration required
-                        </p>
-                        <p className="mt-1 text-sm text-slate-400">
-                          Add the subject details, then create the first
-                          request. AIDA creates its scope-specific staging and
-                          deliverable folders when that request is added.
-                        </p>
-                      </div>
-                    )}
-                    {configured && item.requests.length === 0 && (
-                      <div className="mt-5 rounded-xl border border-dashed border-indigo-400/35 bg-indigo-500/5 p-5">
-                        <p className="font-semibold text-indigo-100">
-                          First request required
-                        </p>
-                        <p className="mt-1 text-sm text-slate-400">
-                          Add a request and choose its mail/files scope before
-                          AIDA can begin processing this case.
-                        </p>
-                      </div>
-                    )}
-                    <div className="mt-5 grid gap-3">
-                      {item.requests.map((request) => (
-                        <article
-                          key={request.id}
-                          data-request-id={request.id}
-                          className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4 shadow-inner shadow-slate-950/20"
-                        >
-                          <div className="flex flex-wrap items-center justify-between gap-3">
-                            <div>
-                              <h3 className="flex items-center gap-2 font-semibold">
-                                <span>{request.name}</span>
-                                <span className="rounded-full border border-indigo-400/20 bg-indigo-500/15 px-2 py-1 text-xs font-semibold text-indigo-200">
-                                  {request.scope}
-                                </span>
-                              </h3>
-                              <p className="mt-1 text-sm capitalize text-slate-400">
-                                {request.status}
-                              </p>
-                            </div>
-                            {tab === "active" && (
-                              <div className="flex gap-2">
-                                <Button
-                                  type="button"
-                                  size="sm"
-                                  disabled={
-                                    busy === request.id ||
-                                    !["ready", "failed"].includes(
-                                      request.status,
-                                    )
-                                  }
-                                  onClick={() =>
-                                    void call(
-                                      request.id,
-                                      `/api/requests/${request.id}/run`,
-                                      { method: "POST" },
-                                    )
-                                  }
-                                >
-                                  {busy === request.id ? (
-                                    <Loader2 className="animate-spin" />
-                                  ) : (
-                                    <Play />
-                                  )}{" "}
-                                  Run
-                                </Button>
-                                <Button
-                                  type="button"
-                                  variant="outline"
-                                  size="sm"
-                                  className="border-amber-400/45 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20 hover:text-white disabled:border-slate-800 disabled:bg-slate-900/45 disabled:text-slate-600"
-                                  disabled={busy === `reset-${request.id}`}
-                                  onClick={() =>
-                                    void call(
-                                      `reset-${request.id}`,
-                                      `/api/requests/${request.id}/reset`,
-                                      { method: "POST" },
-                                    )
-                                  }
-                                >
-                                  {busy === `reset-${request.id}` ? (
-                                    <Loader2 className="animate-spin" />
-                                  ) : (
-                                    <RefreshCw />
-                                  )}{" "}
-                                  Reset
-                                </Button>
+                    <div id={`case-content-${item.id}`} hidden={collapsed}>
+                      {!configured && (
+                        <div className="mt-5 rounded-xl border border-dashed border-indigo-400/35 bg-indigo-500/5 p-5">
+                          <p className="font-semibold text-indigo-100">
+                            Configuration required
+                          </p>
+                          <p className="mt-1 text-sm text-slate-400">
+                            Add the subject details, then create the first
+                            request. AIDA creates its scope-specific staging and
+                            deliverable folders when that request is added.
+                          </p>
+                        </div>
+                      )}
+                      {configured && item.requests.length === 0 && (
+                        <div className="mt-5 rounded-xl border border-dashed border-indigo-400/35 bg-indigo-500/5 p-5">
+                          <p className="font-semibold text-indigo-100">
+                            First request required
+                          </p>
+                          <p className="mt-1 text-sm text-slate-400">
+                            Add a request and choose its mail/files scope before
+                            AIDA can begin processing this case.
+                          </p>
+                        </div>
+                      )}
+                      {item.case_type === "client" &&
+                        item.onetrust_status !== "idle" && (
+                          <p className="mt-4 text-xs text-sky-200">
+                            OneTrust: {item.onetrust_status}
+                            {item.onetrust_request_id ? (
+                              <>
+                                {" · "}
+                                {item.onetrust_url ? (
+                                  <a
+                                    href={item.onetrust_url}
+                                    target="_blank"
+                                    rel="noreferrer"
+                                    className="inline-flex items-center gap-1 font-semibold underline underline-offset-2 hover:text-sky-100"
+                                  >
+                                    {item.onetrust_request_id}
+                                    <ExternalLink className="size-3" />
+                                  </a>
+                                ) : (
+                                  item.onetrust_request_id
+                                )}
+                              </>
+                            ) : null}
+                            {item.onetrust_total > 0
+                              ? ` · ${item.onetrust_uploaded}/${item.onetrust_total} files uploaded`
+                              : ""}
+                            {item.onetrust_error
+                              ? ` · ${item.onetrust_error}`
+                              : ""}
+                          </p>
+                        )}
+                      <div className="mt-5 grid gap-3">
+                        {item.requests.map((request) => (
+                          <article
+                            key={request.id}
+                            data-request-id={request.id}
+                            className="rounded-xl border border-slate-700/80 bg-slate-950/55 p-4 shadow-inner shadow-slate-950/20"
+                          >
+                            <div className="flex flex-wrap items-center justify-between gap-3">
+                              <div>
+                                <h3 className="flex items-center gap-2 font-semibold">
+                                  <span>{request.name}</span>
+                                  <span className="rounded-full border border-indigo-400/20 bg-indigo-500/15 px-2 py-1 text-xs font-semibold text-indigo-200">
+                                    {request.scope}
+                                  </span>
+                                </h3>
+                                <p className="mt-1 text-sm capitalize text-slate-400">
+                                  {request.status}
+                                </p>
                               </div>
-                            )}
-                          </div>
-                          <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
-                            {phaseCards(request).map((phase, index) => {
-                              const Icon = [
-                                Database,
-                                Archive,
-                                Cpu,
-                                FileText,
-                                FileText,
-                              ][index];
-                              return (
-                                <div
-                                  key={phase.name}
-                                  className="min-h-44 rounded-2xl border border-indigo-400/20 bg-slate-900/65 p-4 text-center"
-                                >
-                                  <Icon
-                                    className={
-                                      phase.progress === 100
-                                        ? "mx-auto size-6 text-emerald-300"
-                                        : "mx-auto size-6 text-indigo-300"
+                              {tab === "active" && (
+                                <div className="flex gap-2">
+                                  <Button
+                                    type="button"
+                                    size="sm"
+                                    disabled={
+                                      busy === request.id ||
+                                      !["ready", "failed"].includes(
+                                        request.status,
+                                      )
                                     }
-                                  />
-                                  <p className="mt-3 whitespace-nowrap text-xs font-bold tracking-[0.14em] text-slate-200">
-                                    {phase.name.toUpperCase()}
-                                  </p>
-                                  <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-800">
-                                    <div
+                                    onClick={() =>
+                                      void call(
+                                        request.id,
+                                        `/api/requests/${request.id}/run`,
+                                        { method: "POST" },
+                                      )
+                                    }
+                                  >
+                                    {busy === request.id ? (
+                                      <Loader2 className="animate-spin" />
+                                    ) : (
+                                      <Play />
+                                    )}{" "}
+                                    Run
+                                  </Button>
+                                  <Button
+                                    type="button"
+                                    variant="outline"
+                                    size="sm"
+                                    className="border-amber-400/45 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20 hover:text-white disabled:border-slate-800 disabled:bg-slate-900/45 disabled:text-slate-600"
+                                    disabled={busy === `reset-${request.id}`}
+                                    onClick={() =>
+                                      void call(
+                                        `reset-${request.id}`,
+                                        `/api/requests/${request.id}/reset`,
+                                        { method: "POST" },
+                                      )
+                                    }
+                                  >
+                                    {busy === `reset-${request.id}` ? (
+                                      <Loader2 className="animate-spin" />
+                                    ) : (
+                                      <RefreshCw />
+                                    )}{" "}
+                                    Reset
+                                  </Button>
+                                </div>
+                              )}
+                            </div>
+                            <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                              {phaseCards(request).map((phase) => {
+                                const Icon =
+                                  phase.name === "Parse"
+                                    ? Database
+                                    : phase.name === "Extract"
+                                      ? Archive
+                                      : phase.name === "AI audit"
+                                        ? Cpu
+                                        : phase.name === "Upload"
+                                          ? Upload
+                                          : FileText;
+                                return (
+                                  <div
+                                    key={phase.name}
+                                    className="min-h-44 rounded-2xl border border-indigo-400/20 bg-slate-900/65 p-4 text-center"
+                                  >
+                                    <Icon
                                       className={
                                         phase.progress === 100
-                                          ? "h-full bg-emerald-400"
-                                          : "h-full bg-indigo-400/80"
+                                          ? "mx-auto size-6 text-emerald-300"
+                                          : "mx-auto size-6 text-indigo-300"
                                       }
-                                      style={{ width: `${phase.progress}%` }}
                                     />
+                                    <p className="mt-3 whitespace-nowrap text-xs font-bold tracking-[0.14em] text-slate-200">
+                                      {phase.name.toUpperCase()}
+                                    </p>
+                                    <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-800">
+                                      <div
+                                        className={
+                                          phase.progress === 100
+                                            ? "h-full bg-emerald-400"
+                                            : "h-full bg-indigo-400/80"
+                                        }
+                                        style={{ width: `${phase.progress}%` }}
+                                      />
+                                    </div>
+                                    <p className="mt-3 text-lg font-semibold text-slate-200">
+                                      {phase.progress}%
+                                    </p>
+                                    <p className="mt-1 text-xs text-slate-500">
+                                      {phase.label}
+                                    </p>
                                   </div>
-                                  <p className="mt-3 text-lg font-semibold text-slate-200">
-                                    {phase.progress}%
-                                  </p>
-                                  <p className="mt-1 text-xs text-slate-500">
-                                    {phase.label}
-                                  </p>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        </article>
-                      ))}
+                                );
+                              })}
+                            </div>
+                          </article>
+                        ))}
+                      </div>
                     </div>
                   </div>
-                </div>
-              );
-            })}
+                );
+              })}
+            </div>
           </div>
         )}
       </div>
@@ -789,6 +909,40 @@ export function CaseManager() {
                 }
               }}
             />
+            <fieldset>
+              <legend className="mb-2 text-sm font-semibold text-slate-200">
+                Case type
+              </legend>
+              <div className="grid grid-cols-2 gap-2">
+                {(["employee", "client"] as const).map((type) => (
+                  <label
+                    key={type}
+                    className={
+                      caseType === type
+                        ? "rounded-xl border border-indigo-400/45 bg-indigo-500/20 px-3 py-2.5 text-indigo-100"
+                        : "rounded-xl border border-slate-700 bg-slate-950/55 px-3 py-2.5 text-slate-400"
+                    }
+                  >
+                    <input
+                      type="radio"
+                      name="case-type"
+                      value={type}
+                      checked={caseType === type}
+                      onChange={() => setCaseType(type)}
+                      className="sr-only"
+                    />
+                    <span className="block text-sm font-bold capitalize">
+                      {type}
+                    </span>
+                    <span className="mt-1 block text-xs opacity-75">
+                      {type === "client"
+                        ? "One request, with OneTrust delivery."
+                        : "Standard AIDA case workflow."}
+                    </span>
+                  </label>
+                ))}
+              </div>
+            </fieldset>
             <p className="text-xs leading-5 text-slate-400">
               Use a single folder name. Subject details and the first request
               are added from the case card.
@@ -969,7 +1123,18 @@ export function CaseManager() {
                 })}
               </div>
             </fieldset>
-            <Button type="button" onClick={() => void addRequest()}>
+            <Button
+              type="button"
+              disabled={
+                !newRequestFor ||
+                busy === `add-${newRequestFor}` ||
+                !requestForm.name.trim()
+              }
+              onClick={() => void addRequest()}
+            >
+              {newRequestFor && busy === `add-${newRequestFor}` && (
+                <Loader2 className="animate-spin" />
+              )}
               Add request
             </Button>
           </div>
@@ -1054,6 +1219,7 @@ export function CaseManager() {
               className="w-full"
               disabled={
                 !deleteTarget ||
+                busy === `delete-${deleteTarget.id}` ||
                 deleteConfirmation !== deleteTarget.name ||
                 deleteTarget.requests.some((request) =>
                   ["queued", "running", "stopping"].includes(request.status),
@@ -1076,6 +1242,9 @@ export function CaseManager() {
                   setDeleteTarget(null);
               }}
             >
+              {deleteTarget && busy === `delete-${deleteTarget.id}` && (
+                <Loader2 className="animate-spin" />
+              )}
               Delete permanently
             </Button>
           </div>

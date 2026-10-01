@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { isPstFilename } from "./file-types";
 import { prisma } from "./prisma";
 
 export type RequestScope = "mail" | "files" | "both";
@@ -70,8 +71,26 @@ async function makeRequestFolders(
   return { stagingPath, deliverablePath };
 }
 
-export async function createManagedCase(input: { name: string }) {
+async function requestPaths(
+  caseName: string,
+  requestName: string,
+): Promise<{ stagingPath: string; deliverablePath: string }> {
+  const base = await roots();
+  return {
+    stagingPath: path.join(base.staging, caseName, requestName),
+    deliverablePath: path.join(base.deliverables, caseName, requestName),
+  };
+}
+
+export async function createManagedCase(input: {
+  name: string;
+  caseType?: string;
+}) {
   const name = segment(input.name, "Case name");
+  const caseType = input.caseType === "client" ? "client" : "employee";
+  if (input.caseType && !["employee", "client"].includes(input.caseType)) {
+    throw new Error("Case type must be employee or client.");
+  }
   const exists = await prisma.managedCase.findUnique({
     where: { name },
     select: { id: true },
@@ -85,6 +104,7 @@ export async function createManagedCase(input: { name: string }) {
       // folders and cannot be run until configureManagedCase completes.
       subject_name: "",
       subject_email: "",
+      case_type: caseType,
     },
     include: { requests: true },
   });
@@ -135,23 +155,32 @@ export async function addManagedRequest(
   const scope = assertScope(input.scope);
   const parent = await prisma.managedCase.findUnique({
     where: { id: caseId },
-    select: { id: true, name: true, status: true },
+    include: { requests: { select: { id: true } } },
   });
   if (!parent || parent.status !== "active")
     throw new Error("Active case not found.");
-  const paths = await makeRequestFolders(parent.name, requestName, scope);
+  if (parent.case_type === "client" && parent.requests.length > 0) {
+    throw new Error("Client cases can have only one request.");
+  }
+  // Claim the unique request name before making directories. Two simultaneous
+  // submissions used to both create the same paths, then the losing insert
+  // removed those paths during rollback after the winner had succeeded.
+  const paths = await requestPaths(parent.name, requestName);
+  const created = await prisma.caseRequest.create({
+    data: {
+      id: crypto.randomUUID(),
+      case_id: caseId,
+      name: requestName,
+      scope,
+      staging_path: paths.stagingPath,
+      deliverable_path: paths.deliverablePath,
+    },
+  });
   try {
-    return await prisma.caseRequest.create({
-      data: {
-        id: crypto.randomUUID(),
-        case_id: caseId,
-        name: requestName,
-        scope,
-        staging_path: paths.stagingPath,
-        deliverable_path: paths.deliverablePath,
-      },
-    });
+    await makeRequestFolders(parent.name, requestName, scope);
+    return created;
   } catch (error) {
+    await prisma.caseRequest.deleteMany({ where: { id: created.id } });
     await Promise.all([
       fs.rm(paths.stagingPath, { recursive: true, force: true }),
       fs.rm(paths.deliverablePath, { recursive: true, force: true }),
@@ -171,12 +200,22 @@ async function summary(directory: string, test: (name: string) => boolean) {
       return;
     }
     for (const entry of entries) {
+      // Hidden paths are internal pipeline workspaces (for example `.work/`).
+      // They are not deliverables and can change while this dashboard summary
+      // is being collected.
+      if (entry.name.startsWith(".")) continue;
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) await walk(full);
       else if (entry.isFile() && test(entry.name)) {
-        const stat = await fs.stat(full);
-        count++;
-        size += stat.size;
+        try {
+          // Extraction/render moves source files concurrently. A disappeared
+          // file is simply absent from this point-in-time metric snapshot.
+          const stat = await fs.stat(full);
+          count++;
+          size += stat.size;
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        }
       }
     }
   }
@@ -198,7 +237,7 @@ export async function scanRequestSources(requestId: string) {
     scope === "files"
       ? { count: 0, size: 0 }
       : await summary(path.join(managedRequest.staging_path, "PST"), (name) =>
-          name.toLowerCase().endsWith(".pst"),
+          isPstFilename(name),
         );
   const files =
     scope === "mail"
@@ -233,7 +272,7 @@ export async function scanRequestSources(requestId: string) {
     for (const entry of entries) {
       const full = path.join(current, entry.name);
       if (entry.isDirectory()) await collectPst(full);
-      else if (entry.isFile() && entry.name.toLowerCase().endsWith(".pst")) {
+      else if (entry.isFile() && isPstFilename(entry.name)) {
         const stat = await fs.stat(full);
         sources.push({
           id: crypto
@@ -311,6 +350,29 @@ export async function removeRequestFolders(
         ? [fs.rm(request.staging_path, { recursive: true, force: true })]
         : []),
     ]),
+  );
+}
+
+/** Remove the case-level roots only when no unrelated content remains. */
+export async function removeEmptyCaseRoots(
+  requests: Array<{ staging_path: string; deliverable_path: string }>,
+): Promise<void> {
+  const roots = new Set<string>();
+  for (const request of requests) {
+    roots.add(path.dirname(request.staging_path));
+    roots.add(path.dirname(request.deliverable_path));
+  }
+  await Promise.all(
+    [...roots].map(async (directory) => {
+      try {
+        await fs.rmdir(directory);
+      } catch (error) {
+        const code = (error as NodeJS.ErrnoException).code;
+        // A non-empty root is never removed; it may contain externally added
+        // material that is not represented by this case's request rows.
+        if (code !== "ENOENT" && code !== "ENOTEMPTY") throw error;
+      }
+    }),
   );
 }
 

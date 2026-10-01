@@ -84,18 +84,6 @@ async function main() {
         },
       },
       (progress) => {
-        if (progress.outputPath) {
-          queueSharePointArtifacts(fileId, [progress.outputPath])
-            .then((queued) => {
-              if (queued > 0) startSharePointArtifactWorker();
-            })
-            .catch((error) =>
-              console.error(
-                "[files-worker] Could not queue SharePoint artifact:",
-                error,
-              ),
-            );
-        }
         // Throttle live progress writes so a large batch doesn't hammer the DB.
         const now = Date.now();
         if (now - lastProgressWrite < 1500) return;
@@ -128,15 +116,6 @@ async function main() {
               )
           : [],
       );
-      try {
-        const queued = await queueSharePointArtifacts(fileId, finalized);
-        if (queued > 0) startSharePointArtifactWorker();
-      } catch (error) {
-        console.error(
-          "[files-worker] Could not queue final SharePoint artifacts:",
-          error,
-        );
-      }
       await prisma.processedFile.update({
         where: { id: fileId },
         data: {
@@ -147,6 +126,15 @@ async function main() {
           files_duration_ms: durationMs,
         },
       });
+      try {
+        const queued = await queueSharePointArtifacts(fileId, finalized);
+        if (queued > 0) startSharePointArtifactWorker();
+      } catch (error) {
+        console.error(
+          "[files-worker] Could not queue final SharePoint artifacts:",
+          error,
+        );
+      }
       await archiveCompletedCase(fileId);
       console.log(`[files-worker] Completed: ${fileId}`);
     } else {

@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { createManagedCase, refreshRequestLifecycle } from "@/lib/cases";
+import { oneTrustRequestUrl } from "@/lib/onetrust-links";
+import { getAiBatchSettings } from "@/lib/pipeline-settings";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -17,6 +19,9 @@ function phaseProgress(
     files_status: string;
     files_total: number;
     files_progress_handled: number;
+    upload_status: string;
+    upload_total: number;
+    upload_uploaded: number;
   }>,
 ) {
   const pstRows = rows.filter((row) => row.kind === "pst");
@@ -26,8 +31,13 @@ function phaseProgress(
     ["analyzed", "extracting", "completed"].includes(row.status),
   ).length;
   const extracted = pstRows.filter((row) => row.status === "completed").length;
-  const coordinator = [...pstRows].sort((a, b) =>
-    a.ai_status.localeCompare(b.ai_status),
+  // Only the deterministic coordinator row owns live Batch counters. Sibling
+  // PST rows remain `pending` while it works, so lexical status ordering can
+  // incorrectly select a sibling and make a nearly-complete audit look idle.
+  const coordinator = [...pstRows].sort(
+    (left, right) =>
+      right.ai_batches_total - left.ai_batches_total ||
+      right.ai_batches_done - left.ai_batches_done,
   )[0];
   const rendered = pstRows.filter(
     (row) => row.pdf_status === "completed",
@@ -44,6 +54,30 @@ function phaseProgress(
         : row.pdf_processed),
     0,
   );
+  // A case can have several source rows, but only rows with an upload total
+  // own deliverables. This avoids showing an idle sibling PST as the active
+  // upload state while its coordinator is uploading.
+  const uploadRows = rows.filter(
+    (row) => row.upload_total > 0 || row.upload_status !== "idle",
+  );
+  const uploadTotal = uploadRows.reduce(
+    (count, row) => count + row.upload_total,
+    0,
+  );
+  const uploadDone = uploadRows.reduce(
+    (count, row) => count + Math.min(row.upload_uploaded, row.upload_total),
+    0,
+  );
+  const uploadStatus =
+    uploadRows.length === 0
+      ? "pending"
+      : uploadRows.every((row) => row.upload_status === "completed")
+        ? "completed"
+        : uploadRows.some((row) => row.upload_status === "failed")
+          ? "failed"
+          : uploadRows.some((row) => row.upload_status === "processing")
+            ? "processing"
+            : "pending";
   return {
     parse: {
       done: parsed,
@@ -72,6 +106,11 @@ function phaseProgress(
       done: filesRow?.files_progress_handled || 0,
       total: filesRow?.files_total || 0,
       status: filesRow?.files_status || "pending",
+    },
+    upload: {
+      done: uploadDone,
+      total: uploadTotal,
+      status: uploadStatus,
     },
   };
 }
@@ -102,11 +141,13 @@ function phaseTiming(
 
 export async function GET(request: Request) {
   await refreshRequestLifecycle();
+  const settings = await getAiBatchSettings();
   const archived =
     new URL(request.url).searchParams.get("status") === "archived";
   const cases = await prisma.managedCase.findMany({
     where: { status: archived ? "archived" : "active" },
     include: {
+      onetrust_upload_artifacts: { select: { status: true } },
       requests: {
         orderBy: { created_at: "asc" },
         include: {
@@ -123,6 +164,9 @@ export async function GET(request: Request) {
               files_status: true,
               files_total: true,
               files_progress_handled: true,
+              upload_status: true,
+              upload_total: true,
+              upload_uploaded: true,
               metadata_duration_ms: true,
               analyze_duration_ms: true,
               extract_duration_ms: true,
@@ -138,10 +182,22 @@ export async function GET(request: Request) {
     orderBy: { created_at: "desc" },
   });
   return NextResponse.json({
-    cases: cases.map((item) => ({
+    cases: cases.map(({ onetrust_upload_artifacts, ...item }) => ({
       ...item,
+      onetrust_uploaded: onetrust_upload_artifacts.filter(
+        (file) => file.status === "completed",
+      ).length,
+      onetrust_total: onetrust_upload_artifacts.length,
+      onetrust_url:
+        item.onetrust_request_id && settings.oneTrustTenantUrl
+          ? oneTrustRequestUrl(
+              settings.oneTrustTenantUrl,
+              item.onetrust_request_id,
+            )
+          : null,
       requests: item.requests.map(({ processed_files, ...request }) => ({
         ...request,
+        case_type: item.case_type,
         pst_size_bytes: Number(request.pst_size_bytes),
         files_size_bytes: Number(request.files_size_bytes),
         deliverable_size_bytes: Number(request.deliverable_size_bytes),

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import MsgReader, { type FieldsData } from "@kenjiuno/msgreader";
 import { simpleParser } from "mailparser";
 import { normalizeHtmlForPdf } from "./converter";
 import { stripEmailSignature } from "./email-content";
@@ -17,6 +18,8 @@ export interface StandaloneBatchParams {
   messagesDir: string;
   documentsDir: string;
   subjectCriteria: { name: string; personalEmail?: string; aliases?: string[] };
+  /** Client cases retain all unique content, without relevance exclusions. */
+  clientMode?: boolean;
 }
 
 export interface StandaloneBatchResult {
@@ -185,6 +188,152 @@ function buildEmailHtml(rawBody: string, sourceName: string): string {
         <pre style="white-space: pre-wrap; word-break: break-word; margin: 0;">${safeBody}</pre>
       </body>
     </html>
+  `);
+}
+
+interface ParsedMsgRecipient {
+  name?: string;
+  email?: string;
+  smtpAddress?: string;
+  recipType?: string;
+}
+
+interface ParsedMsgAttachment {
+  contentId?: string;
+  contentType?: string;
+  fileName?: string;
+}
+
+interface ParsedMsgData {
+  subject?: string;
+  senderName?: string;
+  senderSmtpAddress?: string;
+  senderEmail?: string;
+  recipients?: ParsedMsgRecipient[];
+  messageDeliveryTime?: string;
+  clientSubmitTime?: string;
+  body?: string;
+  html?: Uint8Array | string;
+  attachments?: ParsedMsgAttachment[];
+}
+
+function parseMsg(buffer: Buffer): ParsedMsgData | null {
+  try {
+    const reader = new MsgReader(
+      new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+    );
+    return reader.getFileData() as ParsedMsgData;
+  } catch {
+    return null;
+  }
+}
+
+function contentTypeForMsgAttachment(attachment: ParsedMsgAttachment): string {
+  if (attachment.contentType?.startsWith("image/"))
+    return attachment.contentType;
+  const extension = path.extname(attachment.fileName || "").toLowerCase();
+  if (extension === ".png") return "image/png";
+  if (extension === ".gif") return "image/gif";
+  if (extension === ".svg") return "image/svg+xml";
+  if (extension === ".bmp") return "image/bmp";
+  return "image/jpeg";
+}
+
+function inlineMsgImages(
+  html: string,
+  buffer: Buffer,
+  message: ParsedMsgData,
+): string {
+  if (!/\bcid:/i.test(html) || !message.attachments?.length) return html;
+
+  try {
+    const reader = new MsgReader(
+      new DataView(buffer.buffer, buffer.byteOffset, buffer.byteLength),
+    );
+    let inlined = html;
+    for (const attachment of message.attachments) {
+      const contentId = attachment.contentId?.replace(/[<>]/g, "");
+      if (!contentId) continue;
+      const extracted = reader.getAttachment(attachment as FieldsData) as {
+        content?: Uint8Array | Buffer | string;
+        contentId?: string;
+        contentType?: string;
+        fileName?: string;
+      };
+      const content = extracted.content;
+      if (!content) continue;
+      const bytes = Buffer.isBuffer(content)
+        ? content
+        : typeof content === "string"
+          ? Buffer.from(content)
+          : Buffer.from(content);
+      const mimeType = contentTypeForMsgAttachment({
+        contentType: extracted.contentType || attachment.contentType,
+        fileName: extracted.fileName || attachment.fileName,
+      });
+      const dataUri = `data:${mimeType};base64,${bytes.toString("base64")}`;
+      const cid = (extracted.contentId || contentId).replace(/[<>]/g, "");
+      inlined = inlined.replace(
+        new RegExp(`cid:${escapeRegExp(cid)}`, "gi"),
+        dataUri,
+      );
+    }
+    return inlined;
+  } catch {
+    return html;
+  }
+}
+
+function buildMsgHtml(
+  message: ParsedMsgData,
+  sourceName: string,
+  sourceBuffer: Buffer,
+): string {
+  const subject = message.subject || sourceName;
+  const sender =
+    message.senderSmtpAddress ||
+    message.senderEmail ||
+    message.senderName ||
+    "Unknown";
+  const recipients = (message.recipients || [])
+    .filter(
+      (recipient) =>
+        recipient.recipType !== "cc" && recipient.recipType !== "bcc",
+    )
+    .map(
+      (recipient) =>
+        recipient.smtpAddress || recipient.email || recipient.name || "",
+    )
+    .filter(Boolean)
+    .join(", ");
+  const sentAt =
+    message.messageDeliveryTime || message.clientSubmitTime || "Unknown";
+  const header = `
+    <section style="border-bottom: 2px solid #ddd; padding: 12px; margin-bottom: 18px; background: #f9f9f9;">
+      <div><strong>From:</strong> ${escapeHtml(sender)}</div>
+      <div><strong>Sent:</strong> ${escapeHtml(sentAt)}</div>
+      <div><strong>To:</strong> ${escapeHtml(recipients || "Unknown")}</div>
+      <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid #eaeaea;"><strong>Subject:</strong> ${escapeHtml(subject)}</div>
+    </section>`;
+  const htmlBody =
+    typeof message.html === "string"
+      ? message.html
+      : message.html instanceof Uint8Array
+        ? new TextDecoder("utf-8").decode(message.html)
+        : "";
+
+  if (htmlBody) {
+    const withHeader = /<body[^>]*>/i.test(htmlBody)
+      ? htmlBody.replace(/(<body[^>]*>)/i, `$1${header}`)
+      : `${header}${htmlBody}`;
+    return normalizeHtmlForPdf(
+      inlineMsgImages(withHeader, sourceBuffer, message),
+    );
+  }
+
+  return normalizeHtmlForPdf(`
+    <!DOCTYPE html><html><head><title>${escapeHtml(subject)}</title></head>
+    <body>${header}<pre style="white-space: pre-wrap; margin: 0;">${escapeHtml(message.body || "(No body content)")}</pre></body></html>
   `);
 }
 
@@ -393,6 +542,7 @@ async function convertOfficeInWorker(
   outputPath: string,
   criteria: string[],
   docTitle: string,
+  bypassFilters = false,
   timeoutMs = 150_000,
 ): Promise<OfficeConversionOutcome> {
   const workerPath = path.resolve(
@@ -410,7 +560,14 @@ async function convertOfficeInWorker(
     const worker = new Worker(workerPath, {
       execArgv: ["--import", "tsx"],
       resourceLimits: { maxOldGenerationSizeMb },
-      workerData: { kind, filePath, outputPath, criteria, docTitle },
+      workerData: {
+        kind,
+        filePath,
+        outputPath,
+        criteria,
+        docTitle,
+        bypassFilters,
+      },
     });
 
     let done = false;
@@ -851,7 +1008,7 @@ export async function runStandaloneBatch(
 ): Promise<StandaloneBatchResult> {
   const { inputDir, messagesDir, documentsDir, subjectCriteria } = params;
 
-  if (!inputDir || !subjectCriteria?.name) {
+  if (!inputDir || (!params.clientMode && !subjectCriteria?.name)) {
     return {
       success: false,
       error: "Missing inputDir or subjectCriteria.name",
@@ -874,6 +1031,8 @@ export async function runStandaloneBatch(
   // Shared privileged/confidential keyword filter (see src/lib/exclusions.ts)
   // so the Files pipeline stays in lockstep with the PST pipeline.
   const exclusionsRegex = PRIVILEGED_KEYWORDS_RE;
+  const bypassFilters = params.clientMode === true;
+  const renderingCriteria = bypassFilters ? [] : criteria;
 
   const standaloneStagingDir = inputDir;
   const deliverablesDirMessages = messagesDir;
@@ -1004,15 +1163,18 @@ export async function runStandaloneBatch(
           "docx",
           filePath,
           pdfOutputPath,
-          criteria,
+          renderingCriteria,
           seqName,
+          bypassFilters,
         );
         if (outcome.passwordProtected) {
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
           );
-          skippedCount++;
-          continue;
+          if (!bypassFilters) {
+            skippedCount++;
+            continue;
+          }
         }
         success = outcome.success;
         semanticContentKey = outcome.contentKey;
@@ -1025,15 +1187,18 @@ export async function runStandaloneBatch(
           "excel",
           filePath,
           pdfOutputPath,
-          criteria,
+          renderingCriteria,
           seqName,
+          bypassFilters,
         );
         if (outcome.passwordProtected) {
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
           );
-          skippedCount++;
-          continue;
+          if (!bypassFilters) {
+            skippedCount++;
+            continue;
+          }
         }
         success = outcome.success;
         semanticContentKey = outcome.contentKey;
@@ -1093,19 +1258,27 @@ export async function runStandaloneBatch(
             "i",
           ).test(rawPlainText);
 
-        if (exclusionsRegex.test(plainText) && !sentToSubjectEmail) {
+        if (
+          !bypassFilters &&
+          exclusionsRegex.test(plainText) &&
+          !sentToSubjectEmail
+        ) {
           console.log(
             `[Standalone Filter] Discarded HTML ${file}: Contains excluded keyword.`,
           );
-        } else if (hasExplicitSubjectHeader) {
+        } else if (!bypassFilters && hasExplicitSubjectHeader) {
           console.log(
             `[Standalone Filter] Discarded HTML ${file}: Matches subject header pattern (Name <email> date time).`,
           );
-        } else if (fromSubject) {
+        } else if (!bypassFilters && fromSubject) {
           console.log(
             `[Standalone Filter] Discarded HTML ${file}: Top message is authored by subject.`,
           );
-        } else if (!containsSubjectNameInBody && !replyToSubject) {
+        } else if (
+          !bypassFilters &&
+          !containsSubjectNameInBody &&
+          !replyToSubject
+        ) {
           console.log(
             `[Standalone Filter] Discarded HTML ${file}: Missing subject name in body and no direct reply signal.`,
           );
@@ -1153,11 +1326,17 @@ export async function runStandaloneBatch(
           skippedCount++;
           continue;
         }
-        // Read both UTF-8 (for EML) and UTF-16 (for MSG blobs), then strip null bytes.
-        const rawUtf8 = buffer.toString("utf-8").toLowerCase();
-        const rawUtf16 = buffer.toString("utf16le").toLowerCase();
+        const parsedMsg = ext === ".msg" ? parseMsg(buffer) : null;
+        // MSG files are Compound File Binary containers, not text. Use their
+        // parsed mail body for filtering and rendering; decoding container
+        // bytes was producing pages of replacement glyphs in the PDF.
         const rawText = stripEmailSignature(
-          `${rawUtf8} ${rawUtf16}`.replace(/\0/g, " "),
+          parsedMsg
+            ? `${parsedMsg.subject || ""}\n${parsedMsg.body || ""}`
+            : `${buffer.toString("utf-8")} ${buffer.toString("utf16le")}`.replace(
+                /\0/g,
+                " ",
+              ),
         );
         const hasExplicitSubjectHeader = hasSubjectHeaderPattern(
           rawText,
@@ -1183,19 +1362,23 @@ export async function runStandaloneBatch(
             "i",
           ).test(rawText);
 
-        if (exclusionsRegex.test(rawText) && !sentToSubjectEmail) {
+        if (
+          !bypassFilters &&
+          exclusionsRegex.test(rawText) &&
+          !sentToSubjectEmail
+        ) {
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword.`,
           );
-        } else if (hasExplicitSubjectHeader) {
+        } else if (!bypassFilters && hasExplicitSubjectHeader) {
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Matches subject header pattern (Name <email> date time).`,
           );
-        } else if (fromSubject) {
+        } else if (!bypassFilters && fromSubject) {
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Message appears authored by subject.`,
           );
-        } else if (!containsSubjectName && !replyToSubject) {
+        } else if (!bypassFilters && !containsSubjectName && !replyToSubject) {
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Missing subject-name signal.`,
           );
@@ -1250,8 +1433,8 @@ export async function runStandaloneBatch(
             success = true;
             producedPath = pdfOutput;
           } else {
-            // MSG parsing is inconsistent across archives, so dedup and render
-            // from the extracted raw text.
+            // MSG files require structured parsing: their raw bytes are an OLE
+            // container, not a printable text representation.
             if (isDuplicateContent(rawText, processedHashes)) {
               console.log(
                 `[Standalone Filter] Discarded Duplicate MSG ${file} (Content Match).`,
@@ -1262,7 +1445,9 @@ export async function runStandaloneBatch(
             }
             await withTimeout(
               renderHtmlToPdfWeasyPrint(
-                buildEmailHtml(rawText, file),
+                parsedMsg
+                  ? buildMsgHtml(parsedMsg, file, buffer)
+                  : buildEmailHtml(rawText, file),
                 pdfOutput,
                 seqName,
               ),
@@ -1282,7 +1467,10 @@ export async function runStandaloneBatch(
         }
         const rawText = buffer.toString("utf-8");
         const normalizedText = rawText.toLowerCase();
-        if (!criteria.some((criterion) => normalizedText.includes(criterion))) {
+        if (
+          !bypassFilters &&
+          !criteria.some((criterion) => normalizedText.includes(criterion))
+        ) {
           console.log(
             `[Standalone Filter] Discarded TXT ${file}: Data subject not mentioned.`,
           );
@@ -1314,11 +1502,14 @@ export async function runStandaloneBatch(
             await extractPdfTextInWorker(filePath, file, 45_000)
           ).toLowerCase();
 
-          if (exclusionsRegex.test(rawText)) {
+          if (!bypassFilters && exclusionsRegex.test(rawText)) {
             console.log(
               `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
             );
-          } else if (!criteria.some((c) => rawText.includes(c))) {
+          } else if (
+            !bypassFilters &&
+            !criteria.some((c) => rawText.includes(c))
+          ) {
             console.log(
               `[Standalone Filter] Discarded PDF ${file}: Data subject not mentioned.`,
             );
@@ -1359,10 +1550,32 @@ export async function runStandaloneBatch(
         }
       }
 
-      // --- Unsupported Files ---
+      // Client images and formats the renderer cannot handle are still
+      // deliverables: deduplication is the only client-case exclusion.
       else {
-        console.log(`[Standalone Engine] Skipping unsupported format: ${file}`);
-        continue;
+        if (!bypassFilters) {
+          console.log(
+            `[Standalone Engine] Skipping unsupported format: ${file}`,
+          );
+          continue;
+        }
+        const destination = path.join(
+          deliverablesDirDocuments,
+          `Document ${fileHash.slice(0, 16)}${ext}`,
+        );
+        await fs.promises.copyFile(filePath, destination);
+        success = true;
+        producedPath = destination;
+      }
+
+      // A client case must still deliver a unique source that cannot be
+      // rendered (for example an encrypted Office file or malformed message).
+      // Keep it in its natural output category with a collision-safe name.
+      if (bypassFilters && !success) {
+        const fallbackPath = path.join(targetDir, `${seqName}${ext}`);
+        await fs.promises.copyFile(filePath, fallbackPath);
+        success = true;
+        producedPath = fallbackPath;
       }
 
       // Guard against 0-byte / corrupted deliverables. WeasyPrint can leave an

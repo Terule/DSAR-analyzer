@@ -34,7 +34,16 @@ async function main() {
   let idlePolls = 0;
   for (;;) {
     const next = await prisma.sharePointUploadArtifact.findFirst({
-      where: { status: "pending" },
+      where: {
+        status: "pending",
+        source_file: {
+          case_request: { case: { case_type: "employee" } },
+          OR: [
+            { kind: "pst", pdf_status: "completed" },
+            { kind: "files", files_status: "completed" },
+          ],
+        },
+      },
       orderBy: { created_at: "asc" },
     });
     if (!next) {

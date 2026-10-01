@@ -52,6 +52,8 @@ export async function runtimeCredentials() {
       azure_tenant_id_encrypted: true,
       azure_client_id_encrypted: true,
       azure_client_secret_encrypted: true,
+      onetrust_client_id_encrypted: true,
+      onetrust_client_secret_encrypted: true,
     },
   });
   return {
@@ -60,6 +62,12 @@ export async function runtimeCredentials() {
     azureClientId: await decryptSetting(row?.azure_client_id_encrypted || null),
     azureClientSecret: await decryptSetting(
       row?.azure_client_secret_encrypted || null,
+    ),
+    oneTrustClientId: await decryptSetting(
+      row?.onetrust_client_id_encrypted || null,
+    ),
+    oneTrustClientSecret: await decryptSetting(
+      row?.onetrust_client_secret_encrypted || null,
     ),
   };
 }

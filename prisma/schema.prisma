@@ -70,13 +70,40 @@ model ManagedCase {
   subject_email         String
   subject_personal_email String?
   subject_aliases       String?
+  case_type             String        @default("employee")
+  onetrust_request_id   String?
+  onetrust_request_queue_id String?
+  onetrust_status       String        @default("idle")
+  onetrust_error        String?
   status                String        @default("active")
   archived_at           DateTime?
   created_at            DateTime      @default(now())
   updated_at            DateTime      @updatedAt
   requests              CaseRequest[]
+  onetrust_upload_artifacts OneTrustUploadArtifact[]
 
   @@map("managed_cases")
+}
+
+model OneTrustUploadArtifact {
+  id                  String   @id
+  case_id             String
+  local_path          String   @unique
+  relative_path       String
+  attachment_name     String
+  file_size_bytes     BigInt
+  modified_at         BigInt
+  remote_file_id      String?
+  status              String   @default("pending")
+  attempts            Int      @default(0)
+  error_message       String?
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  case ManagedCase @relation(fields: [case_id], references: [id], onDelete: Cascade)
+
+  @@index([case_id, status])
+  @@map("onetrust_upload_artifacts")
 }
 
 model CaseRequest {
@@ -196,6 +223,16 @@ model PipelineSettings {
   azure_tenant_id_encrypted     String?
   azure_client_id_encrypted     String?
   azure_client_secret_encrypted String?
+  onetrust_tenant_url            String?
+  onetrust_template_id           String?
+  onetrust_public_webform_url    String?
+  onetrust_language              String?
+  onetrust_request_type          String?
+  onetrust_subject_type          String?
+  onetrust_date_raised_field_key String?
+  onetrust_system_label          String?
+  onetrust_client_id_encrypted   String?
+  onetrust_client_secret_encrypted String?
   updated_at                  DateTime @updatedAt
 
   @@map("pipeline_settings")

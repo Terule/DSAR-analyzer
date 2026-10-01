@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fillAiBatchSlots } from "@/lib/ai";
 import { analyzePstDuplicates, scanFileMetadata } from "@/lib/analyzer";
-import { getCasePstFileIds } from "@/lib/case-utils";
+import { getCasePstFileIds, markCaseAiCompleted } from "@/lib/case-utils";
 import {
   clearFilesBatchResults,
   recordFilesBatchResult,
@@ -133,6 +133,26 @@ export async function runPhaseJob(
     });
     if (!unfinished) {
       const coordinatorId = [...caseIds].sort()[0];
+      const coordinator = await prisma.processedFile.findUnique({
+        where: { id: coordinatorId },
+        select: {
+          case_request: { select: { case: { select: { case_type: true } } } },
+        },
+      });
+      if (coordinator?.case_request?.case.case_type === "client") {
+        await markCaseAiCompleted(coordinatorId, 0);
+        await prisma.processedFile.update({
+          where: { id: coordinatorId },
+          data: {
+            pdf_status: "processing",
+            pdf_duration_ms: 0,
+            pdf_total: 0,
+            pdf_processed: 0,
+          },
+        });
+        await enqueueFilePhase({ fileId: coordinatorId, phase: "render" });
+        return { operation: "client-dedup-ready-for-render" };
+      }
       await prisma.processedFile.update({
         where: { id: coordinatorId },
         data: {
@@ -151,6 +171,21 @@ export async function runPhaseJob(
   }
 
   if (job.phase === "ai") {
+    if (row.case_request_id) {
+      const request = await prisma.caseRequest.findUnique({
+        where: { id: row.case_request_id },
+        select: { case: { select: { case_type: true } } },
+      });
+      if (request?.case.case_type === "client") {
+        await markCaseAiCompleted(fileId, 0);
+        await prisma.processedFile.update({
+          where: { id: fileId },
+          data: { pdf_status: "processing" },
+        });
+        await enqueueFilePhase({ fileId, phase: "render" });
+        return { operation: "client-ai-skipped" };
+      }
+    }
     const caseIds = await getCasePstFileIds(fileId);
     const incompleteExtract = await prisma.processedFile.findFirst({
       where: { id: { in: caseIds }, status: { not: "completed" } },
@@ -266,15 +301,32 @@ export async function runPhaseJob(
       documentsDir: path.join(outputBase, requestPath, "Documents"),
     };
     const result = finalizeStandaloneDeliverables(directories);
-    const queued = await queueSharePointArtifacts(
-      fileId,
-      listFinalizedStandaloneDeliverables(directories),
-    );
-    if (queued > 0) startSharePointArtifactWorker();
+    const request = row.case_request_id
+      ? await prisma.caseRequest.findUnique({
+          where: { id: row.case_request_id },
+          select: { case: { select: { case_type: true } } },
+        })
+      : null;
+    const isClientCase = request?.case.case_type === "client";
     await prisma.processedFile.update({
       where: { id: fileId },
-      data: { files_status: "completed" },
+      data: isClientCase
+        ? {
+            files_status: "completed",
+            upload_status: "idle",
+            upload_total: 0,
+            upload_uploaded: 0,
+            upload_error: null,
+          }
+        : { files_status: "completed" },
     });
+    const queued = isClientCase
+      ? 0
+      : await queueSharePointArtifacts(
+          fileId,
+          listFinalizedStandaloneDeliverables(directories),
+        );
+    if (queued > 0) startSharePointArtifactWorker();
     await archiveCompletedCase(fileId);
     return { operation: "files-finalized", queuedForUpload: queued, ...result };
   }
@@ -314,7 +366,18 @@ export async function runPhaseJob(
   // input manifest, then fans it out into bounded one-shot worker jobs.
   if (!filesBatch) {
     const paths = listStandaloneInputFiles(row.filepath);
-    const batchSize = Math.max(1, Number(process.env.FILES_BATCH_SIZE || 100));
+    const request = row.case_request_id
+      ? await prisma.caseRequest.findUnique({
+          where: { id: row.case_request_id },
+          select: { case: { select: { case_type: true } } },
+        })
+      : null;
+    const isClientCase = request?.case.case_type === "client";
+    // Client deduplication must span the whole input. Keep it in one batch so
+    // the in-memory content and byte-hash sets remain authoritative.
+    const batchSize = isClientCase
+      ? Math.max(1, paths.length)
+      : Math.max(1, Number(process.env.FILES_BATCH_SIZE || 100));
     const runKey = String(row.files_started_at || BigInt(Date.now()));
     await clearFilesBatchResults(fileId);
     if (paths.length === 0) {
@@ -406,6 +469,14 @@ export async function runPhaseJob(
         personalEmail: subjectPersonalEmail || undefined,
         aliases: aliases(subjectAliases),
       },
+      clientMode: row.case_request_id
+        ? (
+            await prisma.caseRequest.findUnique({
+              where: { id: row.case_request_id },
+              select: { case: { select: { case_type: true } } },
+            })
+          )?.case.case_type === "client"
+        : false,
     },
     () => {
       // Final batch totals are persisted exactly once below. Per-file writes

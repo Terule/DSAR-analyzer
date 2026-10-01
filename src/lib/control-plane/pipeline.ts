@@ -28,7 +28,9 @@ function caseParts(filepath: string | null): {
   return {
     // Admission is per request. This preserves internal PST fan-out while
     // ensuring separate requests (even within one case) never run together.
-    caseKey: requestKey ? `${parts[0] || "unknown"}/${requestKey}` : parts[0] || "unknown",
+    caseKey: requestKey
+      ? `${parts[0] || "unknown"}/${requestKey}`
+      : parts[0] || "unknown",
     requestKey,
   };
 }

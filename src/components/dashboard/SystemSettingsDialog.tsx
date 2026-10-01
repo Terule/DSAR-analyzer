@@ -24,12 +24,13 @@ import {
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
 
-type Tab = "AI" | "Azure / SharePoint" | "Storage" | "System";
+type Tab = "AI" | "Azure / SharePoint" | "OneTrust" | "Storage" | "System";
 type Values = Record<string, string | number | boolean | undefined>;
 
 const tabs: { label: Tab; icon: typeof Settings2 }[] = [
   { label: "AI", icon: Settings2 },
   { label: "Azure / SharePoint", icon: KeyRound },
+  { label: "OneTrust", icon: Link2 },
   { label: "Storage", icon: HardDrive },
   { label: "System", icon: ServerCog },
 ];
@@ -196,13 +197,21 @@ export function SystemSettingsDialog({
   const input = (
     key: string,
     label: string,
-    options: { type?: string; secure?: boolean; hint?: string } = {},
+    options: {
+      type?: string;
+      secure?: boolean;
+      hint?: string;
+      className?: string;
+      disabled?: boolean;
+    } = {},
   ) => {
     const configured = Boolean(
       values[`has${key[0].toUpperCase()}${key.slice(1)}`],
     );
     return (
-      <label className="grid gap-2">
+      <label
+        className={`grid min-w-0 content-start gap-2 ${options.className || ""}`}
+      >
         <span className="text-sm font-semibold text-slate-200">{label}</span>
         <input
           type={options.type || "text"}
@@ -212,13 +221,12 @@ export function SystemSettingsDialog({
           value={String(values[key] || "")}
           placeholder={options.secure && configured ? MASK : undefined}
           onChange={(event) => update(key, event.target.value)}
-          className="rounded-xl border border-slate-600 bg-slate-950/80 px-3 py-2.5 text-sm text-slate-100 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/30 placeholder:text-slate-200"
+          disabled={options.disabled}
+          className="w-full min-w-0 rounded-xl border border-slate-600 bg-slate-950/80 px-3 py-2.5 text-sm text-slate-100 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/30 placeholder:text-slate-200 disabled:cursor-not-allowed disabled:opacity-65"
         />
-        {options.hint && (
-          <span className="text-xs leading-5 text-slate-500">
-            {options.hint}
-          </span>
-        )}
+        <span className="min-h-5 text-xs leading-5 text-slate-500">
+          {options.hint}
+        </span>
       </label>
     );
   };
@@ -516,6 +524,108 @@ export function SystemSettingsDialog({
                           <FolderOpen data-icon="inline-start" />
                           Use this folder
                         </Button>
+                      </div>
+                    </div>,
+                  )}
+                </>
+              )}
+              {tab === "OneTrust" && (
+                <>
+                  {section(
+                    "OneTrust connection",
+                    "OAuth credentials are stored encrypted and are only used by the server when a completed client case is sent to OneTrust.",
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <div className="md:col-span-2">
+                        {input("oneTrustTenantUrl", "Tenant URL", {
+                          type: "url",
+                          hint: "For example: https://your-tenant.onetrust.com",
+                        })}
+                      </div>
+                      {input("oneTrustClientId", "OAuth client ID", {
+                        secure: true,
+                        type: "password",
+                      })}
+                      {input("oneTrustClientSecret", "OAuth client secret", {
+                        secure: true,
+                        type: "password",
+                      })}
+                    </div>,
+                  )}
+                  {section(
+                    "Client request defaults",
+                    "AIDA uses these saved values for every Client case sent to OneTrust.",
+                    <div className="grid gap-x-5 gap-y-6 lg:grid-cols-12">
+                      {input("oneTrustTemplateId", "Web-form template ID", {
+                        hint: "The OneTrust template that creates the request.",
+                        className: "lg:col-span-6",
+                      })}
+                      {input(
+                        "oneTrustPublicWebFormUrl",
+                        "Published web-form URL",
+                        {
+                          type: "url",
+                          hint: "Used to obtain a fresh public request configuration.",
+                          className: "lg:col-span-6",
+                        },
+                      )}
+                      {input(
+                        "oneTrustDateRaisedFieldKey",
+                        "Date Raised field key",
+                        {
+                          hint: "AIDA sends today's date to this required field.",
+                          className: "lg:col-span-6",
+                        },
+                      )}
+                      {input("oneTrustSystemLabel", "Results Summary label", {
+                        hint: "The source name shown for uploaded deliverables.",
+                        className: "lg:col-span-6",
+                      })}
+                      {input("oneTrustLanguage", "Language", {
+                        hint: "Default language sent with the request.",
+                        className: "lg:col-span-4",
+                      })}
+                      {input("oneTrustRequestType", "Request type", {
+                        hint: "AIDA creates DSAR requests only.",
+                        className: "lg:col-span-4",
+                        disabled: true,
+                      })}
+                      {input("oneTrustSubjectType", "Client user type key", {
+                        hint: "Customer = SubjectType3.",
+                        className: "lg:col-span-4",
+                      })}
+                      <div className="lg:col-span-12">
+                        <p className="text-sm font-semibold text-slate-200">
+                          Required fields sent from the case
+                        </p>
+                        <div className="mt-3 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+                          {[
+                            [
+                              "First name",
+                              "First word of the configured subject name",
+                            ],
+                            [
+                              "Surname",
+                              "Remaining words of the configured subject name",
+                            ],
+                            ["Email", "Configured subject email"],
+                            [
+                              "Date Raised",
+                              "Today's date, sent through the field key above",
+                            ],
+                          ].map(([label, detail]) => (
+                            <div
+                              key={label}
+                              className="rounded-xl border border-slate-700 bg-slate-950/45 px-3 py-3"
+                            >
+                              <p className="text-sm font-semibold text-slate-200">
+                                {label}
+                              </p>
+                              <p className="mt-1 text-xs leading-5 text-slate-500">
+                                {detail}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
                       </div>
                     </div>,
                   )}

@@ -21,6 +21,7 @@ interface OfficeWorkerData {
   outputPath: string;
   criteria: string[];
   docTitle: string;
+  bypassFilters?: boolean;
 }
 
 function isLikelyPasswordProtectedOffice(buffer: Buffer): boolean {
@@ -55,7 +56,7 @@ function excelContentKey(buffer: Buffer): string {
 }
 
 async function main() {
-  const { kind, filePath, outputPath, criteria, docTitle } =
+  const { kind, filePath, outputPath, criteria, docTitle, bypassFilters } =
     workerData as OfficeWorkerData;
 
   try {
@@ -73,8 +74,22 @@ async function main() {
     const contentKey = kind === "excel" ? excelContentKey(buffer) : undefined;
     const success =
       kind === "docx"
-        ? await processDocxToPdf(buffer, outputPath, criteria, docTitle)
-        : await processExcelToPdf(buffer, outputPath, criteria, docTitle);
+        ? await processDocxToPdf(
+            buffer,
+            outputPath,
+            criteria,
+            docTitle,
+            undefined,
+            bypassFilters,
+          )
+        : await processExcelToPdf(
+            buffer,
+            outputPath,
+            criteria,
+            docTitle,
+            undefined,
+            bypassFilters,
+          );
 
     parentPort?.postMessage({
       ok: true,
