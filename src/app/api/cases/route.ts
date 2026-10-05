@@ -179,6 +179,7 @@ export async function GET(request: Request) {
               pdf_duration_ms: true,
               files_duration_ms: true,
               files_paused_ms: true,
+              wave: true,
             },
           },
         },
@@ -200,15 +201,22 @@ export async function GET(request: Request) {
               item.onetrust_request_id,
             )
           : null,
-      requests: item.requests.map(({ processed_files, ...request }) => ({
-        ...request,
-        case_type: item.case_type,
-        pst_size_bytes: Number(request.pst_size_bytes),
-        files_size_bytes: Number(request.files_size_bytes),
-        deliverable_size_bytes: Number(request.deliverable_size_bytes),
-        phaseProgress: phaseProgress(processed_files),
-        phaseTiming: phaseTiming(processed_files),
-      })),
+      requests: item.requests.map(({ processed_files, ...request }) => {
+        // Phase cards describe the wave that is running; earlier waves are
+        // finished and only contribute to the cumulative header totals.
+        const currentWave = processed_files.filter(
+          (file) => file.wave === request.wave,
+        );
+        return {
+          ...request,
+          case_type: item.case_type,
+          pst_size_bytes: Number(request.pst_size_bytes),
+          files_size_bytes: Number(request.files_size_bytes),
+          deliverable_size_bytes: Number(request.deliverable_size_bytes),
+          phaseProgress: phaseProgress(currentWave),
+          phaseTiming: phaseTiming(currentWave),
+        };
+      }),
     })),
   });
 }

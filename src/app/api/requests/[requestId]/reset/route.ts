@@ -45,6 +45,10 @@ export async function POST(
           total_emails: 0,
           emails_exported: 0,
           files_exported: 0,
+          wave: 1,
+          wave_scope: null,
+          render_base: null,
+          warning_base: null,
         },
       }),
     ]);
