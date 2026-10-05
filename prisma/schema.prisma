@@ -54,12 +54,14 @@ model ProcessedFile {
   upload_error            String?
   upload_heartbeat_at     BigInt?
   case_request_id         String?
+  wave                    Int      @default(1)
 
   emails Email[] @relation("ProcessedFileEmails")
   ai_batch_runs AiBatchRun[] @relation("CoordinatorAiBatchRuns")
   sharepoint_upload_artifacts SharePointUploadArtifact[]
   case_request CaseRequest? @relation(fields: [case_request_id], references: [id], onDelete: Cascade)
 
+  @@index([case_request_id, wave])
   @@map("processed_files")
 }
 
@@ -124,6 +126,10 @@ model CaseRequest {
   emails_exported       Int           @default(0)
   files_exported        Int           @default(0)
   error                 String?
+  wave                  Int           @default(1)
+  wave_scope            String?
+  render_base           Int?
+  warning_base          Int?
   started_at            DateTime?
   completed_at          DateTime?
   created_at            DateTime      @default(now())
