@@ -71,6 +71,21 @@ The scanner indexes each `.pst` as a `kind='pst'` row and each `Files` folder as
 
 ---
 
+## Running a request in waves
+
+A completed request can be **continued** when a case is larger than the disk.
+Use **Continue** on the request card, choose whether the next wave adds Mail,
+Files or both, drop the new PSTs/Files into the same staging folders and Run.
+
+- Output goes to the same `[case]/[request]` folder; `Email NNNN` numbering
+  continues after the last delivered number.
+- Emails already delivered by an earlier wave are skipped at Extract.
+- You can delete a finished wave's PSTs to free space; AIDA keeps the email
+  hashes it needs to deduplicate later waves.
+- **Reset** starts the request over (all waves, hashes and output).
+
+---
+
 ## Getting Started
 
 Install dependencies:
