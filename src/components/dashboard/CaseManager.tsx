@@ -48,6 +48,8 @@ type RequestItem = {
   id: string;
   name: string;
   scope: Scope;
+  wave: number;
+  wave_scope?: Scope | null;
   case_type?: "employee" | "client";
   status: string;
   pst_count: number;
@@ -117,6 +119,7 @@ function aggregateCaseRequests(requests: RequestItem[]): RequestItem {
     id: "case-total",
     name: "Case total",
     scope: "both",
+    wave: 1,
     status: requests.every((item) => item.status === "completed")
       ? "completed"
       : "active",
@@ -206,6 +209,10 @@ export function CaseManager() {
   const [caseType, setCaseType] = useState<"employee" | "client">("employee");
   const [configureTarget, setConfigureTarget] = useState<CaseItem | null>(null);
   const [newRequestFor, setNewRequestFor] = useState<string | null>(null);
+  const [continueTarget, setContinueTarget] = useState<RequestItem | null>(
+    null,
+  );
+  const [continueAdd, setContinueAdd] = useState<Scope>("mail");
   const [configuration, setConfiguration] = useState(initialConfiguration);
   const [requestForm, setRequestForm] = useState({
     name: "",
@@ -367,6 +374,15 @@ export function CaseManager() {
       setRequestForm({ name: "", scope: "both" });
       setNewRequestFor(null);
     }
+  };
+  const continueWave = async () => {
+    if (!continueTarget) return;
+    const result = await call(
+      `continue-${continueTarget.id}`,
+      `/api/requests/${continueTarget.id}/continue`,
+      { method: "POST", body: JSON.stringify({ add: continueAdd }) },
+    );
+    if (result) setContinueTarget(null);
   };
   const sendToOneTrust = async (item: CaseItem) => {
     const result = await call(
@@ -773,6 +789,11 @@ export function CaseManager() {
                                   <span className="rounded-full border border-indigo-400/20 bg-indigo-500/15 px-2 py-1 text-xs font-semibold text-indigo-200">
                                     {request.scope}
                                   </span>
+                                  {request.wave > 1 && (
+                                    <span className="rounded-full border border-sky-400/20 bg-sky-500/15 px-2 py-1 text-xs font-semibold text-sky-200">
+                                      Wave {request.wave}
+                                    </span>
+                                  )}
                                 </h3>
                                 <p className="mt-1 text-sm capitalize text-slate-400">
                                   {request.status}
@@ -780,6 +801,27 @@ export function CaseManager() {
                               </div>
                               {tab === "active" && (
                                 <div className="flex gap-2">
+                                  {request.status === "completed" && (
+                                    <Button
+                                      type="button"
+                                      variant="outline"
+                                      size="sm"
+                                      className="border-sky-400/45 bg-sky-500/10 text-sky-100 hover:bg-sky-500/20 hover:text-white"
+                                      disabled={
+                                        busy === `continue-${request.id}`
+                                      }
+                                      onClick={() => {
+                                        setContinueAdd(
+                                          request.scope === "files"
+                                            ? "files"
+                                            : "mail",
+                                        );
+                                        setContinueTarget(request);
+                                      }}
+                                    >
+                                      <Plus /> Continue
+                                    </Button>
+                                  )}
                                   <Button
                                     type="button"
                                     size="sm"
@@ -810,13 +852,21 @@ export function CaseManager() {
                                     size="sm"
                                     className="border-amber-400/45 bg-amber-500/10 text-amber-100 hover:bg-amber-500/20 hover:text-white disabled:border-slate-800 disabled:bg-slate-900/45 disabled:text-slate-600"
                                     disabled={busy === `reset-${request.id}`}
-                                    onClick={() =>
+                                    onClick={() => {
+                                      if (
+                                        request.wave > 1 &&
+                                        !window.confirm(
+                                          `Reset ${request.name}? This removes the output and email history of all ${request.wave} waves and cannot be re-created once earlier PSTs are deleted.`,
+                                        )
+                                      ) {
+                                        return;
+                                      }
                                       void call(
                                         `reset-${request.id}`,
                                         `/api/requests/${request.id}/reset`,
                                         { method: "POST" },
-                                      )
-                                    }
+                                      );
+                                    }}
                                   >
                                     {busy === `reset-${request.id}` ? (
                                       <Loader2 className="animate-spin" />
@@ -1162,6 +1212,73 @@ export function CaseManager() {
                 <Loader2 className="animate-spin" />
               )}
               Add request
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+      <Dialog
+        open={!!continueTarget}
+        onOpenChange={(open) => !open && setContinueTarget(null)}
+      >
+        <DialogContent className="border-slate-700 bg-slate-900 text-slate-100">
+          <DialogHeader>
+            <DialogTitle>
+              Continue {continueTarget?.name} (wave{" "}
+              {(continueTarget?.wave ?? 1) + 1})
+            </DialogTitle>
+            <DialogDescription>
+              New sources go into the same staging folders and are delivered
+              into the same output folder. Emails already delivered are skipped
+              and numbering continues.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-3">
+            <fieldset>
+              <legend className="mb-2 text-sm font-semibold text-slate-200">
+                Add to this request
+              </legend>
+              <div className="grid grid-cols-3 gap-2">
+                {scopeOptions.map((option) => {
+                  const selected = continueAdd === option.value;
+                  return (
+                    <label
+                      key={option.value}
+                      className={
+                        selected
+                          ? "rounded-xl border border-sky-400/45 bg-sky-500/20 px-2 py-3 text-left text-sky-100"
+                          : "rounded-xl border border-slate-700 bg-slate-950/55 px-2 py-3 text-left text-slate-400 transition hover:border-slate-600 hover:bg-slate-800 hover:text-slate-100"
+                      }
+                    >
+                      <input
+                        type="radio"
+                        name="continue-scope"
+                        value={option.value}
+                        checked={selected}
+                        onChange={() => setContinueAdd(option.value)}
+                        className="sr-only"
+                      />
+                      <span className="block text-sm font-bold">
+                        {option.label}
+                      </span>
+                      <span className="mt-1 block text-xs text-current opacity-70">
+                        {option.description}
+                      </span>
+                    </label>
+                  );
+                })}
+              </div>
+            </fieldset>
+            <Button
+              type="button"
+              disabled={
+                !continueTarget || busy === `continue-${continueTarget.id}`
+              }
+              onClick={() => void continueWave()}
+            >
+              {continueTarget && busy === `continue-${continueTarget.id}` && (
+                <Loader2 className="animate-spin" />
+              )}
+              Continue
             </Button>
           </div>
         </DialogContent>
