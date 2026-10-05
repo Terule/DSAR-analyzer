@@ -17,6 +17,19 @@ export function unionScope(left: string, right: string): WaveScope {
   return mail && files ? "both" : mail ? "mail" : "files";
 }
 
+/** The validated scope the request's current wave runs with. */
+export function effectiveWaveScope(
+  wave: number,
+  waveScope: string | null,
+  scope: string,
+): WaveScope {
+  const value = wave > 1 && waveScope ? waveScope : scope;
+  if (!SCOPES.includes(value)) {
+    throw new Error("Scope must be mail, files, or both.");
+  }
+  return value as WaveScope;
+}
+
 /**
  * Source-row id. Wave 1 keeps the historical formula so existing data is
  * untouched; later waves include the wave number so an identically named PST

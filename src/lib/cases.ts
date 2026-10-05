@@ -3,7 +3,12 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { isPstFilename } from "./file-types";
 import { prisma } from "./prisma";
-import { removeOutputAbove, unionScope, waveRowId } from "./request-waves";
+import {
+  effectiveWaveScope,
+  removeOutputAbove,
+  unionScope,
+  waveRowId,
+} from "./request-waves";
 
 export type RequestScope = "mail" | "files" | "both";
 
@@ -280,10 +285,10 @@ export async function scanRequestSources(requestId: string) {
     throw new Error("Request is not ready to run.");
   const wave = managedRequest.wave;
   // Wave 2+ validates only the sources this wave was opened for.
-  const scope = assertScope(
-    wave > 1 && managedRequest.wave_scope
-      ? managedRequest.wave_scope
-      : managedRequest.scope,
+  const scope = effectiveWaveScope(
+    wave,
+    managedRequest.wave_scope,
+    managedRequest.scope,
   );
   const pst =
     scope === "files"

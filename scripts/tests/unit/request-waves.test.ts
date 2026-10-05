@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
+  effectiveWaveScope,
   formatNumber,
   highestNumber,
   isRenderedSourceRow,
@@ -162,5 +163,21 @@ describe("removeOutputAbove", () => {
   });
   it("is a no-op for a missing folder", () => {
     assert.equal(removeOutputAbove("/definitely/not/here", "Email", 0), 0);
+  });
+});
+
+describe("effectiveWaveScope", () => {
+  it("wave 1 ignores wave_scope and uses scope", () => {
+    assert.equal(effectiveWaveScope(1, "files", "mail"), "mail");
+  });
+  it("wave 2 with wave_scope uses wave_scope", () => {
+    assert.equal(effectiveWaveScope(2, "files", "both"), "files");
+  });
+  it("wave 2 with null wave_scope falls back to scope", () => {
+    assert.equal(effectiveWaveScope(2, null, "both"), "both");
+  });
+  it("throws on an invalid value", () => {
+    assert.throws(() => effectiveWaveScope(2, "bogus", "both"));
+    assert.throws(() => effectiveWaveScope(1, null, "bogus"));
   });
 });

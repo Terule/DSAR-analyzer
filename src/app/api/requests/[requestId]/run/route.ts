@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { scanRequestSources } from "@/lib/cases";
 import { enqueueFilePhase } from "@/lib/control-plane/pipeline";
 import { prisma } from "@/lib/prisma";
+import { effectiveWaveScope } from "@/lib/request-waves";
 
 export const dynamic = "force-dynamic";
 
@@ -32,8 +33,13 @@ export async function POST(
         data: { status: "running", started_at: new Date() },
       }),
     ]);
+    const waveScope = effectiveWaveScope(
+      request.wave,
+      request.wave_scope,
+      request.scope,
+    );
     const admittedSources = sources.filter(
-      (source) => source.kind === "pst" || request.scope === "files",
+      (source) => source.kind === "pst" || waveScope === "files",
     );
     await Promise.all(
       admittedSources.map((source) =>
