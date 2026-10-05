@@ -211,6 +211,25 @@ export async function continueRequest(requestId: string, addRaw: string) {
   if (request.status !== "completed") {
     throw new Error("Only a completed request can be continued.");
   }
+  // A request reads `completed` even when a source failed; the next wave must
+  // not start on top of a half-delivered one.
+  const failed = await prisma.processedFile.count({
+    where: {
+      case_request_id: requestId,
+      wave: request.wave,
+      OR: [
+        { status: "failed" },
+        { ai_status: "failed" },
+        { pdf_status: "failed" },
+        { files_status: "failed" },
+      ],
+    },
+  });
+  if (failed > 0) {
+    throw new Error(
+      `Wave ${request.wave} has failed items. Retry or fix them (or Reset the request) before continuing.`,
+    );
+  }
   const folders = folderSet(add);
   await Promise.all([
     ...folders.inputs.map((name) =>
