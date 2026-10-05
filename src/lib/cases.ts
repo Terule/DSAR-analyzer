@@ -365,6 +365,20 @@ export async function removeEmptyCaseRoots(
   await Promise.all(
     [...roots].map(async (directory) => {
       try {
+        // Finder drops a `.DS_Store` into every folder it opens, which would
+        // make the folder look non-empty forever. Treat a folder holding only
+        // that junk as empty; anything else is still left alone.
+        const entries = await fs.readdir(directory);
+        if (
+          entries.length > 0 &&
+          entries.every((name) => name === ".DS_Store")
+        ) {
+          await Promise.all(
+            entries.map((name) =>
+              fs.rm(path.join(directory, name), { force: true }),
+            ),
+          );
+        }
         await fs.rmdir(directory);
       } catch (error) {
         const code = (error as NodeJS.ErrnoException).code;
@@ -374,6 +388,60 @@ export async function removeEmptyCaseRoots(
       }
     }),
   );
+}
+
+/**
+ * Deletes a request that holds nothing: never run (or reset back to `ready`),
+ * no source rows, and no visible files in its staging or deliverable folders.
+ * Returns `alreadyDeleted` so a repeated click stays idempotent.
+ */
+export async function deleteUnusedRequest(
+  requestId: string,
+): Promise<{ alreadyDeleted: boolean }> {
+  const request = await prisma.caseRequest.findUnique({
+    where: { id: requestId },
+    include: { _count: { select: { processed_files: true } } },
+  });
+  if (!request) return { alreadyDeleted: true };
+  if (
+    request.status !== "ready" ||
+    request.started_at ||
+    request._count.processed_files > 0
+  ) {
+    throw new Error(
+      "Only a request that has never run (or was reset) can be deleted.",
+    );
+  }
+  const [staged, delivered] = await Promise.all([
+    summary(request.staging_path, () => true),
+    summary(request.deliverable_path, () => true),
+  ]);
+  if (staged.count > 0) {
+    throw new Error(
+      `The staging folder still contains ${staged.count} file${staged.count === 1 ? "" : "s"}. Remove the files first.`,
+    );
+  }
+  if (delivered.count > 0) {
+    throw new Error(
+      `The output folder already contains ${delivered.count} file${delivered.count === 1 ? "" : "s"}.`,
+    );
+  }
+  // Atomic guard: a Run started after the checks above wins and this matches
+  // nothing, so a request that just began working is never removed.
+  const deleted = await prisma.caseRequest.deleteMany({
+    where: {
+      id: requestId,
+      status: "ready",
+      started_at: null,
+      processed_files: { none: {} },
+    },
+  });
+  if (deleted.count === 0) {
+    throw new Error("The request changed state. Refresh and try again.");
+  }
+  await removeRequestFolders([request], true);
+  await removeEmptyCaseRoots([request]);
+  return { alreadyDeleted: false };
 }
 
 export async function refreshRequestLifecycle(

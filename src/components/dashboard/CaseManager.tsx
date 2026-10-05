@@ -825,6 +825,32 @@ export function CaseManager() {
                                     )}{" "}
                                     Reset
                                   </Button>
+                                  {request.status === "ready" &&
+                                    request.deliverable_files === 0 && (
+                                      <Button
+                                        type="button"
+                                        variant="outline"
+                                        size="sm"
+                                        className="border-red-400/45 bg-red-500/10 text-red-100 hover:bg-red-500/20 hover:text-white"
+                                        disabled={
+                                          busy === `delete-${request.id}`
+                                        }
+                                        onClick={() =>
+                                          void call(
+                                            `delete-${request.id}`,
+                                            `/api/requests/${request.id}`,
+                                            { method: "DELETE" },
+                                          )
+                                        }
+                                      >
+                                        {busy === `delete-${request.id}` ? (
+                                          <Loader2 className="animate-spin" />
+                                        ) : (
+                                          <Trash2 />
+                                        )}{" "}
+                                        Delete
+                                      </Button>
+                                    )}
                                 </div>
                               )}
                             </div>
