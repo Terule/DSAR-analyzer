@@ -99,10 +99,11 @@ export async function queueSharePointArtifacts(
       if (existing.status !== "failed") continue;
     }
     if (existing) {
+      // Keep the original owner: an earlier wave's row may own this file, and
+      // re-pointing it here would cascade-delete it with a re-run of this row.
       await prisma.sharePointUploadArtifact.update({
         where: { local_path: localPath },
         data: {
-          source_file_id: fileId,
           request_key: requestKey,
           relative_path: relativePath,
           file_size_bytes: size,
