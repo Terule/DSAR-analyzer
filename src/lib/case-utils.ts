@@ -6,7 +6,8 @@ import { prisma } from "./prisma";
  * across every PST file in a case/request. These helpers let the AI-completion
  * and Render steps treat that group as one unit.
  *
- * A "case" here = all `kind='pst'` rows in the same `[case]/[request]`.
+ * A "case" here = all `kind='pst'` rows in the same `[case]/[request]` and,
+ * for managed requests, the same wave.
  * Nested folders below the request are eDiscovery export containers only.
  */
 
@@ -14,9 +15,24 @@ import { prisma } from "./prisma";
 export async function getCasePstFileIds(fileId: string): Promise<string[]> {
   const row = await prisma.processedFile.findUnique({
     where: { id: fileId },
-    select: { filepath: true },
+    select: { filepath: true, case_request_id: true, wave: true },
   });
   if (!row?.filepath) return [fileId];
+
+  // Managed requests run in waves: siblings are the PST rows of the same
+  // request AND wave, so a finished earlier wave never becomes the coordinator
+  // of, or blocks, the current one.
+  if (row.case_request_id) {
+    const siblings = await prisma.processedFile.findMany({
+      where: {
+        kind: "pst",
+        case_request_id: row.case_request_id,
+        wave: row.wave,
+      },
+      select: { id: true },
+    });
+    return siblings.length > 0 ? siblings.map((r) => r.id) : [fileId];
+  }
 
   const caseKey = getCaseKey(row.filepath);
   const rows = await prisma.processedFile.findMany({
