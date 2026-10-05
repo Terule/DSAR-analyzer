@@ -18,6 +18,7 @@ interface GraphDriveItem {
 
 interface GraphCollection<T> {
   value?: T[];
+  "@odata.nextLink"?: string;
 }
 
 const MAX_GRAPH_RETRIES = 6;
@@ -191,13 +192,23 @@ async function ensureFolder(
   const cacheKey = `${parentId}:${name}`;
   const cached = cache.get(cacheKey);
   if (cached) return cached;
-  const children = await graphJson<GraphCollection<GraphDriveItem>>(
-    `/drives/${driveId}/items/${parentId}/children?$select=id,name,folder&$top=200`,
-    token,
-  );
-  const existing = children.value?.find(
-    (item) => item.name === name && item.folder,
-  );
+  // Graph pages large folders (`Emails/` holds thousands of children). Follow
+  // @odata.nextLink so an existing folder past the first page is found instead
+  // of being re-created, which fails with 409 "Name already exists".
+  let existing: GraphDriveItem | undefined;
+  let nextPath: string | undefined =
+    `/drives/${driveId}/items/${parentId}/children?$select=id,name,folder&$top=200`;
+  while (nextPath && !existing) {
+    const page: GraphCollection<GraphDriveItem> = await graphJson(
+      nextPath,
+      token,
+    );
+    existing = page.value?.find((item) => item.name === name && item.folder);
+    const nextLink = page["@odata.nextLink"];
+    nextPath = nextLink
+      ? nextLink.replace("https://graph.microsoft.com/v1.0", "")
+      : undefined;
+  }
   if (existing) {
     cache.set(cacheKey, existing.id);
     return existing.id;
