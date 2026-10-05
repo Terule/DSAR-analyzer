@@ -55,10 +55,15 @@ function phaseProgress(
     0,
   );
   // A case can have several source rows, but only rows with an upload total
-  // own deliverables. This avoids showing an idle sibling PST as the active
-  // upload state while its coordinator is uploading.
+  // own deliverables. Sibling PSTs that never queued anything keep a default
+  // `pending`/`idle` status with a zero total; counting them would stop the
+  // request from ever reading as completed (stuck at 99%). A zero-total row
+  // only matters while it is actively uploading or after it failed.
   const uploadRows = rows.filter(
-    (row) => row.upload_total > 0 || row.upload_status !== "idle",
+    (row) =>
+      row.upload_total > 0 ||
+      row.upload_status === "processing" ||
+      row.upload_status === "failed",
   );
   const uploadTotal = uploadRows.reduce(
     (count, row) => count + row.upload_total,
