@@ -13,6 +13,10 @@ import {
 } from "@/lib/control-plane/pipeline";
 import { prisma } from "@/lib/prisma";
 import { getPstArtifactPaths } from "@/lib/pst-artifacts";
+import {
+  clearWaveFilesOutput,
+  highestFinalizedNumber,
+} from "@/lib/request-waves";
 
 export const dynamic = "force-dynamic";
 
@@ -25,7 +29,10 @@ async function waitForWorkerCancellation(fileId: string): Promise<boolean> {
   return false;
 }
 
-function clearFilesDeliverables(filepath: string): void {
+function clearFilesDeliverables(
+  filepath: string,
+  bases: { documents: number | null; messages: number | null },
+): void {
   const stagingPath = process.env.STAGING_PATH || "";
   const outputPath = process.env.EXTRACTED_PATH || "";
   const relative = path.relative(stagingPath, filepath);
@@ -33,14 +40,51 @@ function clearFilesDeliverables(filepath: string): void {
     throw new Error("Files output path cannot be resolved safely.");
   }
   const caseOutputPath = path.join(outputPath, path.dirname(relative));
-  for (const folder of ["Messages", "Documents"]) {
-    fs.rmSync(path.join(caseOutputPath, folder), {
-      recursive: true,
-      force: true,
-      maxRetries: 10,
-      retryDelay: 250,
-    });
-  }
+  clearWaveFilesOutput(
+    path.join(caseOutputPath, "Messages"),
+    "Message",
+    bases.messages,
+  );
+  clearWaveFilesOutput(
+    path.join(caseOutputPath, "Documents"),
+    "Document",
+    bases.documents,
+  );
+}
+
+/**
+ * Wave 2+ keeps earlier waves' delivered Files output (their sources are gone,
+ * so it could not be regenerated). Wave 1 / unmanaged rows clear everything.
+ */
+async function filesRetryBases(
+  caseRequestId: string | null,
+  filepath: string,
+): Promise<{ documents: number | null; messages: number | null }> {
+  const request = caseRequestId
+    ? await prisma.caseRequest.findUnique({
+        where: { id: caseRequestId },
+        select: { wave: true, files_doc_base: true, files_msg_base: true },
+      })
+    : null;
+  if (!request || request.wave <= 1) return { documents: null, messages: null };
+  const outputPath = process.env.EXTRACTED_PATH || "";
+  const caseOutputPath = path.join(
+    outputPath,
+    path.dirname(path.relative(process.env.STAGING_PATH || "", filepath)),
+  );
+  // A coordinator that failed before recording its bases numbered nothing,
+  // so everything finalized so far belongs to earlier waves.
+  return {
+    documents:
+      request.files_doc_base ??
+      highestFinalizedNumber(
+        path.join(caseOutputPath, "Documents"),
+        "Document",
+      ),
+    messages:
+      request.files_msg_base ??
+      highestFinalizedNumber(path.join(caseOutputPath, "Messages"), "Message"),
+  };
 }
 
 export async function POST(request: Request) {
@@ -65,6 +109,7 @@ export async function POST(request: Request) {
         total_emails: true,
         unique_emails: true,
         filepath: true,
+        case_request_id: true,
       },
     });
 
@@ -100,7 +145,10 @@ export async function POST(request: Request) {
           { status: 400 },
         );
       }
-      clearFilesDeliverables(row.filepath);
+      clearFilesDeliverables(
+        row.filepath,
+        await filesRetryBases(row.case_request_id, row.filepath),
+      );
       await clearFilesBatchResults(fileId);
       await prisma.processedFile.update({
         where: { id: fileId },

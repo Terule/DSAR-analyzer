@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 import {
+  clearWaveFilesOutput,
   effectiveWaveScope,
   formatNumber,
   highestFinalizedNumber,
@@ -258,5 +259,59 @@ describe("highestFinalizedNumber", () => {
   });
   it("returns 0 for a missing folder", () => {
     assert.equal(highestFinalizedNumber("/definitely/not/here", "Document"), 0);
+  });
+});
+
+describe("clearWaveFilesOutput", () => {
+  function seed(): string {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "waves-files-"));
+    for (const n of [1, 2, 3, 4, 5]) {
+      fs.writeFileSync(path.join(dir, `Document ${n}.pdf`), "x");
+    }
+    fs.writeFileSync(path.join(dir, "Document 0123456789abcdef.pdf"), "x");
+    fs.writeFileSync(path.join(dir, "Document 1234567890123456.docx"), "x");
+    fs.mkdirSync(path.join(dir, "Unconverted"));
+    fs.writeFileSync(path.join(dir, "Unconverted", "x"), "x");
+    return dir;
+  }
+  it("removes the whole folder when there is no base (wave 1)", () => {
+    const dir = seed();
+    try {
+      clearWaveFilesOutput(dir, "Document", null);
+      assert.equal(fs.existsSync(dir), false);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("keeps earlier waves' files and Unconverted above a base", () => {
+    const dir = seed();
+    try {
+      assert.equal(clearWaveFilesOutput(dir, "Document", 3), 4);
+      assert.deepEqual(fs.readdirSync(dir).sort(), [
+        "Document 1.pdf",
+        "Document 2.pdf",
+        "Document 3.pdf",
+        "Unconverted",
+      ]);
+      assert.ok(fs.existsSync(path.join(dir, "Unconverted", "x")));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("base 0 removes every numbered and hash-named file but keeps Unconverted", () => {
+    const dir = seed();
+    try {
+      assert.equal(clearWaveFilesOutput(dir, "Document", 0), 7);
+      assert.deepEqual(fs.readdirSync(dir), ["Unconverted"]);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("returns 0 for a missing folder", () => {
+    assert.equal(clearWaveFilesOutput("/definitely/not/here", "Message", 2), 0);
+    assert.equal(
+      clearWaveFilesOutput("/definitely/not/here", "Message", null),
+      0,
+    );
   });
 });

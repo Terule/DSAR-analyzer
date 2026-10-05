@@ -159,3 +159,38 @@ export function highestFinalizedNumber(
     prefix,
   );
 }
+
+/**
+ * Clears a Documents/Messages folder before a Files retry. Without a base
+ * (wave 1 / unmanaged) the whole folder goes, as it always has. With a base
+ * only this wave's output goes: hash-named files awaiting finalize and files
+ * numbered above the base. Earlier waves' files and `Unconverted/` stay.
+ * Returns the number of top-level entries removed.
+ */
+export function clearWaveFilesOutput(
+  folder: string,
+  prefix: FilesPrefix,
+  base: number | null,
+): number {
+  if (!fs.existsSync(folder)) return 0;
+  if (base === null) {
+    const count = fs.readdirSync(folder).length;
+    fs.rmSync(folder, {
+      recursive: true,
+      force: true,
+      maxRetries: 10,
+      retryDelay: 250,
+    });
+    return count;
+  }
+  const pattern = numberPattern(prefix);
+  let removed = 0;
+  for (const name of fs.readdirSync(folder)) {
+    const match = pattern.exec(name);
+    if (isUnfinalizedName(name, prefix) || (match && Number(match[1]) > base)) {
+      fs.rmSync(path.join(folder, name), { recursive: true, force: true });
+      removed++;
+    }
+  }
+  return removed;
+}
