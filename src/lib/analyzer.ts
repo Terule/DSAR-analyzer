@@ -5,6 +5,7 @@ import path from "node:path";
 import type { FieldsData } from "@kenjiuno/msgreader";
 import MsgReader from "@kenjiuno/msgreader";
 import { type ParsedMail, simpleParser } from "mailparser";
+import { computeEmailHash, dedupScope, isDuplicateEmail } from "./email-dedup";
 import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
@@ -77,11 +78,13 @@ export async function analyzePstDuplicates(
       filepath: true,
       subject_email: true,
       subject_personal_email: true,
+      case_request_id: true,
       case_request: { select: { case: { select: { case_type: true } } } },
     },
   });
   if (!row?.filepath) throw new Error("File metadata not found.");
   const filepath = row.filepath;
+  const caseRequestId = row.case_request_id;
 
   // subjectEmail  = personal email: emails TO this address bypass the keyword pre-filter.
   // subjectCompanyEmail = work email: emails FROM this TO the personal email are self-forwards
@@ -354,24 +357,24 @@ export async function analyzePstDuplicates(
     // Deduplication is scoped to THIS case/request, not global. Each DSAR
     // request is an independent deliverable, so the same email involving two
     // custodians must be kept for BOTH requests. Folding the request scope
-    // (cleanRelativePath) into the hash means different requests never collide,
-    // while multiple PST files within the same request still dedup together.
+    // (`[case]/[request]/PST`, see dedupScope) into the hash means different
+    // requests never collide, while every PST file of the same request (and of
+    // its later waves) dedups together.
     let baseHash: string;
     if (messageId && messageId.length > 5) {
       baseHash = crypto.createHash("sha256").update(messageId).digest("hex");
     } else {
       baseHash = generateFallbackHash(senderRaw, subject, bodyRaw);
     }
-    const emailHash = crypto
-      .createHash("sha256")
-      .update(`${cleanRelativePath}::${baseHash}`)
-      .digest("hex");
+    const emailHash = computeEmailHash(dedupScope(cleanRelativePath), baseHash);
 
-    const existingRecord = await prisma.email.findFirst({
-      where: { email_hash: emailHash },
-      select: { id: true },
-    });
-    const isDuplicate = existingRecord ? 1 : 0;
+    const isDuplicate = (await isDuplicateEmail({
+      emailHash,
+      messageId,
+      caseRequestId,
+    }))
+      ? 1
+      : 0;
 
     if (isDuplicate === 1) {
       metrics.duplicateCount++;

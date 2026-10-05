@@ -130,6 +130,8 @@ model CaseRequest {
   wave_scope            String?
   render_base           Int?
   warning_base          Int?
+  files_doc_base        Int?
+  files_msg_base        Int?
   started_at            DateTime?
   completed_at          DateTime?
   created_at            DateTime      @default(now())
@@ -182,6 +184,7 @@ model Email {
 
   @@index([file_id])
   @@index([ai_batch_run_id])
+  @@index([message_id])
   @@map("emails")
 }
 
