@@ -49,6 +49,8 @@ export async function POST(
           wave_scope: null,
           render_base: null,
           warning_base: null,
+          files_doc_base: null,
+          files_msg_base: null,
         },
       }),
     ]);

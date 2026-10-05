@@ -230,6 +230,8 @@ export async function continueRequest(requestId: string, addRaw: string) {
       scope: unionScope(request.scope, add),
       render_base: null,
       warning_base: null,
+      files_doc_base: null,
+      files_msg_base: null,
       error: null,
       completed_at: null,
     },
@@ -404,7 +406,14 @@ export async function scanRequestSources(requestId: string) {
         files_size_bytes: BigInt(files.size),
         status: "queued",
         error: null,
-        ...(wave > 1 ? { render_base: null, warning_base: null } : {}),
+        ...(wave > 1
+          ? {
+              render_base: null,
+              warning_base: null,
+              files_doc_base: null,
+              files_msg_base: null,
+            }
+          : {}),
       },
     }),
   ]);

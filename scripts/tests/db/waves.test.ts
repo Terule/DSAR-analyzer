@@ -97,6 +97,8 @@ describe("continue and wave-aware scan", () => {
     assert.equal(next.scope, "both");
     assert.equal(next.status, "ready");
     assert.equal(next.render_base, null);
+    assert.equal(next.files_doc_base, null);
+    assert.equal(next.files_msg_base, null);
     assert.ok(fs.existsSync(path.join(staging, "Files")));
     assert.ok(fs.existsSync(path.join(deliverable, "Documents")));
     await assert.rejects(() => continueRequest(requestId, "files"));
@@ -129,7 +131,13 @@ describe("continue and wave-aware scan", () => {
     fs.writeFileSync(path.join(deliverable, "Emails", "Email 03.pdf"), "x");
     await prisma.caseRequest.update({
       where: { id: requestId },
-      data: { status: "failed", render_base: 1, warning_base: 0 },
+      data: {
+        status: "failed",
+        render_base: 1,
+        warning_base: 0,
+        files_doc_base: 4,
+        files_msg_base: 2,
+      },
     });
     await scanRequestSources(requestId);
     assert.deepEqual(fs.readdirSync(path.join(deliverable, "Emails")).sort(), [
@@ -140,5 +148,7 @@ describe("continue and wave-aware scan", () => {
     });
     assert.equal(request.render_base, null);
     assert.equal(request.warning_base, null);
+    assert.equal(request.files_doc_base, null);
+    assert.equal(request.files_msg_base, null);
   });
 });

@@ -3,7 +3,8 @@ import fs from "node:fs";
 import path from "node:path";
 
 export type WaveScope = "mail" | "files" | "both";
-export type NumberedPrefix = "Email" | "Warning";
+export type NumberedPrefix = "Email" | "Warning" | "Document" | "Message";
+export type FilesPrefix = "Document" | "Message";
 
 const SCOPES: readonly string[] = ["mail", "files", "both"];
 
@@ -51,7 +52,18 @@ function numberPattern(prefix: NumberedPrefix): RegExp {
   return new RegExp(`^${prefix} (\\d+)\\b`);
 }
 
-/** Highest `Email N` / `Warning N` among directory entry names (0 if none). */
+/**
+ * Files workers write `<prefix> <first 16 lowercase hex chars of the source
+ * sha256><ext>` (ext may be empty for a fallback copy); finalize renames them
+ * to `<prefix> N<ext>`. Finalized numbers are file counts, which never come
+ * close to 16 digits, so a 16-character token is always a hash name, even when
+ * every character happens to be a digit.
+ */
+export function isUnfinalizedName(name: string, prefix: FilesPrefix): boolean {
+  return new RegExp(`^${prefix} [0-9a-f]{16}(\\.|$)`).test(name);
+}
+
+/** Highest `<prefix> N` among directory entry names (0 if none). */
 export function highestNumber(names: string[], prefix: NumberedPrefix): number {
   const pattern = numberPattern(prefix);
   let highest = 0;
@@ -131,4 +143,19 @@ export function removeOutputAbove(
     }
   }
   return removed;
+}
+
+/**
+ * Highest finalized `<prefix> N` in a Documents/Messages folder (0 if none or
+ * missing). Hash-named files still awaiting finalize are ignored.
+ */
+export function highestFinalizedNumber(
+  folder: string,
+  prefix: FilesPrefix,
+): number {
+  if (!fs.existsSync(folder)) return 0;
+  return highestNumber(
+    fs.readdirSync(folder).filter((name) => !isUnfinalizedName(name, prefix)),
+    prefix,
+  );
 }

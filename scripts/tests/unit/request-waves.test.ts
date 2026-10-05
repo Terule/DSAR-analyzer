@@ -6,8 +6,10 @@ import { describe, it } from "node:test";
 import {
   effectiveWaveScope,
   formatNumber,
+  highestFinalizedNumber,
   highestNumber,
   isRenderedSourceRow,
+  isUnfinalizedName,
   numberWidth,
   removeOutputAbove,
   rowsToPrune,
@@ -179,5 +181,82 @@ describe("effectiveWaveScope", () => {
   it("throws on an invalid value", () => {
     assert.throws(() => effectiveWaveScope(2, "bogus", "both"));
     assert.throws(() => effectiveWaveScope(1, null, "bogus"));
+  });
+});
+
+describe("Document / Message numbering", () => {
+  it("reads Document and Message numbers separately", () => {
+    const names = ["Document 3.pdf", "Document 12.docx", "Message 7.pdf"];
+    assert.equal(highestNumber(names, "Document"), 12);
+    assert.equal(highestNumber(names, "Message"), 7);
+    assert.equal(numberWidth(names, "Document", 13), 2);
+    assert.equal(numberWidth(["Message 0099.pdf"], "Message", 101), 4);
+  });
+});
+
+describe("isUnfinalizedName", () => {
+  it("is true for the 16-hex hash names Files workers write", () => {
+    assert.equal(
+      isUnfinalizedName("Document 0123456789abcdef.pdf", "Document"),
+      true,
+    );
+    assert.equal(
+      isUnfinalizedName("Message 0123456789abcdef.pdf", "Message"),
+      true,
+    );
+    // An all-digit hash prefix is still a hash name.
+    assert.equal(
+      isUnfinalizedName("Document 1234567890123456.pdf", "Document"),
+      true,
+    );
+    // Fallback copies keep the source extension, which may be empty.
+    assert.equal(
+      isUnfinalizedName("Document 0123456789abcdef.xlsx", "Document"),
+      true,
+    );
+    assert.equal(
+      isUnfinalizedName("Document 0123456789abcdef", "Document"),
+      true,
+    );
+  });
+  it("is false for finalized and unrelated names", () => {
+    assert.equal(isUnfinalizedName("Document 12.pdf", "Document"), false);
+    assert.equal(isUnfinalizedName("Document 0012.pdf", "Document"), false);
+    assert.equal(
+      isUnfinalizedName("Message 0123456789abcdef.pdf", "Document"),
+      false,
+    );
+    assert.equal(
+      isUnfinalizedName("Document 0123456789ABCDEF.pdf", "Document"),
+      false,
+    );
+    assert.equal(
+      isUnfinalizedName("Document 0123456789abcdef0.pdf", "Document"),
+      false,
+    );
+    assert.equal(isUnfinalizedName("Unconverted", "Document"), false);
+  });
+});
+
+describe("highestFinalizedNumber", () => {
+  it("ignores hash-named files and subfolders", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "waves-"));
+    try {
+      for (const name of [
+        "Document 1.pdf",
+        "Document 7.docx",
+        "Document 1234567890123456.pdf",
+      ]) {
+        fs.writeFileSync(path.join(dir, name), "x");
+      }
+      fs.mkdirSync(path.join(dir, "Unconverted"));
+      assert.equal(highestFinalizedNumber(dir, "Document"), 7);
+      assert.equal(highestFinalizedNumber(dir, "Message"), 0);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+  it("returns 0 for a missing folder", () => {
+    assert.equal(highestFinalizedNumber("/definitely/not/here", "Document"), 0);
   });
 });

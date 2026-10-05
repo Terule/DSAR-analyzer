@@ -10,6 +10,13 @@ import { simpleParser } from "mailparser";
 import { normalizeHtmlForPdf } from "./converter";
 import { stripEmailSignature } from "./email-content";
 import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
+import {
+  type FilesPrefix,
+  formatNumber,
+  highestNumber,
+  isUnfinalizedName,
+  numberWidth,
+} from "./request-waves";
 
 export interface StandaloneBatchParams {
   inputDir: string;
@@ -112,19 +119,26 @@ export function listStandaloneInputFiles(inputDir: string): string[] {
 /**
  * Converts the collision-safe hash filenames produced by parallel workers into
  * a clean deliverable sequence once no worker can still write to the folders.
- * Two-stage renaming makes the operation safe even when a target name already
- * exists from a previous attempt.
+ * Only hash-named files are renamed: files finalized by an earlier wave of the
+ * request keep their names and the new ones continue after the highest
+ * existing number. Two-stage renaming makes the operation safe even when a
+ * target name already exists from a previous attempt.
  */
-function renameDeliverableFolder(folder: string, prefix: string): number {
+function renameDeliverableFolder(folder: string, prefix: FilesPrefix): number {
   if (!fs.existsSync(folder)) return 0;
-  const files = fs
+  const names = fs
     .readdirSync(folder, { withFileTypes: true })
     .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
-    .map((entry) => entry.name)
+    .map((entry) => entry.name);
+  const files = names
+    .filter((name) => isUnfinalizedName(name, prefix))
     .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }));
+  const finalized = names.filter((name) => !isUnfinalizedName(name, prefix));
+  const start = highestNumber(finalized, prefix);
   // Keep names compact while preserving natural lexical ordering: 1–9 needs
-  // no padding, 10–99 needs two digits, and so on.
-  const padLength = String(Math.max(1, files.length)).length;
+  // no padding, 10–99 needs two digits, and so on. Never narrower than names
+  // already delivered, which are not renamed when the width grows.
+  const padLength = numberWidth(finalized, prefix, start + files.length);
   const temporaryNames = files.map((name, index) => {
     const temporary = `.__finalizing-${index}-${name}`;
     fs.renameSync(path.join(folder, name), path.join(folder, temporary));
@@ -135,7 +149,7 @@ function renameDeliverableFolder(folder: string, prefix: string): number {
     const extension = path.extname(
       temporary.replace(/^\.__finalizing-\d+-/, ""),
     );
-    const finalName = `${prefix} ${String(index + 1).padStart(padLength, "0")}${extension}`;
+    const finalName = `${prefix} ${formatNumber(start + index + 1, padLength)}${extension}`;
     fs.renameSync(path.join(folder, temporary), path.join(folder, finalName));
   }
   return files.length;

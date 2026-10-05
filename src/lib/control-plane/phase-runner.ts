@@ -14,6 +14,7 @@ import { extractUniqueEmails } from "@/lib/exporter";
 import { archiveCompletedCase } from "@/lib/history";
 import { prisma } from "@/lib/prisma";
 import { getPstArtifactPaths } from "@/lib/pst-artifacts";
+import { highestFinalizedNumber } from "@/lib/request-waves";
 import { queueSharePointArtifacts } from "@/lib/sharepoint-artifact-outbox";
 import { startSharePointArtifactWorker } from "@/lib/sharepoint-artifact-queue";
 import {
@@ -369,12 +370,38 @@ export async function runPhaseJob(
     const request = row.case_request_id
       ? await prisma.caseRequest.findUnique({
           where: { id: row.case_request_id },
-          select: { case: { select: { case_type: true } } },
+          select: {
+            wave: true,
+            files_doc_base: true,
+            files_msg_base: true,
+            case: { select: { case_type: true } },
+          },
         })
       : null;
     const isClientCase = request?.case.case_type === "client";
     const messagesDir = path.join(outputBase, requestPath, "Messages");
     const documentsDir = path.join(outputBase, requestPath, "Documents");
+    // Wave 2+ records how far earlier waves numbered Documents/Messages, so a
+    // retry of this wave can remove only its own output. Kept once set: a
+    // coordinator retry must not move the base past this wave's output.
+    if (
+      row.case_request_id &&
+      request &&
+      request.wave > 1 &&
+      (request.files_doc_base === null || request.files_msg_base === null)
+    ) {
+      await prisma.caseRequest.update({
+        where: { id: row.case_request_id },
+        data: {
+          files_doc_base:
+            request.files_doc_base ??
+            highestFinalizedNumber(documentsDir, "Document"),
+          files_msg_base:
+            request.files_msg_base ??
+            highestFinalizedNumber(messagesDir, "Message"),
+        },
+      });
+    }
     const runKey = String(row.files_started_at || BigInt(Date.now()));
     await clearFilesBatchResults(fileId);
 
