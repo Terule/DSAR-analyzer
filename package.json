@@ -22,7 +22,9 @@
     "prisma:push": "prisma db push",
     "prisma:migrate": "prisma migrate dev",
     "lint": "biome check",
-    "format": "biome format --write"
+    "format": "biome format --write",
+    "test": "node --import tsx --test scripts/tests/unit/*.test.ts",
+    "test:db": "node --import tsx --test scripts/tests/db/*.test.ts"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",
