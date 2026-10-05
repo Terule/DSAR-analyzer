@@ -7,6 +7,7 @@ import {
   insertRunHistorySnapshot,
 } from "./history";
 import { prisma } from "./prisma";
+import { rowsToPrune } from "./request-waves";
 
 // Recursive function using async/promises to prevent blocking the Node.js event loop
 async function getAllPstFiles(
@@ -199,12 +200,20 @@ export async function syncStagingArea(
  */
 export async function pruneMissingRows(): Promise<number> {
   const rows = await prisma.processedFile.findMany({
-    select: { id: true, filepath: true },
+    select: {
+      id: true,
+      filepath: true,
+      case_request_id: true,
+      kind: true,
+      pdf_status: true,
+      files_status: true,
+    },
   });
 
-  const missingRows = rows.filter(
-    (item) => !item.filepath || !fs.existsSync(item.filepath),
-  );
+  // Rows of a managed request that already finished rendering are kept even
+  // when their source is gone: their email hashes are the dedup memory that
+  // later waves rely on, and deleting finished PSTs to free disk is expected.
+  const missingRows = rowsToPrune(rows, (filepath) => fs.existsSync(filepath));
   const missingIds = missingRows.map((item) => item.id);
 
   if (missingIds.length > 0) {
