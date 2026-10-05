@@ -3,6 +3,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { isPstFilename } from "./file-types";
 import { prisma } from "./prisma";
+import { removeOutputAbove, unionScope, waveRowId } from "./request-waves";
 
 export type RequestScope = "mail" | "files" | "both";
 
@@ -189,6 +190,51 @@ export async function addManagedRequest(
   }
 }
 
+/**
+ * Reopens a completed request for its next wave. New sources go into the same
+ * staging folders and are delivered into the same output folder.
+ */
+export async function continueRequest(requestId: string, addRaw: string) {
+  const add = assertScope(addRaw);
+  const request = await prisma.caseRequest.findUnique({
+    where: { id: requestId },
+    include: { case: { select: { status: true } } },
+  });
+  if (!request || request.case.status !== "active") {
+    throw new Error("Active request not found.");
+  }
+  if (request.status !== "completed") {
+    throw new Error("Only a completed request can be continued.");
+  }
+  const folders = folderSet(add);
+  await Promise.all([
+    ...folders.inputs.map((name) =>
+      fs.mkdir(path.join(request.staging_path, name), { recursive: true }),
+    ),
+    ...folders.outputs.map((name) =>
+      fs.mkdir(path.join(request.deliverable_path, name), { recursive: true }),
+    ),
+  ]);
+  // Guarded so a double click or a concurrent Run cannot bump the wave twice.
+  const updated = await prisma.caseRequest.updateMany({
+    where: { id: requestId, status: "completed" },
+    data: {
+      status: "ready",
+      wave: { increment: 1 },
+      wave_scope: add,
+      scope: unionScope(request.scope, add),
+      render_base: null,
+      warning_base: null,
+      error: null,
+      completed_at: null,
+    },
+  });
+  if (updated.count === 0) {
+    throw new Error("The request changed state. Refresh and try again.");
+  }
+  return prisma.caseRequest.findUniqueOrThrow({ where: { id: requestId } });
+}
+
 async function summary(directory: string, test: (name: string) => boolean) {
   let count = 0;
   let size = 0;
@@ -232,7 +278,13 @@ export async function scanRequestSources(requestId: string) {
   const managedRequest = request;
   if (!["ready", "failed"].includes(managedRequest.status))
     throw new Error("Request is not ready to run.");
-  const scope = assertScope(managedRequest.scope);
+  const wave = managedRequest.wave;
+  // Wave 2+ validates only the sources this wave was opened for.
+  const scope = assertScope(
+    wave > 1 && managedRequest.wave_scope
+      ? managedRequest.wave_scope
+      : managedRequest.scope,
+  );
   const pst =
     scope === "files"
       ? { count: 0, size: 0 }
@@ -275,11 +327,7 @@ export async function scanRequestSources(requestId: string) {
       else if (entry.isFile() && isPstFilename(entry.name)) {
         const stat = await fs.stat(full);
         sources.push({
-          id: crypto
-            .createHash("sha256")
-            .update(`${managedRequest.id}:${full}`)
-            .digest("hex")
-            .slice(0, 24),
+          id: waveRowId(managedRequest.id, wave, full),
           filepath: full,
           filename: entry.name,
           kind: "pst",
@@ -292,21 +340,38 @@ export async function scanRequestSources(requestId: string) {
     await collectPst(path.join(managedRequest.staging_path, "PST"));
   if (scope !== "mail")
     sources.push({
-      id: crypto
-        .createHash("sha256")
-        .update(
-          `${managedRequest.id}:${path.join(managedRequest.staging_path, "Files")}`,
-        )
-        .digest("hex")
-        .slice(0, 24),
+      id: waveRowId(
+        managedRequest.id,
+        wave,
+        path.join(managedRequest.staging_path, "Files"),
+      ),
       filepath: path.join(managedRequest.staging_path, "Files"),
       filename: "Files",
       kind: "files",
       bytes: files.size,
     });
+  // A re-run of a failed wave 2+ starts from scratch: drop the output its
+  // earlier attempt numbered above the stored base. Wave 1 keeps today's
+  // resume-by-existing-PDF behaviour.
+  if (wave > 1 && managedRequest.render_base !== null) {
+    const emailsDir = path.join(managedRequest.deliverable_path, "Emails");
+    removeOutputAbove(emailsDir, "Email", managedRequest.render_base);
+    removeOutputAbove(
+      path.join(emailsDir, "Warning"),
+      "Warning",
+      managedRequest.warning_base ?? 0,
+    );
+  }
+  const previousIds = (
+    await prisma.processedFile.findMany({
+      where: { case_request_id: managedRequest.id, wave },
+      select: { id: true },
+    })
+  ).map((row) => row.id);
   await prisma.$transaction([
+    prisma.email.deleteMany({ where: { file_id: { in: previousIds } } }),
     prisma.processedFile.deleteMany({
-      where: { case_request_id: managedRequest.id },
+      where: { case_request_id: managedRequest.id, wave },
     }),
     ...sources.map((source) =>
       prisma.processedFile.create({
@@ -321,6 +386,7 @@ export async function scanRequestSources(requestId: string) {
           pdf_status: source.kind === "files" ? "completed" : "pending",
           files_total: source.kind === "files" ? files.count : 0,
           case_request_id: managedRequest.id,
+          wave,
         },
       }),
     ),
@@ -333,6 +399,7 @@ export async function scanRequestSources(requestId: string) {
         files_size_bytes: BigInt(files.size),
         status: "queued",
         error: null,
+        ...(wave > 1 ? { render_base: null, warning_base: null } : {}),
       },
     }),
   ]);
