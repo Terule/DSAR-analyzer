@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fillAiBatchSlots } from "@/lib/ai";
 import { analyzePstDuplicates, scanFileMetadata } from "@/lib/analyzer";
+import { expandArchives } from "@/lib/archive-expander";
 import { getCasePstFileIds, markCaseAiCompleted } from "@/lib/case-utils";
 import {
   clearFilesBatchResults,
@@ -365,7 +366,6 @@ export async function runPhaseJob(
   // The initial Files job is a fast coordinator. It captures a deterministic
   // input manifest, then fans it out into bounded one-shot worker jobs.
   if (!filesBatch) {
-    const paths = listStandaloneInputFiles(row.filepath);
     const request = row.case_request_id
       ? await prisma.caseRequest.findUnique({
           where: { id: row.case_request_id },
@@ -373,17 +373,71 @@ export async function runPhaseJob(
         })
       : null;
     const isClientCase = request?.case.case_type === "client";
+    const messagesDir = path.join(outputBase, requestPath, "Messages");
+    const documentsDir = path.join(outputBase, requestPath, "Documents");
+    const runKey = String(row.files_started_at || BigInt(Date.now()));
+    await clearFilesBatchResults(fileId);
+
+    // Unpack archives first so their contents join the manifest and go through
+    // the same filtering, dedup and rendering as loose files.
+    const expansion = await expandArchives(row.filepath, {
+      clientMode: isClientCase,
+    });
+    let keptOriginals = 0;
+    if (expansion.keep.length > 0) {
+      const copied = await copyUnconvertedStandaloneFiles({
+        filePaths: expansion.keep,
+        messagesDir,
+        documentsDir,
+      });
+      keptOriginals = copied.copied;
+      // Delivered as Unconverted/; reclaim the source like any finished file.
+      for (const keptPath of expansion.keep)
+        fs.rmSync(keptPath, { force: true });
+    }
+    const excluded = new Set(expansion.confidential);
+    const preSkipped =
+      expansion.confidential.length + expansion.corrupted.length;
+    for (const zipPath of expansion.confidential) {
+      console.log(
+        `[Files] Not delivered (password-protected, treated as confidential): ${zipPath}`,
+      );
+    }
+    for (const zipPath of expansion.corrupted) {
+      console.log(`[Files] Deleted unreadable archive: ${zipPath}`);
+    }
+    // The coordinator's own handling is recorded as a batch result so the
+    // aggregate counters include archives that never reach a worker batch.
+    const preTotal = preSkipped + keptOriginals;
+    if (preTotal > 0) {
+      await recordFilesBatchResult({
+        jobId: job.id,
+        fileId,
+        processed: keptOriginals,
+        skipped: preSkipped,
+        duplicates: 0,
+      });
+    }
+
+    const paths = listStandaloneInputFiles(row.filepath).filter(
+      (filePath) => !excluded.has(filePath),
+    );
     // Client deduplication must span the whole input. Keep it in one batch so
     // the in-memory content and byte-hash sets remain authoritative.
     const batchSize = isClientCase
       ? Math.max(1, paths.length)
       : Math.max(1, Number(process.env.FILES_BATCH_SIZE || 100));
-    const runKey = String(row.files_started_at || BigInt(Date.now()));
-    await clearFilesBatchResults(fileId);
     if (paths.length === 0) {
       await prisma.processedFile.update({
         where: { id: fileId },
-        data: { files_status: "completed", files_total: 0 },
+        data: {
+          files_status: "completed",
+          files_total: preTotal,
+          files_progress_total: preTotal,
+          files_progress_handled: preTotal,
+          files_processed: keptOriginals,
+          files_skipped: preSkipped,
+        },
       });
       await archiveCompletedCase(fileId);
       return { operation: "files-empty" };
@@ -410,11 +464,11 @@ export async function runPhaseJob(
       where: { id: fileId },
       data: {
         files_status: "processing",
-        files_total: paths.length,
-        files_progress_total: paths.length,
-        files_progress_handled: 0,
-        files_processed: 0,
-        files_skipped: 0,
+        files_total: paths.length + preTotal,
+        files_progress_total: paths.length + preTotal,
+        files_progress_handled: preTotal,
+        files_processed: keptOriginals,
+        files_skipped: preSkipped,
         files_duplicates: 0,
       },
     });
