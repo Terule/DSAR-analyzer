@@ -16,6 +16,8 @@ import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
 import { archiveCompletedCase } from "./history";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
+import { resolveRenderBases } from "./render-numbering";
+import { formatNumber, numberWidth } from "./request-waves";
 import { queueSharePointArtifacts } from "./sharepoint-artifact-outbox";
 import { startSharePointArtifactWorker } from "./sharepoint-artifact-queue";
 import { normalizeSpreadsheetText, repairMojibake } from "./text-encoding";
@@ -978,6 +980,7 @@ export async function convertToPdfBatch(
     where: { id: fileId },
     select: {
       filepath: true,
+      case_request_id: true,
       subject_name: true,
       subject_email: true,
       subject_personal_email: true,
@@ -1052,7 +1055,15 @@ export async function convertToPdfBatch(
         a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }),
       );
 
-    const padLength = String(Math.max(1, emlFiles.length)).length;
+    const bases = await resolveRenderBases(
+      row.case_request_id,
+      deliverablesDir,
+    );
+    const padLength = numberWidth(
+      fs.readdirSync(deliverablesDir),
+      "Email",
+      bases.email + emlFiles.length,
+    );
     await prisma.processedFile.update({
       where: { id: fileId },
       data: { pdf_total: emlFiles.length, pdf_processed: 0 },
@@ -1195,7 +1206,7 @@ export async function convertToPdfBatch(
     for (let idx = 0; idx < emlFiles.length; idx++) {
       const filename = emlFiles[idx];
       const emlPath = path.join(selectedDir, filename);
-      const baseName = `Email ${String(idx + 1).padStart(padLength, "0")}`;
+      const baseName = `Email ${formatNumber(bases.email + idx + 1, padLength)}`;
       const emailPdfPath = path.join(deliverablesDir, `${baseName}.pdf`);
       let rendered = false;
 
@@ -1295,19 +1306,24 @@ export async function convertToPdfBatch(
         is_duplicate: 0,
       },
       select: { email_hash: true },
+      orderBy: { email_hash: "asc" },
     });
 
     if (warningRecords.length > 0) {
       const warningDir = path.join(deliverablesDir, "Warning");
       fs.mkdirSync(warningDir, { recursive: true });
-      const warnPad = String(Math.max(1, warningRecords.length)).length;
+      const warnPad = numberWidth(
+        fs.readdirSync(warningDir),
+        "Warning",
+        bases.warning + warningRecords.length,
+      );
 
       for (let wi = 0; wi < warningRecords.length; wi++) {
         const { email_hash } = warningRecords[wi];
         const emlPath = path.join(rawEmailsDir, `${email_hash}.eml`);
         if (!fs.existsSync(emlPath)) continue;
 
-        const baseName = `Warning ${String(wi + 1).padStart(warnPad, "0")}`;
+        const baseName = `Warning ${formatNumber(bases.warning + wi + 1, warnPad)}`;
         const pdfPath = path.join(warningDir, `${baseName}.pdf`);
         let rendered = false;
 
