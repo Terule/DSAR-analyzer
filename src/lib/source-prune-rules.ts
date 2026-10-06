@@ -79,3 +79,25 @@ export function deletePstFiles(pstRoot: string, filepaths: string[]): string[] {
   }
   return deleted;
 }
+
+/** `Email N.pdf` files in the folder with N above the wave's base. */
+export function countDeliveredEmails(emailsDir: string, base: number): number {
+  return entries(emailsDir).filter((name) => {
+    const match = /^Email (\d+)\.pdf$/.exec(name);
+    return match !== null && Number(match[1]) > base;
+  }).length;
+}
+
+/**
+ * Every email the AI kept is accounted for: it has a PDF, or Render skipped it
+ * on purpose (for example a message with no sender or recipient address).
+ * Anything else means the delivery is incomplete and the source PSTs may be
+ * the only copy of the missing emails.
+ */
+export function deliveryComplete(input: {
+  kept: number;
+  delivered: number;
+  skippedByDesign: number;
+}): boolean {
+  return input.delivered + input.skippedByDesign >= input.kept;
+}

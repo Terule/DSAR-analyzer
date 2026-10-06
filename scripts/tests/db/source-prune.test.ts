@@ -57,7 +57,17 @@ async function setup(options: { wave?: number; renderBase?: number } = {}) {
     });
   const pdf = (name: string) =>
     fs.writeFileSync(path.join(deliverable, "Emails", name), "pdf");
-  return { requestId, staging, deliverable, pst, row, pdf };
+  // A kept email the AI selected for this request's PST rows.
+  const kept = (fileId: string, label: string) =>
+    prisma.email.create({
+      data: {
+        id: `t-em-${tag}-${counter}-${label}`,
+        file_id: fileId,
+        email_hash: `hash-${tag}-${counter}-${label}`,
+        ai_decision: "keep",
+      },
+    });
+  return { requestId, staging, deliverable, pst, row, pdf, kept };
 }
 
 describe("pruneWaveSourcePsts", () => {
@@ -72,6 +82,9 @@ describe("pruneWaveSourcePsts", () => {
     });
   });
   after(async () => {
+    await prisma.email.deleteMany({
+      where: { processed_file: { case_request: { case_id: caseId } } },
+    });
     await prisma.processedFile.deleteMany({
       where: { case_request: { case_id: caseId } },
     });
@@ -179,6 +192,84 @@ describe("pruneWaveSourcePsts", () => {
     assert.deepEqual(await pruneWaveSourcePsts(rowA.id), { deleted: 1 });
     assert.equal(fs.existsSync(a), false);
     assert.equal(fs.existsSync(stray), true);
+  });
+
+  it("keeps the PSTs when a kept email has no PDF (incomplete delivery)", async () => {
+    const t = await setup();
+    const a = t.pst("a.pst");
+    const rowA = await t.row("a", a);
+    await t.kept(rowA.id, "1");
+    await t.kept(rowA.id, "2");
+    await t.kept(rowA.id, "3");
+    t.pdf("Email 0001.pdf");
+    t.pdf("Email 0002.pdf");
+    assert.deepEqual(await pruneWaveSourcePsts(rowA.id), {
+      deleted: 0,
+      skipped: "incomplete-delivery",
+    });
+    assert.equal(fs.existsSync(a), true);
+  });
+
+  it("deletes once every kept email has a PDF", async () => {
+    const t = await setup();
+    const a = t.pst("a.pst");
+    const rowA = await t.row("a", a);
+    await t.kept(rowA.id, "1");
+    await t.kept(rowA.id, "2");
+    t.pdf("Email 0001.pdf");
+    t.pdf("Email 0002.pdf");
+    assert.deepEqual(await pruneWaveSourcePsts(rowA.id), { deleted: 1 });
+    assert.equal(fs.existsSync(a), false);
+  });
+
+  it("counts emails Render skipped on purpose as accounted for", async () => {
+    const t = await setup();
+    const a = t.pst("a.pst");
+    const rowA = await t.row("a", a);
+    await t.kept(rowA.id, "1");
+    await t.kept(rowA.id, "2");
+    t.pdf("Email 0001.pdf");
+    assert.deepEqual(
+      await pruneWaveSourcePsts(rowA.id, { skippedByDesign: 1 }),
+      {
+        deleted: 1,
+      },
+    );
+    assert.equal(fs.existsSync(a), false);
+  });
+
+  it("does not count attachment records or duplicates as kept emails", async () => {
+    const t = await setup();
+    const a = t.pst("a.pst");
+    const rowA = await t.row("a", a);
+    await t.kept(rowA.id, "1");
+    await prisma.email.create({
+      data: {
+        id: `t-em-${tag}-${counter}-att`,
+        file_id: rowA.id,
+        email_hash: `hash-${tag}-${counter}-att`,
+        ai_decision: "keep",
+        is_attachment: 1,
+      },
+    });
+    t.pdf("Email 0001.pdf");
+    assert.deepEqual(await pruneWaveSourcePsts(rowA.id), { deleted: 1 });
+  });
+
+  it("only compares the current wave's kept emails with PDFs above its base", async () => {
+    const t = await setup({ wave: 2, renderBase: 2 });
+    const a = t.pst("a.pst");
+    const rowA = await t.row("a", a);
+    await t.kept(rowA.id, "1");
+    t.pdf("Email 0001.pdf");
+    t.pdf("Email 0002.pdf");
+    // Only wave 1's PDFs exist: nothing delivered yet for this wave.
+    assert.deepEqual(await pruneWaveSourcePsts(rowA.id), {
+      deleted: 0,
+      skipped: "no-output",
+    });
+    t.pdf("Email 0003.pdf");
+    assert.deepEqual(await pruneWaveSourcePsts(rowA.id), { deleted: 1 });
   });
 
   it("ignores rows that do not belong to a managed request", async () => {

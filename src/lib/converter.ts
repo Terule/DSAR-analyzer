@@ -16,6 +16,7 @@ import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
 import { archiveCompletedCase } from "./history";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
+import { openRenderLedger } from "./render-ledger";
 import { resolveRenderBases } from "./render-numbering";
 import { formatNumber, numberWidth } from "./request-waves";
 import { queueSharePointArtifacts } from "./sharepoint-artifact-outbox";
@@ -1060,10 +1061,16 @@ export async function convertToPdfBatch(
       row.case_request_id,
       deliverablesDir,
     );
+    // Numbers survive a crash: Render deletes each source email once its PDF is
+    // verified, so a retry only sees leftovers and must not renumber them.
+    const ledger = openRenderLedger(
+      path.join(uniqueEmailsFolder, "render-ledger.jsonl"),
+      bases.email,
+    );
     const padLength = numberWidth(
       fs.readdirSync(deliverablesDir),
       "Email",
-      bases.email + emlFiles.length,
+      ledger.max + emlFiles.length,
     );
     await prisma.processedFile.update({
       where: { id: fileId },
@@ -1207,9 +1214,12 @@ export async function convertToPdfBatch(
     for (let idx = 0; idx < emlFiles.length; idx++) {
       const filename = emlFiles[idx];
       const emlPath = path.join(selectedDir, filename);
-      const baseName = `Email ${formatNumber(bases.email + idx + 1, padLength)}`;
+      const emailHash = filename.replace(/\.eml$/i, "");
+      if (ledger.isSkipped(emailHash)) continue;
+      const baseName = `Email ${formatNumber(ledger.numberFor(emailHash), padLength)}`;
       const emailPdfPath = path.join(deliverablesDir, `${baseName}.pdf`);
       let rendered = false;
+      let noAddress = false;
 
       try {
         await withTimeout(
@@ -1220,7 +1230,10 @@ export async function convertToPdfBatch(
             const fromText = getAddressText(parsed.from);
             const toText = getAddressText(parsed.to);
 
-            if (fromText === "Unknown" || toText === "Unknown") return;
+            if (fromText === "Unknown" || toText === "Unknown") {
+              noAddress = true;
+              return;
+            }
 
             if (!fs.existsSync(emailPdfPath)) {
               const htmlContent = generateEmailHtml(
@@ -1273,6 +1286,10 @@ export async function convertToPdfBatch(
         );
       }
 
+      // A message with no sender or recipient address has no deliverable by
+      // design; remember that so it is not mistaken for a lost email.
+      if (noAddress) ledger.markSkipped(emailHash);
+
       // The selected EML is the source for this one deliverable. Once its PDF
       // has been verified and its attachment pass finished, reclaim it now so
       // a long Render phase does not hold every original until the last email.
@@ -1294,6 +1311,33 @@ export async function convertToPdfBatch(
         });
       }
       await yieldToEventLoop();
+    }
+
+    // Every email must now have a PDF or have been skipped on purpose. Anything
+    // else was lost to a crash, a timeout or an error. Completing anyway would
+    // delete the working files (and, if enabled, the source PSTs) while emails
+    // are still undelivered, so fail loudly and let Retry finish them.
+    const undelivered = emlFiles.filter((file) => {
+      const hash = file.replace(/\.eml$/i, "");
+      if (ledger.isSkipped(hash)) return false;
+      const pdf = path.join(
+        deliverablesDir,
+        `Email ${formatNumber(ledger.numberFor(hash), padLength)}.pdf`,
+      );
+      return !(fs.existsSync(pdf) && fs.statSync(pdf).size > 0);
+    });
+    if (undelivered.length > 0) {
+      console.error(
+        `[Converter] Render incomplete for ${fileId}: ${undelivered.length} of ${emlFiles.length} emails have no PDF (first: ${undelivered[0]}). Keeping working files; Retry will finish them.`,
+      );
+      await prisma.processedFile.update({
+        where: { id: fileId },
+        data: {
+          pdf_status: "failed",
+          pdf_duration_ms: Date.now() - startTime,
+        },
+      });
+      return;
     }
 
     // --- WARNING EMAILS: self-forwards (company → personal email) ---
@@ -1453,7 +1497,9 @@ export async function convertToPdfBatch(
     // verified on disk. Freeing them must never turn a finished Render into a
     // failed one, so errors are logged and swallowed.
     try {
-      const pruned = await pruneWaveSourcePsts(fileId);
+      const pruned = await pruneWaveSourcePsts(fileId, {
+        skippedByDesign: ledger.skippedCount,
+      });
       if (pruned.deleted > 0) {
         console.log(
           `[Converter] Deleted ${pruned.deleted} source PST file(s) after a verified Render (${fileId}).`,

@@ -5,7 +5,9 @@ import path from "node:path";
 import { describe, it } from "node:test";
 import {
   allWaveRowsFinished,
+  countDeliveredEmails,
   deletePstFiles,
+  deliveryComplete,
   isInsideDir,
   waveDeliveredOutput,
 } from "../../../src/lib/source-prune-rules";
@@ -162,5 +164,74 @@ describe("deletePstFiles", () => {
     } finally {
       fs.rmSync(base, { recursive: true, force: true });
     }
+  });
+});
+
+describe("countDeliveredEmails", () => {
+  function dir(files: string[]) {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), "prune-count-"));
+    for (const f of files) fs.writeFileSync(path.join(d, f), "x");
+    return d;
+  }
+  it("counts only Email PDFs numbered above the wave's base", () => {
+    const d = dir([
+      "Email 0001.pdf",
+      "Email 0002.pdf",
+      "Email 0003.pdf",
+      "Email 0004.pdf",
+    ]);
+    try {
+      assert.equal(countDeliveredEmails(d, 0), 4);
+      assert.equal(countDeliveredEmails(d, 2), 2);
+    } finally {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+  it("ignores attachments, zips and other files", () => {
+    const d = dir([
+      "Email 0001.pdf",
+      "Email 0001 Attachment 1.pdf",
+      "Email 0001 Attachment 2.zip",
+      "notes.txt",
+    ]);
+    try {
+      assert.equal(countDeliveredEmails(d, 0), 1);
+    } finally {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
+  });
+  it("is 0 for a missing folder", () => {
+    assert.equal(countDeliveredEmails("/definitely/not/here", 0), 0);
+  });
+});
+
+describe("deliveryComplete", () => {
+  it("is true when every kept email has a PDF", () => {
+    assert.equal(
+      deliveryComplete({ kept: 10, delivered: 10, skippedByDesign: 0 }),
+      true,
+    );
+  });
+  it("counts emails skipped on purpose as accounted for", () => {
+    assert.equal(
+      deliveryComplete({ kept: 10, delivered: 8, skippedByDesign: 2 }),
+      true,
+    );
+  });
+  it("is false when any kept email is unaccounted for", () => {
+    assert.equal(
+      deliveryComplete({ kept: 3986, delivered: 3435, skippedByDesign: 16 }),
+      false,
+    );
+    assert.equal(
+      deliveryComplete({ kept: 10, delivered: 9, skippedByDesign: 0 }),
+      false,
+    );
+  });
+  it("is true for a wave that kept nothing", () => {
+    assert.equal(
+      deliveryComplete({ kept: 0, delivered: 0, skippedByDesign: 0 }),
+      true,
+    );
   });
 });
