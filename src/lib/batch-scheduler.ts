@@ -10,6 +10,7 @@
 import path from "node:path";
 import { pollBatchStatus } from "./batch-worker";
 import { getCasePstFileIds } from "./case-utils";
+import { failRowIfJobExhausted } from "./control-plane/exhausted";
 import {
   enqueueFilePhase,
   isControlPlanePipelineEnabled,
@@ -144,6 +145,9 @@ export async function runBatchSweep(): Promise<SweepResult> {
   for (const row of pendingRenderRows) {
     const coordinatorId = (await getCasePstFileIds(row.id)).sort()[0];
     if (coordinatorId && coordinatorId === row.id) {
+      // A Render whose job already used all its attempts is failed, not
+      // pending: queueing another would loop forever.
+      if (await failRowIfJobExhausted(coordinatorId, "render")) continue;
       renderCoordinatorId = coordinatorId;
       break;
     }

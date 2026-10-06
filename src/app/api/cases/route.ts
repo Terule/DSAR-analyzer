@@ -1,7 +1,11 @@
 import { NextResponse } from "next/server";
 import { createManagedCase, refreshRequestLifecycle } from "@/lib/cases";
 import { oneTrustRequestUrl } from "@/lib/onetrust-links";
-import { extractPhaseStatus, parsePhaseStatus } from "@/lib/phase-status";
+import {
+  extractPhaseStatus,
+  parsePhaseStatus,
+  renderPhaseStatus,
+} from "@/lib/phase-status";
 import { getAiBatchSettings } from "@/lib/pipeline-settings";
 import { prisma } from "@/lib/prisma";
 
@@ -40,9 +44,6 @@ function phaseProgress(
       right.ai_batches_total - left.ai_batches_total ||
       right.ai_batches_done - left.ai_batches_done,
   )[0];
-  const rendered = pstRows.filter(
-    (row) => row.pdf_status === "completed",
-  ).length;
   const renderTotal = pstRows.reduce(
     (count, row) => count + Math.max(row.pdf_total, 1),
     0,
@@ -103,10 +104,7 @@ function phaseProgress(
     render: {
       done: renderDone,
       total: renderTotal,
-      status:
-        rendered === totalPst && totalPst > 0
-          ? "completed"
-          : pstRows[0]?.pdf_status || "pending",
+      status: renderPhaseStatus(pstRows),
     },
     files: {
       done: filesRow?.files_progress_handled || 0,

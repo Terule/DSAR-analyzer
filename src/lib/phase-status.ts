@@ -23,3 +23,20 @@ export function extractPhaseStatus(rows: StatusRow[]): string {
   }
   return "pending";
 }
+
+interface RenderRow {
+  pdf_status: string;
+}
+
+/**
+ * Render is case-level and its state lives on the coordinator row, which is
+ * not necessarily the first PST. Look at every row so a failed Render shows.
+ */
+export function renderPhaseStatus(rows: RenderRow[]): string {
+  if (rows.some((row) => row.pdf_status === "failed")) return "failed";
+  if (rows.length > 0 && rows.every((row) => row.pdf_status === "completed")) {
+    return "completed";
+  }
+  if (rows.some((row) => row.pdf_status === "processing")) return "processing";
+  return "pending";
+}

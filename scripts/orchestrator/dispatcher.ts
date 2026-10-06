@@ -14,6 +14,7 @@ import {
   removeContainer,
   safeDispatcherBinds,
 } from "../../src/lib/control-plane/docker-engine";
+import { failRowIfJobExhausted } from "../../src/lib/control-plane/exhausted";
 import {
   acknowledgeCancelledJob,
   claimNextJob,
@@ -462,13 +463,16 @@ async function reconcileInterruptedWork(): Promise<void> {
       ) &&
       !(await hasActiveJobForFilePhase(row.id, "parse"))
     ) {
-      await enqueueFilePhase({ fileId: row.id, phase: "parse" });
+      if (!(await failRowIfJobExhausted(row.id, "parse"))) {
+        await enqueueFilePhase({ fileId: row.id, phase: "parse" });
+      }
       continue;
     }
     if (
       ["analyzed", "extracting"].includes(row.status) &&
       !(await hasActiveJobForFilePhase(row.id, "extract"))
     ) {
+      if (await failRowIfJobExhausted(row.id, "extract")) continue;
       // Extraction is restartable from its raw EML artifact. Put an interrupted
       // row back at its stable pre-extract checkpoint before re-enqueuing it.
       if (row.status === "extracting") {
@@ -483,6 +487,7 @@ async function reconcileInterruptedWork(): Promise<void> {
       row.pdf_status === "processing" &&
       !(await hasActiveJobForFilePhase(row.id, "render"))
     ) {
+      if (await failRowIfJobExhausted(row.id, "render")) continue;
       await prisma.processedFile.update({
         where: { id: row.id },
         data: { pdf_status: "pending" },
@@ -503,6 +508,7 @@ async function reconcileInterruptedWork(): Promise<void> {
     if (!coordinatorId || seenAiCases.has(coordinatorId)) continue;
     seenAiCases.add(coordinatorId);
     if (await hasActiveJobForFilePhase(coordinatorId, "ai")) continue;
+    if (await failRowIfJobExhausted(coordinatorId, "ai")) continue;
     await prisma.processedFile.update({
       where: { id: coordinatorId },
       data: { ai_status: "pending", ai_started_at: null },

@@ -3,6 +3,7 @@ import { describe, it } from "node:test";
 import {
   extractPhaseStatus,
   parsePhaseStatus,
+  renderPhaseStatus,
 } from "../../../src/lib/phase-status";
 
 const rows = (...statuses: string[]) => statuses.map((status) => ({ status }));
@@ -54,5 +55,25 @@ describe("extractPhaseStatus", () => {
   });
   it("is pending for an empty request", () => {
     assert.equal(extractPhaseStatus([]), "pending");
+  });
+});
+
+const pdf = (...statuses: string[]) =>
+  statuses.map((pdf_status) => ({ pdf_status }));
+
+describe("renderPhaseStatus", () => {
+  it("is completed only when every PST row has rendered", () => {
+    assert.equal(renderPhaseStatus(pdf("completed", "completed")), "completed");
+    assert.equal(renderPhaseStatus(pdf("completed", "pending")), "pending");
+  });
+  it("shows a failure that sits on any row, not just the first", () => {
+    assert.equal(renderPhaseStatus(pdf("pending", "failed")), "failed");
+    assert.equal(renderPhaseStatus(pdf("completed", "failed")), "failed");
+  });
+  it("is processing while any row is rendering", () => {
+    assert.equal(renderPhaseStatus(pdf("pending", "processing")), "processing");
+  });
+  it("is pending for an empty request", () => {
+    assert.equal(renderPhaseStatus([]), "pending");
   });
 });
