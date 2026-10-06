@@ -101,6 +101,7 @@ export interface AiBatchSettings {
   oneTrustSystemLabel?: string;
   hasOneTrustClientId?: boolean;
   hasOneTrustClientSecret?: boolean;
+  deleteSourcePsts?: boolean;
   oneTrustClientId?: string;
   oneTrustClientSecret?: string;
 }

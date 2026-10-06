@@ -38,6 +38,7 @@ export interface AiBatchSettings {
   oneTrustSystemLabel: string;
   hasOneTrustClientId?: boolean;
   hasOneTrustClientSecret?: boolean;
+  deleteSourcePsts?: boolean;
 }
 
 function normalizeOptionalUrl(value: string): string {
@@ -137,6 +138,7 @@ export function validateAiBatchSettings(
     oneTrustSystemLabel,
     hasOneTrustClientId: input.hasOneTrustClientId,
     hasOneTrustClientSecret: input.hasOneTrustClientSecret,
+    deleteSourcePsts: input.deleteSourcePsts ?? true,
   };
 }
 
@@ -173,6 +175,7 @@ export async function getAiBatchSettings(): Promise<AiBatchSettings> {
     oneTrustSystemLabel: row.onetrust_system_label || "AIDA",
     hasOneTrustClientId: Boolean(row.onetrust_client_id_encrypted),
     hasOneTrustClientSecret: Boolean(row.onetrust_client_secret_encrypted),
+    deleteSourcePsts: row.delete_source_psts,
   };
 }
 
@@ -200,6 +203,7 @@ export async function updateAiBatchSettings(
       onetrust_date_raised_field_key:
         settings.oneTrustDateRaisedFieldKey || null,
       onetrust_system_label: settings.oneTrustSystemLabel,
+      delete_source_psts: settings.deleteSourcePsts ?? true,
     },
     update: {
       ai_max_tokens_per_batch: settings.maxTokensPerBatch,
@@ -218,6 +222,7 @@ export async function updateAiBatchSettings(
       onetrust_date_raised_field_key:
         settings.oneTrustDateRaisedFieldKey || null,
       onetrust_system_label: settings.oneTrustSystemLabel,
+      delete_source_psts: settings.deleteSourcePsts ?? true,
     },
   });
   return {
@@ -243,5 +248,6 @@ export async function updateAiBatchSettings(
     oneTrustSystemLabel: row.onetrust_system_label || "AIDA",
     hasOneTrustClientId: Boolean(row.onetrust_client_id_encrypted),
     hasOneTrustClientSecret: Boolean(row.onetrust_client_secret_encrypted),
+    deleteSourcePsts: row.delete_source_psts,
   };
 }

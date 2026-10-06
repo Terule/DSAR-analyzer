@@ -107,7 +107,7 @@ export function SystemSettingsDialog({
   const maxParallel = limits?.maxConcurrentBatches ?? 12;
   const queuedTokens = useMemo(() => tokens * parallel, [tokens, parallel]);
 
-  const update = (key: string, value: string | number) =>
+  const update = (key: string, value: string | number | boolean) =>
     setValues((current) => ({ ...current, [key]: value }));
 
   const changeParallel = (nextValue: number) => {
@@ -631,35 +631,63 @@ export function SystemSettingsDialog({
                   )}
                 </>
               )}
-              {tab === "Storage" &&
-                section(
-                  "Managed storage",
-                  "Storage is fixed to the DSAR folder mounted into AIDA. It is not configurable per system or case.",
-                  <div className="grid gap-3 md:grid-cols-2">
-                    <div className="rounded-xl border border-slate-700 bg-slate-950/45 p-4">
-                      <p className="text-sm font-semibold text-slate-200">
-                        Base staging folder
-                      </p>
-                      <p className="mt-2 font-mono text-sm text-indigo-200">
-                        /data/Staging
-                      </p>
-                      <p className="mt-3 text-xs text-slate-400">
-                        macOS: ~/DSAR/Staging
-                      </p>
-                    </div>
-                    <div className="rounded-xl border border-slate-700 bg-slate-950/45 p-4">
-                      <p className="text-sm font-semibold text-slate-200">
-                        Base deliverables folder
-                      </p>
-                      <p className="mt-2 font-mono text-sm text-indigo-200">
-                        /data/Results
-                      </p>
-                      <p className="mt-3 text-xs text-slate-400">
-                        macOS: ~/DSAR/Results
-                      </p>
-                    </div>
-                  </div>,
-                )}
+              {tab === "Storage" && (
+                <>
+                  {section(
+                    "Managed storage",
+                    "Storage is fixed to the DSAR folder mounted into AIDA. It is not configurable per system or case.",
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="rounded-xl border border-slate-700 bg-slate-950/45 p-4">
+                        <p className="text-sm font-semibold text-slate-200">
+                          Base staging folder
+                        </p>
+                        <p className="mt-2 font-mono text-sm text-indigo-200">
+                          /data/Staging
+                        </p>
+                        <p className="mt-3 text-xs text-slate-400">
+                          macOS: ~/DSAR/Staging
+                        </p>
+                      </div>
+                      <div className="rounded-xl border border-slate-700 bg-slate-950/45 p-4">
+                        <p className="text-sm font-semibold text-slate-200">
+                          Base deliverables folder
+                        </p>
+                        <p className="mt-2 font-mono text-sm text-indigo-200">
+                          /data/Results
+                        </p>
+                        <p className="mt-3 text-xs text-slate-400">
+                          macOS: ~/DSAR/Results
+                        </p>
+                      </div>
+                    </div>,
+                  )}
+                  {section(
+                    "Source PSTs",
+                    "Free disk space automatically once a PST is no longer needed.",
+                    <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-700 bg-slate-950/45 p-4">
+                      <input
+                        type="checkbox"
+                        checked={values.deleteSourcePsts !== false}
+                        onChange={(event) =>
+                          update("deleteSourcePsts", event.target.checked)
+                        }
+                        className="mt-1 size-4 accent-indigo-500"
+                      />
+                      <span>
+                        <span className="block text-sm font-semibold text-slate-200">
+                          Delete source PSTs after a verified Render
+                        </span>
+                        <span className="mt-1 block text-xs leading-5 text-slate-400">
+                          When every PST of a wave has finished Render and its
+                          output is on disk, the PST files are deleted. A
+                          deleted PST cannot be re-parsed: re-auditing a case or
+                          resetting a request needs the PSTs again.
+                        </span>
+                      </span>
+                    </label>,
+                  )}
+                </>
+              )}
               {tab === "System" &&
                 section(
                   "Integrated runtime",

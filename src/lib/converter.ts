@@ -20,6 +20,7 @@ import { resolveRenderBases } from "./render-numbering";
 import { formatNumber, numberWidth } from "./request-waves";
 import { queueSharePointArtifacts } from "./sharepoint-artifact-outbox";
 import { startSharePointArtifactWorker } from "./sharepoint-artifact-queue";
+import { pruneWaveSourcePsts } from "./source-prune";
 import { normalizeSpreadsheetText, repairMojibake } from "./text-encoding";
 
 const FONT_FOLDER =
@@ -1448,6 +1449,22 @@ export async function convertToPdfBatch(
     // Once Render succeeds, the final PDFs no longer depend on raw EMLs or
     // batch payloads. Remove the hidden work tree to reclaim disk space.
     fs.rmSync(workingFolder, { recursive: true, force: true });
+    // The PSTs themselves are no longer needed once the wave's output is
+    // verified on disk. Freeing them must never turn a finished Render into a
+    // failed one, so errors are logged and swallowed.
+    try {
+      const pruned = await pruneWaveSourcePsts(fileId);
+      if (pruned.deleted > 0) {
+        console.log(
+          `[Converter] Deleted ${pruned.deleted} source PST file(s) after a verified Render (${fileId}).`,
+        );
+      }
+    } catch (pruneError) {
+      console.error(
+        `[Converter] Could not prune source PSTs for ${fileId}:`,
+        pruneError,
+      );
+    }
   } catch (error) {
     console.error(
       `[Converter] Render failed for ${fileId}: ${

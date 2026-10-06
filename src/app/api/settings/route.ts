@@ -38,6 +38,7 @@ export async function PATCH(request: Request) {
       oneTrustSystemLabel?: string;
       oneTrustClientId?: string;
       oneTrustClientSecret?: string;
+      deleteSourcePsts?: boolean;
     };
     const current = await getAiBatchSettings();
     const settings = await updateAiBatchSettings({
@@ -60,6 +61,7 @@ export async function PATCH(request: Request) {
         body.oneTrustDateRaisedFieldKey ?? current.oneTrustDateRaisedFieldKey,
       oneTrustSystemLabel:
         body.oneTrustSystemLabel ?? current.oneTrustSystemLabel,
+      deleteSourcePsts: body.deleteSourcePsts ?? current.deleteSourcePsts,
     });
     const encrypted = await Promise.all([
       body.openAiKey?.trim()

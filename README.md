@@ -71,6 +71,19 @@ The scanner indexes each `.pst` as a `kind='pst'` row and each `Files` folder as
 
 ---
 
+## Freeing disk: source PSTs are deleted after a verified Render
+
+By default AIDA deletes a wave's source `.pst` files once they are guaranteed
+unnecessary: every PST of the wave finished Parse/Extract, AI and Render, and
+the wave's `Email`/`Warning` PDFs are on disk. Only the files AIDA processed,
+inside the request's own `PST/` folder, are deleted; failed or unfinished
+waves, and waves that delivered nothing, keep their PSTs. The rows and email
+hashes stay, so later waves still deduplicate.
+
+A deleted PST cannot be re-parsed: re-auditing a case with a new subject, or
+resetting a request, needs the PSTs again. Turn it off under
+**System settings → Storage → Source PSTs**.
+
 ## Running a request in waves
 
 A completed request can be **continued** when a case is larger than the disk.
@@ -84,8 +97,9 @@ Files or both, drop the new PSTs/Files into the same staging folders and Run.
 - Remove the previous wave's PSTs from `PST/` before running the next wave;
   anything left there is parsed again (its emails are then dropped as
   duplicates).
-- You can delete a finished wave's PSTs to free space; AIDA keeps the email
-  hashes it needs to deduplicate later waves.
+- A finished wave's PSTs are deleted automatically (see above), or you can
+  delete them yourself; either way AIDA keeps the email hashes it needs to
+  deduplicate later waves.
 - **Reset** starts the request over (all waves, hashes and output).
 
 ---

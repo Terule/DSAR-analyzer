@@ -242,6 +242,7 @@ model PipelineSettings {
   onetrust_system_label          String?
   onetrust_client_id_encrypted   String?
   onetrust_client_secret_encrypted String?
+  delete_source_psts          Boolean  @default(true)
   updated_at                  DateTime @updatedAt
 
   @@map("pipeline_settings")
