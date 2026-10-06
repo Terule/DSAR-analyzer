@@ -7,6 +7,7 @@ import MsgReader from "@kenjiuno/msgreader";
 import { type ParsedMail, simpleParser } from "mailparser";
 import { computeEmailHash, dedupScope, isDuplicateEmail } from "./email-dedup";
 import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
+import { keepTail } from "./job-log";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
 
@@ -159,6 +160,12 @@ export async function analyzePstDuplicates(
     child.stderr?.on("data", (chunk) => {
       stderr += chunk.toString();
     });
+    // readpst reports some failures on stdout. Keep only the tail (a large PST
+    // prints one line per folder) and, as a side effect, drain the pipe.
+    let stdoutTail = "";
+    child.stdout?.on("data", (chunk) => {
+      stdoutTail = keepTail(stdoutTail, chunk.toString(), 2_000);
+    });
 
     child.on("error", (err) => {
       reject(
@@ -172,7 +179,9 @@ export async function analyzePstDuplicates(
       if (code === 0) {
         resolve();
       } else {
-        const detail = stderr.trim();
+        const detail = [stderr.trim(), stdoutTail.trim()]
+          .filter(Boolean)
+          .join(" | ");
         reject(
           new Error(
             `readpst failed with exit code ${code} for ${filepath}${

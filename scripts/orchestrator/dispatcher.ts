@@ -39,6 +39,7 @@ import type {
   ControlJobRecord,
   ControlPhase,
 } from "../../src/lib/control-plane/types";
+import { resolveJobLogs, workerLogPath } from "../../src/lib/job-log";
 import { prisma } from "../../src/lib/prisma";
 
 const workerId = `dispatcher-${os.hostname()}-${process.pid}`;
@@ -221,8 +222,9 @@ async function reap(
   entry: Running,
   failure?: { message: string; retryable: boolean },
 ): Promise<void> {
-  const logs = await containerLogs(entry.containerId).catch(
-    () => "No worker logs available.",
+  const logs = await resolveJobLogs(
+    () => containerLogs(entry.containerId),
+    workerLogPath(process.cwd(), entry.job.id),
   );
   const logPath = await writeLog(entry.job.id, logs);
   if (failure)
