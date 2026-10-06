@@ -40,6 +40,7 @@ import type {
   ControlPhase,
 } from "../../src/lib/control-plane/types";
 import { prisma } from "../../src/lib/prisma";
+import { createThrottle } from "../../src/lib/sweep-throttle";
 
 const workerId = `dispatcher-${os.hostname()}-${process.pid}`;
 const phases: ControlPhase[] = ["parse", "extract", "ai", "render", "files"];
@@ -524,11 +525,17 @@ async function removeOrphanedWorkerContainers(): Promise<number> {
   return containers.length;
 }
 
+// The loop below ticks every second, but a sweep polls OpenAI once per
+// outstanding Batch. Left unthrottled, ten Batches meant ten API calls a
+// second; the in-app poller uses the same one-minute cadence.
+const BATCH_SWEEP_INTERVAL_MS = 60_000;
+const shouldSweepBatches = createThrottle(BATCH_SWEEP_INTERVAL_MS);
+
 async function tick(): Promise<void> {
   await requeueExpiredLeases();
   await observeRunning();
   await reconcileInterruptedWork();
-  await runBatchSweep();
+  if (shouldSweepBatches()) await runBatchSweep();
   await settleExternalAi();
   await settleFilesBatches();
   for (const phase of phases) {
