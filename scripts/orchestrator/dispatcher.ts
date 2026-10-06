@@ -42,6 +42,7 @@ import type {
 } from "../../src/lib/control-plane/types";
 import { resolveJobLogs, workerLogPath } from "../../src/lib/job-log";
 import { prisma } from "../../src/lib/prisma";
+import { resumeSharePointUploads } from "../../src/lib/sharepoint-resume";
 import { createThrottle } from "../../src/lib/sweep-throttle";
 import { heapOption } from "../../src/lib/worker-heap";
 
@@ -548,12 +549,25 @@ async function removeOrphanedWorkerContainers(): Promise<number> {
 // second; the in-app poller uses the same one-minute cadence.
 const BATCH_SWEEP_INTERVAL_MS = 60_000;
 const shouldSweepBatches = createThrottle(BATCH_SWEEP_INTERVAL_MS);
+// SharePoint uploads run as a separate worker started by whatever queued them,
+// often a one-shot Render container that is gone seconds later. The dispatcher
+// outlives them, so it keeps uploads alive.
+const UPLOAD_SUPERVISION_INTERVAL_MS = 30_000;
+const shouldSuperviseUploads = createThrottle(UPLOAD_SUPERVISION_INTERVAL_MS);
 
 async function tick(): Promise<void> {
   await requeueExpiredLeases();
   await observeRunning();
   await reconcileInterruptedWork();
   if (shouldSweepBatches()) await runBatchSweep();
+  if (shouldSuperviseUploads()) {
+    await resumeSharePointUploads().catch((error) =>
+      console.error(
+        "[dispatcher] SharePoint upload supervision failed:",
+        error,
+      ),
+    );
+  }
   await settleExternalAi();
   await settleFilesBatches();
   for (const phase of phases) {

@@ -2,50 +2,9 @@ import { ensureBatchPollerRunning } from "@/lib/batch-scheduler";
 import { isControlPlanePipelineEnabled } from "@/lib/control-plane/pipeline";
 import { prisma } from "@/lib/prisma";
 import { serializeProcessedFile } from "@/lib/serialize";
-import { startSharePointArtifactWorker } from "@/lib/sharepoint-artifact-queue";
+import { resumeSharePointUploads } from "@/lib/sharepoint-resume";
 
 export const dynamic = "force-dynamic";
-
-async function resumeSharePointUploads(): Promise<void> {
-  const staleBefore = BigInt(Date.now() - 60_000);
-  // Old client runs may have been queued before client cases became
-  // deduplication-only. Clear their misleading upload state on reconnect.
-  await prisma.processedFile.updateMany({
-    where: {
-      case_request: { case: { case_type: "client" } },
-      upload_status: { not: "idle" },
-    },
-    data: {
-      upload_status: "idle",
-      upload_total: 0,
-      upload_uploaded: 0,
-      upload_error: null,
-    },
-  });
-  await prisma.sharePointUploadArtifact.updateMany({
-    where: {
-      status: "processing",
-      source_file: {
-        case_request: { case: { case_type: "employee" } },
-        OR: [
-          { kind: "pst", pdf_status: "completed" },
-          { kind: "files", files_status: "completed" },
-        ],
-      },
-      OR: [{ heartbeat_at: null }, { heartbeat_at: { lt: staleBefore } }],
-    },
-    data: { status: "pending" },
-  });
-  const pendingArtifacts = await prisma.sharePointUploadArtifact.count({
-    where: {
-      status: "pending",
-      source_file: {
-        case_request: { case: { case_type: "employee" } },
-      },
-    },
-  });
-  if (pendingArtifacts > 0) startSharePointArtifactWorker();
-}
 
 export async function GET(req: Request) {
   await resumeSharePointUploads();
