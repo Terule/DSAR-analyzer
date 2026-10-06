@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { createManagedCase, refreshRequestLifecycle } from "@/lib/cases";
 import { oneTrustRequestUrl } from "@/lib/onetrust-links";
 import { getAiBatchSettings } from "@/lib/pipeline-settings";
+import { extractPhaseStatus, parsePhaseStatus } from "@/lib/phase-status";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -87,12 +88,12 @@ function phaseProgress(
     parse: {
       done: parsed,
       total: totalPst,
-      status: pstRows[0]?.status || "pending",
+      status: parsePhaseStatus(pstRows),
     },
     extract: {
       done: extracted,
       total: totalPst,
-      status: pstRows[0]?.status || "pending",
+      status: extractPhaseStatus(pstRows),
     },
     ai: {
       done: coordinator?.ai_batches_done || 0,

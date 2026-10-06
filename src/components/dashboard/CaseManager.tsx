@@ -180,6 +180,7 @@ function phaseCards(request: RequestItem) {
     return {
       name: phase.name,
       progress,
+      active,
       detail:
         state && state.total > 0
           ? phase.key === "ai"
@@ -921,13 +922,17 @@ export function CaseManager() {
                                     key={phase.name}
                                     className="min-h-44 rounded-2xl border border-indigo-400/20 bg-slate-900/65 p-4 text-center"
                                   >
-                                    <Icon
-                                      className={
-                                        phase.progress === 100
-                                          ? "mx-auto size-6 text-emerald-300"
-                                          : "mx-auto size-6 text-indigo-300"
-                                      }
-                                    />
+                                    {phase.active ? (
+                                      <Loader2 className="mx-auto size-6 animate-spin text-indigo-300" />
+                                    ) : (
+                                      <Icon
+                                        className={
+                                          phase.progress === 100
+                                            ? "mx-auto size-6 text-emerald-300"
+                                            : "mx-auto size-6 text-indigo-300"
+                                        }
+                                      />
+                                    )}
                                     <p className="mt-3 whitespace-nowrap text-xs font-bold tracking-[0.14em] text-slate-200">
                                       {phase.name.toUpperCase()}
                                     </p>
@@ -947,6 +952,11 @@ export function CaseManager() {
                                     <p className="mt-1 text-xs text-slate-500">
                                       {phase.label}
                                     </p>
+                                    {phase.detail && (
+                                      <p className="mt-1 text-xs tabular-nums text-slate-400">
+                                        {phase.detail}
+                                      </p>
+                                    )}
                                   </div>
                                 );
                               })}
