@@ -71,6 +71,28 @@ The scanner indexes each `.pst` as a `kind='pst'` row and each `Files` folder as
 
 ---
 
+## Large attachments in Render (memory)
+
+Render converts spreadsheet attachments entirely in memory, so a very large
+workbook can exhaust a render worker's memory (the worker dies with
+`JavaScript heap out of memory` and the job is retried until it dead-letters).
+By default a render worker gets a 2048MB container and Node sizes its heap at
+about half of that.
+
+Docker Desktop caps **all** containers together (Settings -> Resources ->
+Memory), not just AIDA's, and the app container alone uses about 4GB. Raise
+Docker's limit first, then give render workers more room in `.env`:
+
+```
+RENDER_JOB_MEMORY_MB=6144   # container limit for one render worker
+RENDER_JOB_HEAP_MB=4608     # Node heap inside it (capped at 85% of the above)
+RENDER_CONCURRENCY=1        # one big render at a time
+```
+
+Apply with `docker compose up -d --force-recreate --no-deps dispatcher`. Leave
+them unset to keep the defaults. As a rule of thumb, keep the app (about 4GB),
+Postgres, Redis and the dispatcher plus one render worker under Docker's limit.
+
 ## Freeing disk: source PSTs are deleted after a verified Render
 
 By default AIDA deletes a wave's source `.pst` files once they are guaranteed

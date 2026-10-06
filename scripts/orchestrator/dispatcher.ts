@@ -41,6 +41,7 @@ import type {
 } from "../../src/lib/control-plane/types";
 import { prisma } from "../../src/lib/prisma";
 import { createThrottle } from "../../src/lib/sweep-throttle";
+import { heapOption } from "../../src/lib/worker-heap";
 
 const workerId = `dispatcher-${os.hostname()}-${process.pid}`;
 const phases: ControlPhase[] = ["parse", "extract", "ai", "render", "files"];
@@ -93,6 +94,15 @@ function memoryMbForJob(job: ControlJobRecord): number {
     );
   }
   return memoryMbForPhase(job.phase);
+}
+
+/** Optional `<PHASE>_JOB_HEAP_MB` raises Node's heap for that phase's workers. */
+function heapEnvironment(job: ControlJobRecord): string[] {
+  const flag = heapOption(
+    memoryMbForJob(job),
+    process.env[`${job.phase.toUpperCase()}_JOB_HEAP_MB`],
+  );
+  return flag ? [`NODE_OPTIONS=${flag}`] : [];
 }
 
 function cpuNanoForPhase(phase: ControlPhase): number {
@@ -184,7 +194,7 @@ async function startOne(phase: ControlPhase): Promise<boolean> {
       network,
       binds: workerBinds || [],
       image,
-      environment: workerEnvironment,
+      environment: [...workerEnvironment, ...heapEnvironment(job)],
     });
     await setWorkerContainer(job.id, workerId, containerId);
     // Reset may have cancelled this job while Docker was creating the worker.

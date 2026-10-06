@@ -61,6 +61,13 @@ services:
       FILES_CONCURRENCY: "2"
       LARGE_FILES_JOB_MEMORY_MB: "3072"
       OFFICE_WORKER_HEAP_MB: "2048"
+      # Render converts spreadsheet attachments entirely in memory, so a very
+      # large workbook needs far more than the 2048MB default. Unset (empty)
+      # keeps the built-in defaults; set these in .env, sized to what Docker
+      # Desktop has been given (see README, "Large attachments in Render").
+      RENDER_JOB_MEMORY_MB: "${RENDER_JOB_MEMORY_MB:-}"
+      RENDER_JOB_HEAP_MB: "${RENDER_JOB_HEAP_MB:-}"
+      RENDER_CONCURRENCY: "${RENDER_CONCURRENCY:-}"
       # Compose's stable project-default network. Override only when the stack
       # is intentionally started with a different project/network name.
       WORKER_NETWORK: pst-analyser_default
