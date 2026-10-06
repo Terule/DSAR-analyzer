@@ -1,6 +1,7 @@
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { runtimeCredentials } from "./credentials";
+import { fetchWithTimeout } from "./fetch-timeout";
 import { getAiBatchSettings } from "./pipeline-settings";
 
 export interface SharePointFolder {
@@ -40,6 +41,13 @@ function retryDelayMs(response: Response, attempt: number): number {
   return Math.min(60_000, 1_000 * 2 ** attempt);
 }
 
+// A stalled connection must fail (and be retried) within minutes, not hang the
+// upload worker until the operating system gives up. One 10MB upload chunk at
+// 1MB/s takes about 10 seconds, so two minutes is generous.
+const REQUEST_TIMEOUT_MS = Number(
+  process.env.SHAREPOINT_REQUEST_TIMEOUT_MS || 120_000,
+);
+
 async function throttledFetch(
   input: RequestInfo | URL,
   init?: RequestInit,
@@ -49,7 +57,7 @@ async function throttledFetch(
     if (waitMs > 0) await delay(waitMs);
     nextGraphRequestAt = Date.now() + MIN_REQUEST_INTERVAL_MS;
 
-    const response = await fetch(input, init);
+    const response = await fetchWithTimeout(input, init, REQUEST_TIMEOUT_MS);
     if (
       ![429, 503, 504].includes(response.status) ||
       attempt >= MAX_GRAPH_RETRIES
@@ -72,7 +80,7 @@ async function graphAccessToken(): Promise<string> {
     throw new Error("Configure Azure application credentials in Settings.");
   }
   const tenantId = credentials.azureTenantId;
-  const response = await fetch(
+  const response = await fetchWithTimeout(
     `https://login.microsoftonline.com/${encodeURIComponent(tenantId)}/oauth2/v2.0/token`,
     {
       method: "POST",
@@ -84,6 +92,7 @@ async function graphAccessToken(): Promise<string> {
         scope: "https://graph.microsoft.com/.default",
       }),
     },
+    REQUEST_TIMEOUT_MS,
   );
   const body = (await response.json().catch(() => ({}))) as {
     access_token?: string;

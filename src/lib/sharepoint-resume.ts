@@ -1,5 +1,13 @@
 import { prisma } from "./prisma";
-import { startSharePointArtifactWorker } from "./sharepoint-artifact-queue";
+import {
+  startSharePointArtifactWorker,
+  stopSharePointArtifactWorker,
+} from "./sharepoint-artifact-queue";
+import { uploadWorkerHung } from "./sharepoint-watchdog";
+
+// A healthy worker renews its lease for every file it uploads. Ten minutes past
+// expiry means it is alive but stuck.
+const HUNG_LEASE_GRACE_MS = 10 * 60_000;
 
 /**
  * Recovers SharePoint uploads whose worker died and starts a worker if any
@@ -12,6 +20,7 @@ import { startSharePointArtifactWorker } from "./sharepoint-artifact-queue";
  */
 export async function resumeSharePointUploads(
   start: () => void = startSharePointArtifactWorker,
+  stop: () => void = stopSharePointArtifactWorker,
 ): Promise<void> {
   const staleBefore = BigInt(Date.now() - 60_000);
   // Old client runs may have been queued before client cases became
@@ -50,5 +59,26 @@ export async function resumeSharePointUploads(
       },
     },
   });
-  if (pendingArtifacts > 0) start();
+  if (pendingArtifacts > 0) {
+    const settings = await prisma.pipelineSettings.findUnique({
+      where: { id: "global" },
+      select: { sharepoint_upload_lease_until: true },
+    });
+    const leaseUntil = settings?.sharepoint_upload_lease_until;
+    if (
+      uploadWorkerHung({
+        pending: pendingArtifacts,
+        leaseUntilMs: leaseUntil == null ? null : Number(leaseUntil),
+        now: Date.now(),
+        graceMs: HUNG_LEASE_GRACE_MS,
+      })
+    ) {
+      // Alive but stuck: stop it. Its exit clears the "already running" flag,
+      // so the next supervision pass starts a fresh worker.
+      console.warn("[SharePoint] Upload worker is stuck; restarting it.");
+      stop();
+      return;
+    }
+    start();
+  }
 }

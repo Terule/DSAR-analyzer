@@ -96,6 +96,12 @@ describe("resumeSharePointUploads", () => {
     await prisma.managedCase.deleteMany({
       where: { id: { in: [caseId, `${caseId}-c`] } },
     });
+    await prisma.pipelineSettings.updateMany({
+      data: {
+        sharepoint_upload_lease_owner: null,
+        sharepoint_upload_lease_until: null,
+      },
+    });
     await prisma.$disconnect();
   });
 
@@ -131,6 +137,49 @@ describe("resumeSharePointUploads", () => {
     });
     await resumeSharePointUploads(() => {});
     assert.equal(await statusOf(id), "completed");
+  });
+
+  it("restarts a worker that is alive but stuck (lease lapsed long ago)", async () => {
+    await artifact({ status: "pending" });
+    await prisma.pipelineSettings.upsert({
+      where: { id: "global" },
+      create: {
+        id: "global",
+        sharepoint_upload_lease_owner: "stuck-worker",
+        sharepoint_upload_lease_until: BigInt(Date.now() - 30 * 60_000),
+      },
+      update: {
+        sharepoint_upload_lease_owner: "stuck-worker",
+        sharepoint_upload_lease_until: BigInt(Date.now() - 30 * 60_000),
+      },
+    });
+    let stopped = 0;
+    await resumeSharePointUploads(
+      () => {},
+      () => {
+        stopped++;
+      },
+    );
+    assert.equal(stopped, 1);
+  });
+
+  it("leaves a healthy worker alone (lease is current)", async () => {
+    await artifact({ status: "pending" });
+    await prisma.pipelineSettings.update({
+      where: { id: "global" },
+      data: {
+        sharepoint_upload_lease_owner: "healthy-worker",
+        sharepoint_upload_lease_until: BigInt(Date.now() + 4 * 60_000),
+      },
+    });
+    let stopped = 0;
+    await resumeSharePointUploads(
+      () => {},
+      () => {
+        stopped++;
+      },
+    );
+    assert.equal(stopped, 0);
   });
 
   it("does not requeue uploads belonging to client cases", async () => {
