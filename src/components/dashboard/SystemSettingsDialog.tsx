@@ -690,6 +690,30 @@ export function SystemSettingsDialog({
                       </span>
                     </label>,
                   )}
+                  {section(
+                    "Files AI review",
+                    "Let the AI judge whether converted files are relevant to the case.",
+                    <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-700 bg-slate-950/45 p-4">
+                      <input
+                        type="checkbox"
+                        checked={values.filesAiEnabled !== false}
+                        onChange={(event) =>
+                          update("filesAiEnabled", event.target.checked)
+                        }
+                        className="mt-1 size-4 accent-indigo-500"
+                      />
+                      <span>
+                        <span className="block text-sm font-semibold text-slate-200">
+                          AI relevance check for files
+                        </span>
+                        <span className="mt-1 block text-xs leading-5 text-slate-400">
+                          Files the AI judges not relevant are not delivered or
+                          uploaded. They are kept in a Discarded folder with the
+                          AI's reason. Client cases are never checked.
+                        </span>
+                      </span>
+                    </label>,
+                  )}
                 </>
               )}
               {tab === "System" && (

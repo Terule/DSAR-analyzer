@@ -103,6 +103,7 @@ export interface AiBatchSettings {
   hasOneTrustClientSecret?: boolean;
   deleteSourcePsts?: boolean;
   filesConcurrency?: number;
+  filesAiEnabled?: boolean;
   oneTrustClientId?: string;
   oneTrustClientSecret?: string;
 }

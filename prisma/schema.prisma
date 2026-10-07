@@ -244,6 +244,7 @@ model PipelineSettings {
   onetrust_client_secret_encrypted String?
   delete_source_psts          Boolean  @default(true)
   files_concurrency           Int      @default(6)
+  files_ai_enabled            Boolean  @default(true)
   updated_at                  DateTime @updatedAt
 
   @@map("pipeline_settings")

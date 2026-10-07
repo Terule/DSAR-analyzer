@@ -44,6 +44,7 @@ export interface AiBatchSettings {
   hasOneTrustClientSecret?: boolean;
   deleteSourcePsts?: boolean;
   filesConcurrency?: number;
+  filesAiEnabled?: boolean;
 }
 
 function normalizeOptionalUrl(value: string): string {
@@ -153,6 +154,7 @@ export function validateAiBatchSettings(
     hasOneTrustClientSecret: input.hasOneTrustClientSecret,
     deleteSourcePsts: input.deleteSourcePsts ?? true,
     filesConcurrency,
+    filesAiEnabled: input.filesAiEnabled ?? true,
   };
 }
 
@@ -191,6 +193,7 @@ export async function getAiBatchSettings(): Promise<AiBatchSettings> {
     hasOneTrustClientSecret: Boolean(row.onetrust_client_secret_encrypted),
     deleteSourcePsts: row.delete_source_psts,
     filesConcurrency: row.files_concurrency,
+    filesAiEnabled: row.files_ai_enabled,
   };
 }
 
@@ -220,6 +223,7 @@ export async function updateAiBatchSettings(
       onetrust_system_label: settings.oneTrustSystemLabel,
       delete_source_psts: settings.deleteSourcePsts ?? true,
       files_concurrency: settings.filesConcurrency,
+      files_ai_enabled: settings.filesAiEnabled ?? true,
     },
     update: {
       ai_max_tokens_per_batch: settings.maxTokensPerBatch,
@@ -240,6 +244,7 @@ export async function updateAiBatchSettings(
       onetrust_system_label: settings.oneTrustSystemLabel,
       delete_source_psts: settings.deleteSourcePsts ?? true,
       files_concurrency: settings.filesConcurrency,
+      files_ai_enabled: settings.filesAiEnabled ?? true,
     },
   });
   return {
@@ -267,5 +272,6 @@ export async function updateAiBatchSettings(
     hasOneTrustClientSecret: Boolean(row.onetrust_client_secret_encrypted),
     deleteSourcePsts: row.delete_source_psts,
     filesConcurrency: row.files_concurrency,
+    filesAiEnabled: row.files_ai_enabled,
   };
 }
