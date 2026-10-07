@@ -11,6 +11,7 @@ import {
 import { enqueueFilePhase } from "@/lib/control-plane/pipeline";
 import { convertToPdfBatch } from "@/lib/converter";
 import { extractUniqueEmails } from "@/lib/exporter";
+import { applyFilesAiVerdicts, runFilesAiPrepare } from "@/lib/files-ai-gate";
 import { archiveCompletedCase } from "@/lib/history";
 import { prisma } from "@/lib/prisma";
 import { getPstArtifactPaths } from "@/lib/pst-artifacts";
@@ -296,6 +297,33 @@ export async function runPhaseJob(
   const filesFinalize = job.payload.metadata?.filesFinalize === true;
   const batchPaths = job.payload.metadata?.paths;
   const batchIndex = job.payload.metadata?.index;
+
+  const filesAiPrepare = job.payload.metadata?.filesAiPrepare === true;
+  const filesAiApply = job.payload.metadata?.filesAiApply === true;
+  if (filesAiPrepare || filesAiApply) {
+    const requestOutputDir = path.join(outputBase, requestPath);
+    if (filesAiApply) {
+      const applied = await applyFilesAiVerdicts({
+        jobId: job.id,
+        fileId,
+        requestOutputDir,
+      });
+      return { operation: "files-ai-applied", ...applied };
+    }
+    return runFilesAiPrepare({
+      fileId,
+      dirs: {
+        messagesDir: path.join(requestOutputDir, "Messages"),
+        documentsDir: path.join(requestOutputDir, "Documents"),
+      },
+      criteria: {
+        name: subjectName,
+        email: row.subject_email || "",
+        personalEmail: subjectPersonalEmail || undefined,
+        aliases: aliases(subjectAliases),
+      },
+    });
+  }
 
   if (filesFinalize) {
     const directories = {

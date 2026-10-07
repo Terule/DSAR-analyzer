@@ -41,6 +41,7 @@ import type {
   ControlJobRecord,
   ControlPhase,
 } from "../../src/lib/control-plane/types";
+import { advanceFilesAi, filesAiRequired } from "../../src/lib/files-ai-gate";
 import {
   clampFilesConcurrency,
   FILES_CONCURRENCY_LIMITS,
@@ -455,6 +456,19 @@ async function settleFilesBatches(): Promise<void> {
       }
     }
     if (state.completed > 0) {
+      // The AI relevance check sits between the batches and finalize. Waiting
+      // here is not a failure: the row stays `processing`.
+      if (await filesAiRequired(row.id)) {
+        const gate = await advanceFilesAi(row.id, state.runKey);
+        if (gate === "failed") {
+          await prisma.processedFile.update({
+            where: { id: row.id },
+            data: { files_status: "failed" },
+          });
+          continue;
+        }
+        if (gate === "waiting") continue;
+      }
       const finalizer = await getFilesFinalizerState(row.id, state.runKey);
       if (finalizer.active > 0) continue;
       if (finalizer.failed > 0) {

@@ -294,6 +294,40 @@ export interface FilesFinalizerState {
   completed: number;
 }
 
+export type FilesStage = "filesAiPrepare" | "filesAiApply";
+
+/** Same shape as the finalizer state, for the Files AI prepare/apply jobs of one run. */
+export async function getFilesStageJobState(
+  fileId: string,
+  runKey: string,
+  stage: FilesStage,
+): Promise<FilesFinalizerState> {
+  if (stage !== "filesAiPrepare" && stage !== "filesAiApply") {
+    throw new Error(`Unknown Files stage: ${stage}`);
+  }
+  const result = await getControlPlanePool().query<{
+    active: string;
+    failed: string;
+    completed: string;
+  }>(
+    `SELECT COUNT(*) FILTER (WHERE status IN ('queued', 'leased', 'running'))::text AS active,
+            COUNT(*) FILTER (WHERE status IN ('dead_letter', 'cancelled'))::text AS failed,
+            COUNT(*) FILTER (WHERE status = 'completed')::text AS completed
+     FROM orchestrator_jobs
+     WHERE phase = 'files'
+       AND payload->>'fileId' = $1
+       AND payload->'metadata'->>'${stage}' = 'true'
+       AND payload->'metadata'->>'runKey' = $2`,
+    [fileId, runKey],
+  );
+  const row = result.rows[0];
+  return {
+    active: Number(row?.active || 0),
+    failed: Number(row?.failed || 0),
+    completed: Number(row?.completed || 0),
+  };
+}
+
 export interface FailedFilesBatch {
   id: string;
   paths: string[];

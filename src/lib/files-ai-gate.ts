@@ -1,0 +1,159 @@
+import {
+  getFilesStageJobState,
+  recordFilesBatchResult,
+} from "./control-plane/job-store";
+import { enqueueFilePhase } from "./control-plane/pipeline";
+import {
+  type FilesAiClient,
+  isFilesAiSettled,
+  openAiFilesAiClient,
+  prepareFilesAi,
+} from "./files-ai";
+import { applyDiscards, writeVerdictsCsv } from "./files-ai-apply";
+import type { FilesAiCriteria } from "./files-ai-prompt";
+import { getAiBatchSettings } from "./pipeline-settings";
+import { prisma } from "./prisma";
+
+export type FilesAiGate = "waiting" | "ready" | "failed";
+
+/** The AI check runs for employee cases with the setting on; client cases never. */
+export async function filesAiRequired(fileId: string): Promise<boolean> {
+  if (!(await getAiBatchSettings()).filesAiEnabled) return false;
+  const row = await prisma.processedFile.findUnique({
+    where: { id: fileId },
+    select: {
+      case_request: { select: { case: { select: { case_type: true } } } },
+    },
+  });
+  const caseType = row?.case_request?.case.case_type;
+  return caseType !== undefined && caseType !== "client";
+}
+
+/**
+ * Called on every dispatcher sweep once all Files batches settled. Walks the
+ * AI step prepare -> (poller) -> apply and reports whether finalize may run.
+ * A prepare that dead-letters never blocks delivery (everything is kept); an
+ * apply that dead-letters may have moved some files, so it fails the run.
+ */
+export async function advanceFilesAi(
+  fileId: string,
+  runKey: string,
+): Promise<FilesAiGate> {
+  const prepare = await getFilesStageJobState(fileId, runKey, "filesAiPrepare");
+  if (prepare.active > 0) return "waiting";
+  if (prepare.completed === 0) {
+    if (prepare.failed > 0) return "ready";
+    await enqueueFilePhase({
+      fileId,
+      phase: "files",
+      dedupeKey: `files-ai-prepare:${fileId}:${runKey}`,
+      metadata: { filesAiPrepare: true, runKey },
+    });
+    return "waiting";
+  }
+  if (!(await isFilesAiSettled(fileId))) return "waiting";
+
+  const apply = await getFilesStageJobState(fileId, runKey, "filesAiApply");
+  if (apply.active > 0) return "waiting";
+  if (apply.failed > 0) return "failed";
+  if (apply.completed > 0) return "ready";
+  await enqueueFilePhase({
+    fileId,
+    phase: "files",
+    dedupeKey: `files-ai-apply:${fileId}:${runKey}`,
+    metadata: { filesAiApply: true, runKey },
+  });
+  return "waiting";
+}
+
+/** Body of the `filesAiPrepare` job. Never throws: the AI must not block delivery. */
+export async function runFilesAiPrepare(input: {
+  fileId: string;
+  dirs: { messagesDir: string; documentsDir: string };
+  criteria: FilesAiCriteria;
+  /** `undefined` opens the real client; `null` means no OpenAI key. */
+  client?: FilesAiClient | null;
+  readText?: (absPath: string) => Promise<string>;
+}): Promise<Record<string, unknown>> {
+  const client =
+    input.client === undefined
+      ? await openAiFilesAiClient().catch(() => null)
+      : input.client;
+  if (!client) {
+    console.warn("[Files AI] No OpenAI client; delivering everything.");
+    return { operation: "files-ai-skipped" };
+  }
+  try {
+    const result = await prepareFilesAi({
+      fileId: input.fileId,
+      dirs: input.dirs,
+      criteria: input.criteria,
+      client,
+      readText: input.readText,
+    });
+    return { operation: "files-ai-prepared", ...result };
+  } catch (error) {
+    console.warn(`[Files AI] prepare failed: ${error}; delivering everything.`);
+    await prisma.filesAiVerdict.updateMany({
+      where: { file_id: input.fileId, verdict: null },
+      data: {
+        verdict: "keep",
+        reason: "AI step failed; kept.",
+        resolved_at: new Date(),
+      },
+    });
+    return { operation: "files-ai-prepare-failed" };
+  }
+}
+
+/**
+ * Body of the `filesAiApply` job: moves discarded files to `Discarded/`, writes
+ * the verdict CSV and shifts the counters from processed to skipped. Safe to
+ * run twice: moves are idempotent and the counter shift is recorded once per job.
+ */
+export async function applyFilesAiVerdicts(input: {
+  jobId: string;
+  fileId: string;
+  requestOutputDir: string;
+}): Promise<{ discarded: number; moved: number; alreadyMoved: number }> {
+  const verdicts = await prisma.filesAiVerdict.findMany({
+    where: { file_id: input.fileId, verdict: "discard" },
+    select: { rel_path: true, reason: true },
+    orderBy: { rel_path: "asc" },
+  });
+  if (verdicts.length === 0) return { discarded: 0, moved: 0, alreadyMoved: 0 };
+
+  const discards = verdicts.map((v) => ({
+    relPath: v.rel_path,
+    reason: v.reason ?? "",
+  }));
+  const { moved, alreadyMoved } = applyDiscards({
+    requestOutputDir: input.requestOutputDir,
+    discards,
+  });
+  writeVerdictsCsv({
+    requestOutputDir: input.requestOutputDir,
+    rows: discards.map((d) => ({
+      relPath: d.relPath,
+      verdict: "discard",
+      reason: d.reason,
+    })),
+  });
+  const effective = moved + alreadyMoved;
+  const totals = await recordFilesBatchResult({
+    jobId: input.jobId,
+    fileId: input.fileId,
+    processed: -effective,
+    skipped: effective,
+    duplicates: 0,
+  });
+  await prisma.processedFile.update({
+    where: { id: input.fileId },
+    data: {
+      files_processed: totals.processed,
+      files_skipped: totals.skipped,
+      files_duplicates: totals.duplicates,
+    },
+  });
+  return { discarded: verdicts.length, moved, alreadyMoved };
+}
