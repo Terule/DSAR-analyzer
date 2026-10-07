@@ -67,3 +67,61 @@ describe("expandArchives when unzip fails with exit 50", () => {
     );
   });
 });
+
+// A zip can record a directory as read-only (mode 0555). Extraction restores
+// that mode, so a zip sitting inside that directory could not be expanded: the
+// expander could not create its output folder there (EACCES), the Files job
+// retried and dead-lettered (JW R1: "Agenda item 3. Financial").
+const BUILD_READONLY_NESTED = `
+import io, sys, zipfile
+inner = io.BytesIO()
+with zipfile.ZipFile(inner, "w") as z:
+    z.writestr("deep/file.txt", "deep content")
+with zipfile.ZipFile(sys.argv[1], "w") as z:
+    d = zipfile.ZipInfo("Locked Folder/")
+    d.external_attr = (0o40555 << 16) | 0x10
+    z.writestr(d, "")
+    z.writestr(zipfile.ZipInfo("Locked Folder/inner.zip"), inner.getvalue())
+`;
+
+describe("expandArchives with read-only directories inside an archive", () => {
+  it("still expands a zip that sits inside a read-only directory", async () => {
+    const input = fs.mkdtempSync(path.join(os.tmpdir(), "files-"));
+    const zip = path.join(input, "outer.zip");
+    assert.equal(
+      spawnSync("python3", ["-c", BUILD_READONLY_NESTED, zip]).status,
+      0,
+    );
+    try {
+      const result = await expandArchives(input);
+      assert.equal(
+        result.expanded,
+        2,
+        "outer and nested archives both expanded",
+      );
+      assert.deepEqual(result.corrupted, []);
+      const files = walk(input).map((f) => path.basename(f));
+      assert.ok(files.includes("file.txt"), `got ${files.join(", ")}`);
+    } finally {
+      // Leave nothing undeletable behind.
+      spawnSync("chmod", ["-R", "u+rwX", input]);
+      fs.rmSync(input, { recursive: true, force: true });
+    }
+  });
+
+  it("makes directories it finds read-only writable before expanding", async () => {
+    const input = fs.mkdtempSync(path.join(os.tmpdir(), "files-"));
+    const locked = path.join(input, "Locked");
+    fs.mkdirSync(locked);
+    const inner = path.join(locked, "a.zip");
+    assert.equal(spawnSync("python3", ["-c", BUILD, inner]).status, 0);
+    fs.chmodSync(locked, 0o555);
+    try {
+      const result = await expandArchives(input);
+      assert.equal(result.expanded, 1);
+    } finally {
+      spawnSync("chmod", ["-R", "u+rwX", input]);
+      fs.rmSync(input, { recursive: true, force: true });
+    }
+  });
+});

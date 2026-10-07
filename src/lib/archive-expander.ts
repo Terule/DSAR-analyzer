@@ -227,6 +227,36 @@ function runUnzip(
   });
 }
 
+/**
+ * Makes every directory under `root` owner-readable/writable/traversable and
+ * every file owner-readable/writable. Archives record the permissions of the
+ * machine that made them, and extraction restores them, so an archive can leave
+ * a read-only directory behind. A zip inside it then cannot get an output
+ * folder (EACCES) and the folder can no longer be cleaned up. Best effort: an
+ * entry that cannot be changed is left alone. Symlinks are never followed.
+ */
+export function makeTreeOwnerWritable(root: string): void {
+  const visit = (current: string) => {
+    try {
+      const stat = fs.lstatSync(current);
+      if (stat.isSymbolicLink()) return;
+      if (stat.isDirectory()) {
+        if ((stat.mode & 0o700) !== 0o700) {
+          fs.chmodSync(current, stat.mode | 0o700);
+        }
+        for (const name of fs.readdirSync(current)) {
+          visit(path.join(current, name));
+        }
+      } else if (stat.isFile() && (stat.mode & 0o600) !== 0o600) {
+        fs.chmodSync(current, stat.mode | 0o600);
+      }
+    } catch {
+      // Leave anything we cannot change; extraction will report real problems.
+    }
+  };
+  visit(root);
+}
+
 function findZips(directory: string, found: string[] = []): string[] {
   let entries: fs.Dirent[];
   try {
@@ -293,6 +323,9 @@ export async function expandArchives(
     corrupted: [],
     keep: [],
   };
+  // Earlier extractions (or archives from other machines) may have left
+  // read-only folders that would block expanding the zips inside them.
+  makeTreeOwnerWritable(inputDir);
   const settled = new Set<string>();
   const keepOriginal = (zipPath: string) => {
     settled.add(zipPath);
@@ -331,6 +364,7 @@ export async function expandArchives(
         fs.mkdirSync(target, { recursive: true });
         const outcome = await runUnzip(zipPath, target, limits.timeoutMs);
         if (outcome === "ok") {
+          makeTreeOwnerWritable(target);
           removeSymlinks(target);
           fs.rmSync(zipPath, { force: true });
           result.expanded++;
