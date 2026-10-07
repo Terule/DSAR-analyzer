@@ -527,6 +527,8 @@ async function reconcileInterruptedWork(): Promise<void> {
     // be settled (or explicitly retried), never reinterpreted as an interrupted
     // coordinator simply because no batch is currently active.
     if (await getLatestFilesBatchParentState(row.id)) continue;
+    // Not an interruption if the job already used all its attempts.
+    if (await failRowIfJobExhausted(row.id, "files")) continue;
     await enqueueFilePhase({ fileId: row.id, phase: "files" });
   }
 }

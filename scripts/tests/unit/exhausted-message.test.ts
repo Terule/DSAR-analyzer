@@ -18,6 +18,12 @@ describe("exhaustedMessage", () => {
       "Parse failed after repeated attempts.",
     );
   });
+  it("covers the Files phase", () => {
+    assert.equal(
+      exhaustedMessage("files", { status: "dead_letter", lastError: "boom" }),
+      "Files failed after repeated attempts: boom",
+    );
+  });
   it("trims a very long error", () => {
     const message = exhaustedMessage("ai", {
       status: "dead_letter",

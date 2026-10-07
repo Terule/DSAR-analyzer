@@ -110,6 +110,16 @@ describe("failRowIfJobExhausted", () => {
     );
   });
 
+  it("marks a Files row failed when its latest job dead-lettered", async () => {
+    const r = await row({ kind: "files", files_status: "processing" });
+    await job(r.id, "files", "dead_letter", 10, "unzip failed");
+    assert.equal(await failRowIfJobExhausted(r.id, "files"), true);
+    const after = await prisma.processedFile.findUniqueOrThrow({
+      where: { id: r.id },
+    });
+    assert.equal(after.files_status, "failed");
+  });
+
   it("only looks at the requested phase", async () => {
     const r = await row({ pdf_status: "processing" });
     await job(r.id, "parse", "dead_letter", 10);

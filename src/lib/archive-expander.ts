@@ -145,6 +145,43 @@ export function inspectZip(
 
 type ExtractOutcome = "ok" | "corrupt" | "timeout";
 
+/**
+ * Fallback for archives `unzip` cannot write (see runUnzip): decodes entry
+ * names properly and refuses unsafe paths. Exit 50 here is a real write
+ * failure (disk full, read-only, permissions) and is surfaced for a retry.
+ */
+function runNameAwareExtract(
+  zipPath: string,
+  targetDir: string,
+  timeoutMs: number,
+): Promise<ExtractOutcome> {
+  return new Promise((resolve, reject) => {
+    const script = path.resolve(process.cwd(), "scripts/tools/extract_zip.py");
+    const child = spawn("python3", [script, zipPath, targetDir], {
+      stdio: ["ignore", "ignore", "ignore"],
+    });
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill("SIGKILL");
+    }, timeoutMs);
+    child.once("error", (error) => {
+      clearTimeout(timer);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timer);
+      if (timedOut) return resolve("timeout");
+      if (code === 0 || code === 1) return resolve("ok");
+      if (code === 2) return resolve("corrupt");
+      // 50 = a real write failure (disk full, read-only, permissions); 3 =
+      // names that cannot be decoded. Neither says the archive is corrupt, so
+      // keep it and fail the job visibly instead of deleting it.
+      reject(new Error(`Extracting ${zipPath} failed (exit ${code}).`));
+    });
+  });
+}
+
 function runUnzip(
   zipPath: string,
   targetDir: string,
@@ -170,9 +207,19 @@ function runUnzip(
       if (timedOut) return resolve("timeout");
       // 0 = ok, 1 = warnings (for example a skipped unsafe path).
       if (code === 0 || code === 1) return resolve("ok");
-      // Memory (4-8) and disk-full (50) failures are environmental, not a
-      // property of the archive; surface them so the job is retried.
-      if ((code !== null && code >= 4 && code <= 8) || code === 50) {
+      // Exit 50 is usually "disk full", but unzip also reports it when it
+      // cannot create a file because its name is not valid UTF-8, which macOS
+      // file systems refuse. A name-aware extractor either succeeds or tells a
+      // real write failure apart.
+      if (code === 50) {
+        return runNameAwareExtract(zipPath, targetDir, timeoutMs).then(
+          resolve,
+          reject,
+        );
+      }
+      // Memory (4-8) failures are environmental, not a property of the
+      // archive; surface them so the job is retried.
+      if (code !== null && code >= 4 && code <= 8) {
         return reject(new Error(`unzip failed for ${zipPath} (exit ${code}).`));
       }
       resolve("corrupt");

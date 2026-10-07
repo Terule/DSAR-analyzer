@@ -13,6 +13,7 @@ const PHASE_LABEL: Partial<Record<ControlPhase, string>> = {
   extract: "Extract",
   ai: "AI audit",
   render: "Render",
+  files: "Files",
 };
 const MAX_ERROR_CHARS = 300;
 
@@ -74,6 +75,11 @@ export async function failRowIfJobExhausted(
     });
   } else if (phase === "ai") {
     await markCaseAiFailed(fileId, 0);
+  } else if (phase === "files") {
+    await prisma.processedFile.update({
+      where: { id: fileId },
+      data: { files_status: "failed" },
+    });
   } else if (phase === "parse" || phase === "extract") {
     await prisma.processedFile.update({
       where: { id: fileId },
