@@ -17,6 +17,11 @@ import {
   isUnfinalizedName,
   numberWidth,
 } from "./request-waves";
+import {
+  prescreenThresholdMb,
+  scanXlsxForMentions,
+  shouldPrescreenSpreadsheet,
+} from "./xlsx-mention-scan";
 
 export interface StandaloneBatchParams {
   inputDir: string;
@@ -1197,6 +1202,29 @@ export async function runStandaloneBatch(
 
       // --- HANDLER 2: Excel Spreadsheets ---
       else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
+        // Opening a very large workbook can need more memory than a worker has
+        // and gets the whole worker killed, so first stream its text and drop
+        // it when the subject cannot appear in it. The conversion keeps a sheet
+        // only if a cell holds one of these criteria, so this drops exactly
+        // what the conversion would have dropped, in seconds. When the scan
+        // cannot tell, the normal conversion runs.
+        if (
+          !bypassFilters &&
+          shouldPrescreenSpreadsheet(
+            ext,
+            fs.statSync(filePath).size,
+            prescreenThresholdMb(),
+          )
+        ) {
+          const scan = await scanXlsxForMentions(filePath, renderingCriteria);
+          if (scan.status === "not-mentioned") {
+            console.log(
+              `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: the subject is not mentioned anywhere in this large workbook (streamed scan).`,
+            );
+            skippedCount++;
+            continue;
+          }
+        }
         const outcome = await convertOfficeInWorker(
           "excel",
           filePath,
