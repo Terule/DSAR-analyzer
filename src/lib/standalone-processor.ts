@@ -51,6 +51,8 @@ export interface FilesDeliverableRenameResult {
 export interface UnconvertedFilesResult {
   copied: number;
   missing: number;
+  /** Large workbooks confirmed not to mention the subject: not delivered. */
+  dropped: number;
 }
 
 const MESSAGE_EXTENSIONS = new Set([".html", ".htm", ".eml", ".msg"]);
@@ -64,9 +66,16 @@ export async function copyUnconvertedStandaloneFiles(input: {
   filePaths: string[];
   messagesDir: string;
   documentsDir: string;
+  /**
+   * The subject's search terms. When given, a large workbook that cannot mention
+   * the subject is not delivered, exactly as the normal conversion would have
+   * dropped it; omit for client cases, which keep everything.
+   */
+  criteria?: string[];
 }): Promise<UnconvertedFilesResult> {
   let copied = 0;
   let missing = 0;
+  let dropped = 0;
 
   for (const filePath of input.filePaths) {
     if (!fs.existsSync(filePath)) {
@@ -74,6 +83,23 @@ export async function copyUnconvertedStandaloneFiles(input: {
       continue;
     }
     const extension = path.extname(filePath).toLowerCase();
+    if (
+      input.criteria &&
+      input.criteria.length > 0 &&
+      shouldPrescreenSpreadsheet(
+        extension,
+        fs.statSync(filePath).size,
+        prescreenThresholdMb(),
+      ) &&
+      (await scanXlsxForMentions(filePath, input.criteria)).status ===
+        "not-mentioned"
+    ) {
+      console.log(
+        `[Standalone Filter] Not delivering unconverted ${path.basename(filePath)}: the subject is not mentioned anywhere in this large workbook (streamed scan).`,
+      );
+      dropped++;
+      continue;
+    }
     const category = MESSAGE_EXTENSIONS.has(extension)
       ? input.messagesDir
       : input.documentsDir;
@@ -93,7 +119,7 @@ export async function copyUnconvertedStandaloneFiles(input: {
     copied++;
   }
 
-  return { copied, missing };
+  return { copied, missing, dropped };
 }
 
 // Recursive file scanner to handle messy nested export folders
