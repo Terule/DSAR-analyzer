@@ -13,6 +13,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  RotateCcw,
   Settings,
   ShieldCheck,
   Trash2,
@@ -65,6 +66,8 @@ type RequestItem = {
     PhaseState
   >;
   phaseTiming?: PhaseTiming;
+  /** Rows with a failed step; when present, Retry replaces Run. */
+  retryTargets?: string[];
 };
 type CaseItem = {
   id: string;
@@ -324,6 +327,31 @@ export function CaseManager() {
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Request failed.");
       return null;
+    } finally {
+      setBusy(null);
+    }
+  };
+  // Re-runs the failed steps of a request (the same operation as the per-file
+  // retry), upstream steps first. Reset would wipe the delivered output, so a
+  // failed step gets this instead of making the user choose between Run (which
+  // is disabled) and Reset.
+  const retryFailed = async (request: RequestItem) => {
+    const key = `retry-${request.id}`;
+    setBusy(key);
+    try {
+      for (const fileId of request.retryTargets ?? []) {
+        const response = await fetch("/api/retry", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ fileId }),
+        });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || "Retry failed.");
+      }
+      toast.success(`Retry started for ${request.name}.`);
+      await refresh();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Retry failed.");
     } finally {
       setBusy(null);
     }
@@ -823,30 +851,48 @@ export function CaseManager() {
                                       <Plus /> Continue
                                     </Button>
                                   )}
-                                  <Button
-                                    type="button"
-                                    size="sm"
-                                    disabled={
-                                      busy === request.id ||
-                                      !["ready", "failed"].includes(
-                                        request.status,
-                                      )
-                                    }
-                                    onClick={() =>
-                                      void call(
-                                        request.id,
-                                        `/api/requests/${request.id}/run`,
-                                        { method: "POST" },
-                                      )
-                                    }
-                                  >
-                                    {busy === request.id ? (
-                                      <Loader2 className="animate-spin" />
-                                    ) : (
-                                      <Play />
-                                    )}{" "}
-                                    Run
-                                  </Button>
+                                  {request.retryTargets?.length ? (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      className="bg-amber-500 text-slate-950 hover:bg-amber-400"
+                                      disabled={busy === `retry-${request.id}`}
+                                      onClick={() => void retryFailed(request)}
+                                      title="Re-run the failed steps. Delivered output is kept."
+                                    >
+                                      {busy === `retry-${request.id}` ? (
+                                        <Loader2 className="animate-spin" />
+                                      ) : (
+                                        <RotateCcw />
+                                      )}{" "}
+                                      Retry
+                                    </Button>
+                                  ) : (
+                                    <Button
+                                      type="button"
+                                      size="sm"
+                                      disabled={
+                                        busy === request.id ||
+                                        !["ready", "failed"].includes(
+                                          request.status,
+                                        )
+                                      }
+                                      onClick={() =>
+                                        void call(
+                                          request.id,
+                                          `/api/requests/${request.id}/run`,
+                                          { method: "POST" },
+                                        )
+                                      }
+                                    >
+                                      {busy === request.id ? (
+                                        <Loader2 className="animate-spin" />
+                                      ) : (
+                                        <Play />
+                                      )}{" "}
+                                      Run
+                                    </Button>
+                                  )}
                                   <Button
                                     type="button"
                                     variant="outline"

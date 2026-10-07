@@ -8,6 +8,7 @@ import {
 } from "@/lib/phase-status";
 import { getAiBatchSettings } from "@/lib/pipeline-settings";
 import { prisma } from "@/lib/prisma";
+import { retryTargets } from "@/lib/retry-targets";
 
 export const dynamic = "force-dynamic";
 
@@ -157,6 +158,7 @@ export async function GET(request: Request) {
         include: {
           processed_files: {
             select: {
+              id: true,
               kind: true,
               status: true,
               ai_status: true,
@@ -214,6 +216,8 @@ export async function GET(request: Request) {
           deliverable_size_bytes: Number(request.deliverable_size_bytes),
           phaseProgress: phaseProgress(currentWave),
           phaseTiming: phaseTiming(currentWave),
+          // Rows the dashboard's Retry re-runs: the failed steps of this wave.
+          retryTargets: retryTargets(currentWave),
         };
       }),
     })),
