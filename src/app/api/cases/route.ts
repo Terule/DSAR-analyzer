@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { createManagedCase, refreshRequestLifecycle } from "@/lib/cases";
+import { getFilesAiState } from "@/lib/files-ai";
 import { oneTrustRequestUrl } from "@/lib/onetrust-links";
 import {
   extractPhaseStatus,
@@ -29,6 +30,7 @@ function phaseProgress(
     upload_total: number;
     upload_uploaded: number;
   }>,
+  filesAi?: { done: number; total: number },
 ) {
   const pstRows = rows.filter((row) => row.kind === "pst");
   const filesRow = rows.find((row) => row.kind === "files");
@@ -111,6 +113,7 @@ function phaseProgress(
       done: filesRow?.files_progress_handled || 0,
       total: filesRow?.files_total || 0,
       status: filesRow?.files_status || "pending",
+      ...(filesAi && filesAi.total > 0 ? { ai: filesAi } : {}),
     },
     upload: {
       done: uploadDone,
@@ -188,6 +191,21 @@ export async function GET(request: Request) {
     },
     orderBy: { created_at: "desc" },
   });
+  const filesRowIds = cases.flatMap((item) =>
+    item.requests.flatMap((request) =>
+      request.processed_files
+        .filter((file) => file.kind === "files")
+        .map((file) => file.id),
+    ),
+  );
+  const filesAiById = new Map(
+    await Promise.all(
+      filesRowIds.map(async (id) => {
+        const state = await getFilesAiState(id);
+        return [id, { done: state.resolved, total: state.total }] as const;
+      }),
+    ),
+  );
   return NextResponse.json({
     cases: cases.map(({ onetrust_upload_artifacts, ...item }) => ({
       ...item,
@@ -214,7 +232,12 @@ export async function GET(request: Request) {
           pst_size_bytes: Number(request.pst_size_bytes),
           files_size_bytes: Number(request.files_size_bytes),
           deliverable_size_bytes: Number(request.deliverable_size_bytes),
-          phaseProgress: phaseProgress(currentWave),
+          phaseProgress: phaseProgress(
+            currentWave,
+            filesAiById.get(
+              currentWave.find((file) => file.kind === "files")?.id ?? "",
+            ),
+          ),
           phaseTiming: phaseTiming(currentWave),
           // Rows the dashboard's Retry re-runs: the failed steps of this wave.
           retryTargets: retryTargets(currentWave),

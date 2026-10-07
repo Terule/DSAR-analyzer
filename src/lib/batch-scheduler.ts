@@ -15,6 +15,7 @@ import {
   enqueueFilePhase,
   isControlPlanePipelineEnabled,
 } from "./control-plane/pipeline";
+import { filesAiWorkRemains, pollFilesAiRuns } from "./files-ai-poll";
 import { prisma } from "./prisma";
 
 // OpenAI batches use a 24h completion window; a 1-minute cadence keeps the UI
@@ -178,6 +179,11 @@ export async function runBatchSweep(): Promise<SweepResult> {
     }
   }
 
+  // Files AI relevance batches are polled alongside the email batches.
+  await pollFilesAiRuns().catch((err) =>
+    console.error("[Batch Scheduler] Files AI poll failed:", err),
+  );
+
   // 3. Decide whether to keep polling. Stay alive while any file is mid-AI
   // (generating the next chunk = 'processing', awaiting a batch = 'batch_ready')
   // or has a render pending OR in progress — so the poller can reclaim a render
@@ -198,7 +204,7 @@ export async function runBatchSweep(): Promise<SweepResult> {
   return {
     polledBatches: pendingRuns.length,
     renderWorkerStarted,
-    workRemains: !!remaining,
+    workRemains: !!remaining || (await filesAiWorkRemains()),
   };
 }
 

@@ -227,7 +227,11 @@ async function submitChunk(
   }
 }
 
-async function failRun(runId: string, error: string): Promise<void> {
+/** Resolves a run's pending files to keep and marks the run failed. */
+export async function failFilesAiRun(
+  runId: string,
+  error: string,
+): Promise<void> {
   await prisma.filesAiVerdict.updateMany({
     where: { batch_run_id: runId, verdict: null },
     data: {
@@ -257,12 +261,12 @@ export async function pollFilesAiBatches(
   for (const run of runs) {
     const batch = await client.retrieveBatch(run.openai_batch_id as string);
     if (["failed", "expired", "cancelled"].includes(batch.status)) {
-      await failRun(run.id, `OpenAI batch ${batch.status}.`);
+      await failFilesAiRun(run.id, `OpenAI batch ${batch.status}.`);
       continue;
     }
     if (batch.status !== "completed") continue;
     if (!batch.outputFileId) {
-      await failRun(run.id, "Batch completed without an output file.");
+      await failFilesAiRun(run.id, "Batch completed without an output file.");
       continue;
     }
     const text = await client.readFile(batch.outputFileId);

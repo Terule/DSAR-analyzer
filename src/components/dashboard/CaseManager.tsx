@@ -30,6 +30,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { needsPolling } from "@/lib/dashboard-polling";
+import { filesAiReview } from "@/lib/files-ai-progress";
 import {
   formatBytes,
   maskCaseName,
@@ -38,7 +39,12 @@ import {
 import { SystemSettingsDialog } from "./SystemSettingsDialog";
 
 type Scope = "mail" | "files" | "both";
-type PhaseState = { done: number; total: number; status: string };
+type PhaseState = {
+  done: number;
+  total: number;
+  status: string;
+  ai?: { done: number; total: number };
+};
 type PhaseTiming = {
   parse: number;
   extract: number;
@@ -181,25 +187,29 @@ function phaseCards(request: RequestItem) {
         : active
           ? 10
           : 0;
+    const aiReview = phase.key === "files" ? filesAiReview(state) : null;
     return {
       name: phase.name,
       progress,
       active,
       detail:
-        state && state.total > 0
+        aiReview?.detail ??
+        (state && state.total > 0
           ? phase.key === "ai"
             ? `${state.done}/${state.total} batches complete`
             : `${state.done}/${state.total}`
-          : undefined,
-      label: complete
-        ? "Complete"
-        : state?.status === "failed"
-          ? "Failed"
-          : phase.key === "ai" && state?.status === "batch_ready"
-            ? "Waiting on OpenAI"
-            : active
-              ? "In progress"
-              : "Waiting",
+          : undefined),
+      label: aiReview
+        ? aiReview.label
+        : complete
+          ? "Complete"
+          : state?.status === "failed"
+            ? "Failed"
+            : phase.key === "ai" && state?.status === "batch_ready"
+              ? "Waiting on OpenAI"
+              : active
+                ? "In progress"
+                : "Waiting",
     };
   });
 }
