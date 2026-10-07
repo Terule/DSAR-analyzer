@@ -7,7 +7,9 @@ import {
 import { enqueueFilePhase } from "./control-plane/pipeline";
 import {
   type FilesAiClient,
+  getFilesAiState,
   isFilesAiSettled,
+  keepUnsubmittedFiles,
   openAiFilesAiClient,
   prepareFilesAi,
 } from "./files-ai";
@@ -44,14 +46,21 @@ export async function advanceFilesAi(
   const prepare = await getFilesStageJobState(fileId, runKey, "filesAiPrepare");
   if (prepare.active > 0) return "waiting";
   if (prepare.completed === 0) {
-    if (prepare.failed > 0) return "ready";
-    await enqueueFilePhase({
-      fileId,
-      phase: "files",
-      dedupeKey: `files-ai-prepare:${fileId}:${runKey}`,
-      metadata: { filesAiPrepare: true, runKey },
-    });
-    return "waiting";
+    if (prepare.failed === 0) {
+      await enqueueFilePhase({
+        fileId,
+        phase: "files",
+        dedupeKey: `files-ai-prepare:${fileId}:${runKey}`,
+        metadata: { filesAiPrepare: true, runKey },
+      });
+      return "waiting";
+    }
+    // Prepare dead-lettered. If it never submitted anything, deliver
+    // everything. If some batches already went out, still read them (their
+    // discards must not be dropped) and keep the files that were never sent.
+    const state = await getFilesAiState(fileId);
+    if (state.total === 0 && state.activeRuns === 0) return "ready";
+    await keepUnsubmittedFiles(fileId);
   }
   if (!(await isFilesAiSettled(fileId))) return "waiting";
 
@@ -194,6 +203,8 @@ export async function clearFilesAiState(input: {
       force: true,
     });
   }
-  await prisma.filesAiVerdict.deleteMany({ where: { file_id: input.fileId } });
-  await prisma.filesAiBatchRun.deleteMany({ where: { file_id: input.fileId } });
+  await prisma.$transaction([
+    prisma.filesAiVerdict.deleteMany({ where: { file_id: input.fileId } }),
+    prisma.filesAiBatchRun.deleteMany({ where: { file_id: input.fileId } }),
+  ]);
 }

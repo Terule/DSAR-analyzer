@@ -100,6 +100,55 @@ describe("Files AI poller", () => {
     );
   });
 
+  it("gives up on a run stuck in claiming and keeps its files", async () => {
+    n++;
+    const fileId = `t-fap-${tag}-${n}`;
+    fileIds.push(fileId);
+    await prisma.processedFile.create({
+      data: { id: fileId, filename: "Files", kind: "files" },
+    });
+    const stale = `run-stale-${fileId}`;
+    const fresh = `run-fresh-${fileId}`;
+    await prisma.filesAiBatchRun.createMany({
+      data: [
+        {
+          id: stale,
+          file_id: fileId,
+          status: "claiming",
+          created_at: new Date(Date.now() - 90 * 60_000),
+        },
+        { id: fresh, file_id: fileId, status: "claiming" },
+      ],
+    });
+    await prisma.filesAiVerdict.createMany({
+      data: [
+        {
+          id: `${fileId}:Documents/Document aaaaaaaaaaaaaaaa.pdf`,
+          file_id: fileId,
+          rel_path: "Documents/Document aaaaaaaaaaaaaaaa.pdf",
+          batch_run_id: stale,
+        },
+        {
+          id: `${fileId}:Documents/Document bbbbbbbbbbbbbbbb.pdf`,
+          file_id: fileId,
+          rel_path: "Documents/Document bbbbbbbbbbbbbbbb.pdf",
+          batch_run_id: fresh,
+        },
+      ],
+    });
+    await pollFilesAiRuns(async () => doneClient);
+    const runs = await prisma.filesAiBatchRun.findMany({
+      where: { file_id: fileId },
+    });
+    assert.equal(runs.find((r) => r.id === stale)?.status, "failed");
+    assert.equal(runs.find((r) => r.id === fresh)?.status, "claiming");
+    const rows = await prisma.filesAiVerdict.findMany({
+      where: { file_id: fileId },
+    });
+    assert.equal(rows.find((r) => r.batch_run_id === stale)?.verdict, "keep");
+    assert.equal(rows.find((r) => r.batch_run_id === fresh)?.verdict, null);
+  });
+
   it("reports remaining work while a run is active", async () => {
     await makeRun({ ageMinutes: 1, batchId: "d" });
     assert.equal(await filesAiWorkRemains(), true);

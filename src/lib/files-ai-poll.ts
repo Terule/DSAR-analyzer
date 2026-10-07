@@ -17,6 +17,22 @@ const STALE_RUN_MS = 30 * 60_000;
 export async function pollFilesAiRuns(
   clientFactory: () => Promise<FilesAiClient> = openAiFilesAiClient,
 ): Promise<number> {
+  // A run whose submitter died between creating the run and submitting it has
+  // no batch to wait for: give up on it so the Files AI step can settle.
+  const stuck = await prisma.filesAiBatchRun.findMany({
+    where: {
+      status: "claiming",
+      created_at: { lt: new Date(Date.now() - STALE_RUN_MS) },
+    },
+    select: { id: true },
+  });
+  for (const run of stuck) {
+    await failFilesAiRun(
+      run.id,
+      "Submission was interrupted before the batch was created.",
+    );
+  }
+
   const runs = await prisma.filesAiBatchRun.findMany({
     where: {
       status: { in: ["submitted", "processing"] },
@@ -24,7 +40,7 @@ export async function pollFilesAiRuns(
     },
     select: { id: true, file_id: true, submitted_at: true, created_at: true },
   });
-  if (runs.length === 0) return 0;
+  if (runs.length === 0) return stuck.length;
 
   let client: FilesAiClient | null = null;
   try {

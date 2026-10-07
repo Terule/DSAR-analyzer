@@ -225,6 +225,54 @@ describe("Files AI gate", () => {
       assert.equal(await advanceFilesAi(fileId, "run-1"), "ready");
     });
 
+    it("does not deliver past an in-flight batch when prepare dead-letters after submitting", async () => {
+      const fileId = await makeFilesRow(employeeCase);
+      await advanceFilesAi(fileId, "run-1");
+      await setStage(fileId, "run-1", "filesAiPrepare", "dead_letter");
+      const runId = `run-dl-${fileId}`;
+      await prisma.filesAiBatchRun.create({
+        data: { id: runId, file_id: fileId, status: "submitted" },
+      });
+      await prisma.filesAiVerdict.createMany({
+        data: [
+          {
+            id: `${fileId}:Documents/Document 5555555555555555.pdf`,
+            file_id: fileId,
+            rel_path: "Documents/Document 5555555555555555.pdf",
+            batch_run_id: runId,
+          },
+          {
+            id: `${fileId}:Documents/Document 6666666666666666.pdf`,
+            file_id: fileId,
+            rel_path: "Documents/Document 6666666666666666.pdf",
+          },
+        ],
+      });
+      // The batch is still out: wait for it instead of delivering.
+      assert.equal(await advanceFilesAi(fileId, "run-1"), "waiting");
+      // The chunk that never got submitted is kept, not left pending forever.
+      const unsent = await prisma.filesAiVerdict.findUniqueOrThrow({
+        where: { id: `${fileId}:Documents/Document 6666666666666666.pdf` },
+      });
+      assert.equal(unsent.verdict, "keep");
+
+      // Once the batch is read, its discard is applied before finalize.
+      await prisma.filesAiVerdict.update({
+        where: { id: `${fileId}:Documents/Document 5555555555555555.pdf` },
+        data: { verdict: "discard", reason: "r" },
+      });
+      await prisma.filesAiBatchRun.update({
+        where: { id: runId },
+        data: { status: "completed" },
+      });
+      assert.equal(await advanceFilesAi(fileId, "run-1"), "waiting");
+      const jobs = await stageJobs(fileId, "run-1");
+      assert.equal(
+        jobs.filter((j) => j.metadata.filesAiApply === true).length,
+        1,
+      );
+    });
+
     it("fails loudly when apply dead-letters", async () => {
       const fileId = await makeFilesRow(employeeCase);
       await advanceFilesAi(fileId, "run-1");

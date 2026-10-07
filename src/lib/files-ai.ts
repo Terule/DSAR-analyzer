@@ -246,6 +246,23 @@ export async function failFilesAiRun(
   });
 }
 
+/**
+ * Keeps every file that was never handed to a batch (pending and unclaimed).
+ * Used when the prepare job dead-lettered: those files will not be submitted,
+ * but batches that did go out are still read.
+ */
+export async function keepUnsubmittedFiles(fileId: string): Promise<number> {
+  const result = await prisma.filesAiVerdict.updateMany({
+    where: { file_id: fileId, verdict: null, batch_run_id: null },
+    data: {
+      verdict: "keep",
+      reason: "AI step failed; kept.",
+      resolved_at: new Date(),
+    },
+  });
+  return result.count;
+}
+
 /** Applies the output of every finished batch of this Files row. */
 export async function pollFilesAiBatches(
   fileId: string,
