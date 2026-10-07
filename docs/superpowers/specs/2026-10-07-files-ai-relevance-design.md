@@ -51,28 +51,22 @@ the AI step is settled.
 
 ## Components
 
-### 1. Excerpt sidecars (written during conversion)
+### 1. Text sample (read from the delivered PDFs)
 
-For every file kept and converted, the conversion batch writes a small JSON
-sidecar under the request's hidden work path
-(`<case>/<request>/.work/Files/ai-excerpts/<contentHash>.json`):
+The `filesAiPrepare` job reads the text of this wave's converted PDFs
+(`Documents/Document <hash>.pdf`, `Messages/Message <hash>.pdf`; earlier waves'
+numbered files and `Unconverted/` are never candidates) with `pdf-parse`. No
+change to the conversion engine and no sidecar files.
 
-```
-{ id, deliverablePath, sourceName, type, excerpt }
-```
-
-- `excerpt`: the first ~4,000 characters of the extracted text plus the lines
-  that mention the subject (capped overall). The text is already in memory at
-  conversion time, so no extra extraction pass is needed.
-- **Large files** (the existing large-Office threshold, and any file whose full
-  text would exceed the per-file token budget) are never sent whole. Only a
-  **sample** goes to the AI: the head of the text plus the lines that mention the
-  subject, spread across the file and capped. The verdict applies to the whole
+- Text up to 60,000 characters is sent whole, truncated to 6,000 characters.
+- **Large files** (text over 60,000 characters) are never sent whole. Only a
+  **sample** goes to the AI: the first 3,000 characters plus up to 25 lines (300
+  characters each) that mention the subject. The verdict applies to the whole
   file. If the sample matches the criteria (`keep`), the file is **kept exactly
   as it is**: delivered through the normal path, unchanged and with no further
   AI calls. Only an explicit `discard` removes it.
-- Files delivered as unconverted originals (fallback) that cannot yield text
-  are kept without an AI verdict.
+- A PDF with no extractable text (image-only, corrupt) is kept without an AI call.
+- Files delivered as unconverted originals (fallback) are not candidates.
 
 ### 2. Tables (new migration)
 
