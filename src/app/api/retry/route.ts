@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { NextResponse } from "next/server";
 import { getCasePstFileIds } from "@/lib/case-utils";
+import { reopenRequestForRetry } from "@/lib/cases";
 import {
   cancelJobsForFiles,
   clearFilesBatchResults,
@@ -230,6 +231,7 @@ export async function POST(request: Request) {
 
     if (phase && isControlPlanePipelineEnabled()) {
       await enqueueFilePhase({ fileId, phase });
+      await reopenRequestForRetry(row.case_request_id);
     }
 
     return NextResponse.json(

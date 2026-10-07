@@ -29,6 +29,7 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import { needsPolling } from "@/lib/dashboard-polling";
 import {
   formatBytes,
   maskCaseName,
@@ -269,16 +270,7 @@ export function CaseManager() {
   }, [refresh]);
 
   useEffect(() => {
-    if (
-      !cases.some((item) =>
-        item.requests.some(
-          (request) =>
-            ["queued", "running"].includes(request.status) ||
-            request.phaseProgress?.upload.status === "processing",
-        ),
-      )
-    )
-      return;
+    if (!needsPolling(cases)) return;
     const timer = window.setInterval(() => void refresh(true), 5_000);
     return () => window.clearInterval(timer);
   }, [cases, refresh]);

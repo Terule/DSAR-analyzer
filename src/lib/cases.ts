@@ -544,6 +544,22 @@ export async function deleteUnusedRequest(
   return { alreadyDeleted: false };
 }
 
+/**
+ * A retried step means the request is working again. A request that finished
+ * (or failed) reads "completed"/"failed", which the lifecycle refresh and the
+ * dashboard's polling both ignore, so the retried step would never be followed.
+ * Requests that are already running or have not started are left alone.
+ */
+export async function reopenRequestForRetry(
+  requestId: string | null,
+): Promise<void> {
+  if (!requestId) return;
+  await prisma.caseRequest.updateMany({
+    where: { id: requestId, status: { in: ["completed", "failed"] } },
+    data: { status: "running", completed_at: null },
+  });
+}
+
 export async function refreshRequestLifecycle(
   requestId?: string,
 ): Promise<void> {
