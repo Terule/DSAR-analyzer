@@ -127,6 +127,18 @@ describe("reviveFailedFilesBatches", () => {
     assert.equal((await read(otherFileJob)).status, "dead_letter");
   });
 
+  it("does not retry a batch that already failed in the large lane", async () => {
+    // A giant spreadsheet that kills a 6GB worker would otherwise be retried
+    // in the same lane: ten container kills per file instead of five.
+    const id = await job({
+      status: "dead_letter",
+      runKey: "run-large",
+      metadata: { largeOfficeBatch: true },
+    });
+    assert.equal(await reviveFailedFilesBatches(fileId, "run-large"), 0);
+    assert.equal((await read(id)).status, "dead_letter");
+  });
+
   it("revives every dead-lettered batch of the run in one call", async () => {
     const runKey = "run-many";
     const a = await job({ status: "dead_letter", runKey });

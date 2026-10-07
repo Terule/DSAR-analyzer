@@ -383,13 +383,14 @@ export async function getFilesFinalizerState(
 }
 
 /**
- * Gives every dead-lettered batch of a Files run one more try in the large
- * lane: a bigger container, run alone after the regular batches settle. A batch
+ * Gives every dead-lettered regular-lane batch of a Files run one more try in
+ * the large lane: a bigger container, run alone after the regular batches settle. A batch
  * usually dead-letters because one big spreadsheet got the regular 1.5GB worker
  * killed; the other files in it convert fine given more room. Only batches that
  * have not had this extra try are touched, so a batch that fails again falls
  * through to the existing "deliver the originals unconverted" fallback.
- * Returns how many batches were revived.
+ * Batches that already ran in the large lane are not retried: a spreadsheet too
+ * big for 6GB would just be killed again. Returns how many were revived.
  */
 export async function reviveFailedFilesBatches(
   fileId: string,
@@ -415,6 +416,7 @@ export async function reviveFailedFilesBatches(
        AND payload->>'fileId' = $1
        AND payload->'metadata'->>'runKey' = $2
        AND payload->'metadata'->>'filesBatch' = 'true'
+       AND payload->'metadata'->>'largeOfficeBatch' IS DISTINCT FROM 'true'
        AND payload->'metadata'->>'highMemoryRetried' IS DISTINCT FROM 'true'
        AND payload->'metadata'->>'filesFallback' IS DISTINCT FROM 'true'
        AND payload->'metadata'->>'superseded' IS DISTINCT FROM 'true'
