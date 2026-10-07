@@ -144,5 +144,9 @@ Job `filesAiApply` (run by the control plane when the AI step is settled):
 
 ## Open items to settle in the plan
 
-- Exact excerpt size cap and token budget per file.
-- Whether Discarded files count toward the "skipped" tile total.
+- Exact excerpt/sample size cap and token budget per file, and the size above
+  which a file is treated as "large" for sampling.
+
+(Decided: a discarded file counts as **skipped**, the same bucket as files
+dropped by the rule filters, so processed + skipped + duplicates still adds up
+to the files handled.)
