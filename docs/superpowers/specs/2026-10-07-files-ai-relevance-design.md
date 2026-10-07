@@ -13,6 +13,9 @@ uploaded.
 
 ## Agreed decisions
 
+- Discarded files count as skipped; large files are judged from a sample and,
+  when it matches, kept as is (details below).
+
 - **Verdict**: a file the AI judges not relevant is **excluded from delivery**
   (not delivered, not uploaded). It is kept on disk under `Discarded/` with the
   AI's reason so a reviewer can audit it.
@@ -61,8 +64,15 @@ sidecar under the request's hidden work path
 - `excerpt`: the first ~4,000 characters of the extracted text plus the lines
   that mention the subject (capped overall). The text is already in memory at
   conversion time, so no extra extraction pass is needed.
-- Files delivered as unconverted originals (fallback) get no excerpt and are
-  kept without an AI verdict.
+- **Large files** (the existing large-Office threshold, and any file whose full
+  text would exceed the per-file token budget) are never sent whole. Only a
+  **sample** goes to the AI: the head of the text plus the lines that mention the
+  subject, spread across the file and capped. The verdict applies to the whole
+  file. If the sample matches the criteria (`keep`), the file is **kept exactly
+  as it is**: delivered through the normal path, unchanged and with no further
+  AI calls. Only an explicit `discard` removes it.
+- Files delivered as unconverted originals (fallback) that cannot yield text
+  are kept without an AI verdict.
 
 ### 2. Tables (new migration)
 
