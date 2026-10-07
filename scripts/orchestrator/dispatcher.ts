@@ -40,6 +40,10 @@ import type {
   ControlJobRecord,
   ControlPhase,
 } from "../../src/lib/control-plane/types";
+import {
+  clampFilesConcurrency,
+  FILES_CONCURRENCY_LIMITS,
+} from "../../src/lib/files-concurrency";
 import { resolveJobLogs, workerLogPath } from "../../src/lib/job-log";
 import { prisma } from "../../src/lib/prisma";
 import { resumeSharePointUploads } from "../../src/lib/sharepoint-resume";
@@ -57,7 +61,9 @@ function concurrencyCaps(cpuCount: number): Record<ControlPhase, number> {
     ai: 1,
     render: Number(process.env.RENDER_CONCURRENCY || Math.min(2, cpuCount)),
     // A single active case can process independent Files batches in parallel.
-    files: Number(process.env.FILES_CONCURRENCY || Math.min(2, cpuCount)),
+    // The real value lives in System settings and is applied by
+    // refreshFilesCap(); this is only the starting point.
+    files: FILES_CONCURRENCY_LIMITS.default,
   };
 }
 let caps: Record<ControlPhase, number> = concurrencyCaps(1);
@@ -557,10 +563,35 @@ const shouldSweepBatches = createThrottle(BATCH_SWEEP_INTERVAL_MS);
 const UPLOAD_SUPERVISION_INTERVAL_MS = 30_000;
 const shouldSuperviseUploads = createThrottle(UPLOAD_SUPERVISION_INTERVAL_MS);
 
+// How many Files workers run at once is a System setting; read it often enough
+// that changing it takes effect without restarting the dispatcher.
+const FILES_CAP_REFRESH_MS = 15_000;
+const shouldRefreshFilesCap = createThrottle(FILES_CAP_REFRESH_MS);
+
+async function refreshFilesCap(): Promise<void> {
+  const row = await prisma.pipelineSettings.findUnique({
+    where: { id: "global" },
+    select: { files_concurrency: true },
+  });
+  const next = clampFilesConcurrency(row?.files_concurrency);
+  if (next !== caps.files) {
+    console.log(`[dispatcher] Files workers: ${caps.files} -> ${next}`);
+    caps = { ...caps, files: next };
+  }
+}
+
 async function tick(): Promise<void> {
   await requeueExpiredLeases();
   await observeRunning();
   await reconcileInterruptedWork();
+  if (shouldRefreshFilesCap()) {
+    await refreshFilesCap().catch((error) =>
+      console.error(
+        "[dispatcher] Could not read the Files workers setting:",
+        error,
+      ),
+    );
+  }
   if (shouldSweepBatches()) await runBatchSweep();
   if (shouldSuperviseUploads()) {
     await resumeSharePointUploads().catch((error) =>

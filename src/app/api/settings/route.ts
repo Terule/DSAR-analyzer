@@ -39,6 +39,7 @@ export async function PATCH(request: Request) {
       oneTrustClientId?: string;
       oneTrustClientSecret?: string;
       deleteSourcePsts?: boolean;
+      filesConcurrency?: number | string;
     };
     const current = await getAiBatchSettings();
     const settings = await updateAiBatchSettings({
@@ -62,6 +63,10 @@ export async function PATCH(request: Request) {
       oneTrustSystemLabel:
         body.oneTrustSystemLabel ?? current.oneTrustSystemLabel,
       deleteSourcePsts: body.deleteSourcePsts ?? current.deleteSourcePsts,
+      filesConcurrency:
+        body.filesConcurrency === undefined || body.filesConcurrency === ""
+          ? current.filesConcurrency
+          : Number(body.filesConcurrency),
     });
     const encrypted = await Promise.all([
       body.openAiKey?.trim()

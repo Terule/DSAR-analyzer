@@ -1,3 +1,7 @@
+import {
+  FILES_CONCURRENCY_LIMITS,
+  isValidFilesConcurrency,
+} from "./files-concurrency";
 import { prisma } from "./prisma";
 
 export const DEFAULT_AI_BATCH_SETTINGS = {
@@ -39,6 +43,7 @@ export interface AiBatchSettings {
   hasOneTrustClientId?: boolean;
   hasOneTrustClientSecret?: boolean;
   deleteSourcePsts?: boolean;
+  filesConcurrency?: number;
 }
 
 function normalizeOptionalUrl(value: string): string {
@@ -116,6 +121,14 @@ export function validateAiBatchSettings(
     );
   }
 
+  const filesConcurrency =
+    input.filesConcurrency ?? FILES_CONCURRENCY_LIMITS.default;
+  if (!isValidFilesConcurrency(filesConcurrency)) {
+    throw new Error(
+      `Files workers must be a whole number between ${FILES_CONCURRENCY_LIMITS.min} and ${FILES_CONCURRENCY_LIMITS.max}.`,
+    );
+  }
+
   return {
     maxTokensPerBatch,
     maxConcurrentBatches,
@@ -139,6 +152,7 @@ export function validateAiBatchSettings(
     hasOneTrustClientId: input.hasOneTrustClientId,
     hasOneTrustClientSecret: input.hasOneTrustClientSecret,
     deleteSourcePsts: input.deleteSourcePsts ?? true,
+    filesConcurrency,
   };
 }
 
@@ -176,6 +190,7 @@ export async function getAiBatchSettings(): Promise<AiBatchSettings> {
     hasOneTrustClientId: Boolean(row.onetrust_client_id_encrypted),
     hasOneTrustClientSecret: Boolean(row.onetrust_client_secret_encrypted),
     deleteSourcePsts: row.delete_source_psts,
+    filesConcurrency: row.files_concurrency,
   };
 }
 
@@ -204,6 +219,7 @@ export async function updateAiBatchSettings(
         settings.oneTrustDateRaisedFieldKey || null,
       onetrust_system_label: settings.oneTrustSystemLabel,
       delete_source_psts: settings.deleteSourcePsts ?? true,
+      files_concurrency: settings.filesConcurrency,
     },
     update: {
       ai_max_tokens_per_batch: settings.maxTokensPerBatch,
@@ -223,6 +239,7 @@ export async function updateAiBatchSettings(
         settings.oneTrustDateRaisedFieldKey || null,
       onetrust_system_label: settings.oneTrustSystemLabel,
       delete_source_psts: settings.deleteSourcePsts ?? true,
+      files_concurrency: settings.filesConcurrency,
     },
   });
   return {
@@ -249,5 +266,6 @@ export async function updateAiBatchSettings(
     hasOneTrustClientId: Boolean(row.onetrust_client_id_encrypted),
     hasOneTrustClientSecret: Boolean(row.onetrust_client_secret_encrypted),
     deleteSourcePsts: row.delete_source_psts,
+    filesConcurrency: row.files_concurrency,
   };
 }

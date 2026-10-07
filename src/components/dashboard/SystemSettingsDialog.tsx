@@ -203,6 +203,8 @@ export function SystemSettingsDialog({
       hint?: string;
       className?: string;
       disabled?: boolean;
+      min?: number;
+      max?: number;
     } = {},
   ) => {
     const configured = Boolean(
@@ -222,6 +224,8 @@ export function SystemSettingsDialog({
           placeholder={options.secure && configured ? MASK : undefined}
           onChange={(event) => update(key, event.target.value)}
           disabled={options.disabled}
+          min={options.min}
+          max={options.max}
           className="w-full min-w-0 rounded-xl border border-slate-600 bg-slate-950/80 px-3 py-2.5 text-sm text-slate-100 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/30 placeholder:text-slate-200 disabled:cursor-not-allowed disabled:opacity-65"
         />
         <span className="min-h-5 text-xs leading-5 text-slate-500">
@@ -688,34 +692,55 @@ export function SystemSettingsDialog({
                   )}
                 </>
               )}
-              {tab === "System" &&
-                section(
-                  "Integrated runtime",
-                  "These services are deliberately fixed so every AIDA container can communicate without user-managed connection strings.",
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {[
-                      ["Execution provider", "Docker one-shot jobs", "Running"],
-                      ["Queue provider", "BullMQ via Redis", "Connected"],
-                      ["Queue name", "aida-orchestrator", "Fixed"],
-                      ["Database", "Postgres integrated stack", "Connected"],
-                    ].map(([title, detail, state]) => (
-                      <div
-                        key={title}
-                        className="rounded-xl border border-slate-700 bg-slate-950/45 p-4"
-                      >
-                        <div className="flex items-center justify-between gap-3">
-                          <strong className="text-sm text-slate-200">
-                            {title}
-                          </strong>
-                          <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-300">
-                            {state}
-                          </span>
+              {tab === "System" && (
+                <>
+                  {section(
+                    "Performance",
+                    "How much work AIDA runs in parallel on this machine.",
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {input("filesConcurrency", "Files workers in parallel", {
+                        type: "number",
+                        min: 1,
+                        max: 8,
+                        hint: "Files batches processed at once (1-8). Each worker uses one CPU core and up to 1.5 GB of memory. Applies within about 15 seconds, without a restart.",
+                      })}
+                    </div>,
+                  )}
+                  {section(
+                    "Integrated runtime",
+                    "These services are deliberately fixed so every AIDA container can communicate without user-managed connection strings.",
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {[
+                        [
+                          "Execution provider",
+                          "Docker one-shot jobs",
+                          "Running",
+                        ],
+                        ["Queue provider", "BullMQ via Redis", "Connected"],
+                        ["Queue name", "aida-orchestrator", "Fixed"],
+                        ["Database", "Postgres integrated stack", "Connected"],
+                      ].map(([title, detail, state]) => (
+                        <div
+                          key={title}
+                          className="rounded-xl border border-slate-700 bg-slate-950/45 p-4"
+                        >
+                          <div className="flex items-center justify-between gap-3">
+                            <strong className="text-sm text-slate-200">
+                              {title}
+                            </strong>
+                            <span className="rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-semibold text-emerald-300">
+                              {state}
+                            </span>
+                          </div>
+                          <p className="mt-2 text-sm text-slate-400">
+                            {detail}
+                          </p>
                         </div>
-                        <p className="mt-2 text-sm text-slate-400">{detail}</p>
-                      </div>
-                    ))}
-                  </div>,
-                )}
+                      ))}
+                    </div>,
+                  )}
+                </>
+              )}
               {error && (
                 <p className="rounded-xl border border-rose-500/35 bg-rose-950/35 px-3 py-2 text-sm text-rose-200">
                   {error}

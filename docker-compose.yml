@@ -56,9 +56,9 @@ services:
       POSTGRES_URL: postgres://pst:pst@postgres:5432/pst_analyser
       REDIS_URL: redis://redis:6379
       WORKER_IMAGE: aida:local
-      # Normal Files work stays parallel. Large Office files are scheduled in a
-      # deferred, one-worker lane with a larger container memory limit.
-      FILES_CONCURRENCY: "2"
+      # Normal Files work runs in parallel; how many workers is a System
+      # setting. Large Office files are scheduled in a deferred, one-worker lane
+      # with a larger container memory limit.
       LARGE_FILES_JOB_MEMORY_MB: "3072"
       OFFICE_WORKER_HEAP_MB: "2048"
       # Render converts spreadsheet attachments entirely in memory, so a very
