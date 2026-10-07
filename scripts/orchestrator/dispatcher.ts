@@ -33,6 +33,7 @@ import {
   markJobRunning,
   requeueDispatcherOrphans,
   requeueExpiredLeases,
+  reviveFailedFilesBatches,
   setWorkerContainer,
 } from "../../src/lib/control-plane/job-store";
 import { enqueueFilePhase } from "../../src/lib/control-plane/pipeline";
@@ -45,6 +46,7 @@ import {
   FILES_CONCURRENCY_LIMITS,
 } from "../../src/lib/files-concurrency";
 import { resolveJobLogs, workerLogPath } from "../../src/lib/job-log";
+import { officeHeapMb } from "../../src/lib/office-heap";
 import { prisma } from "../../src/lib/prisma";
 import { resumeSharePointUploads } from "../../src/lib/sharepoint-resume";
 import { createThrottle } from "../../src/lib/sweep-throttle";
@@ -99,7 +101,7 @@ function memoryMbForJob(job: ControlJobRecord): number {
     return Number(
       process.env.LARGE_FILES_JOB_MEMORY_MB ||
         process.env.FILES_JOB_MEMORY_MB ||
-        3072,
+        6144,
     );
   }
   return memoryMbForPhase(job.phase);
@@ -112,6 +114,16 @@ function heapEnvironment(job: ControlJobRecord): string[] {
     process.env[`${job.phase.toUpperCase()}_JOB_HEAP_MB`],
   );
   return flag ? [`NODE_OPTIONS=${flag}`] : [];
+}
+
+/**
+ * Files workers convert each spreadsheet or document in a thread with its own
+ * heap limit. It is derived from the worker's container size so an oversized
+ * file fails alone instead of getting the whole container killed.
+ */
+function officeHeapEnvironment(job: ControlJobRecord): string[] {
+  if (job.phase !== "files") return [];
+  return [`OFFICE_WORKER_HEAP_MB=${officeHeapMb(memoryMbForJob(job))}`];
 }
 
 function cpuNanoForPhase(phase: ControlPhase): number {
@@ -203,7 +215,13 @@ async function startOne(phase: ControlPhase): Promise<boolean> {
       network,
       binds: workerBinds || [],
       image,
-      environment: [...workerEnvironment, ...heapEnvironment(job)],
+      environment: [
+        ...workerEnvironment.filter(
+          (entry) => !entry.startsWith("OFFICE_WORKER_HEAP_MB="),
+        ),
+        ...heapEnvironment(job),
+        ...officeHeapEnvironment(job),
+      ],
     });
     await setWorkerContainer(job.id, workerId, containerId);
     // Reset may have cancelled this job while Docker was creating the worker.
@@ -372,8 +390,20 @@ async function settleFilesBatches(): Promise<void> {
     },
   });
   for (const row of filesRows) {
-    const state = await getLatestFilesBatchParentState(row.id);
+    let state = await getLatestFilesBatchParentState(row.id);
     if (!state) continue;
+    if (state.failed > 0) {
+      // A batch that dead-lettered usually lost a regular 1.5GB worker to one
+      // big spreadsheet. Give it one more try in the large lane before the
+      // fallback delivers its files unconverted.
+      const revived = await reviveFailedFilesBatches(row.id, state.runKey);
+      if (revived > 0) {
+        console.log(
+          `[dispatcher] ${revived} failed Files batch(es) moved to the high-memory lane.`,
+        );
+        state = (await getLatestFilesBatchParentState(row.id)) ?? state;
+      }
+    }
     if (state.active > 0) {
       // A previous batch may already be dead-lettered, but the durable queue
       // can still have hundreds of independent batches progressing. Keep the

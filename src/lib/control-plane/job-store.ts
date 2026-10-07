@@ -382,6 +382,54 @@ export async function getFilesFinalizerState(
   };
 }
 
+/**
+ * Gives every dead-lettered batch of a Files run one more try in the large
+ * lane: a bigger container, run alone after the regular batches settle. A batch
+ * usually dead-letters because one big spreadsheet got the regular 1.5GB worker
+ * killed; the other files in it convert fine given more room. Only batches that
+ * have not had this extra try are touched, so a batch that fails again falls
+ * through to the existing "deliver the originals unconverted" fallback.
+ * Returns how many batches were revived.
+ */
+export async function reviveFailedFilesBatches(
+  fileId: string,
+  runKey: string,
+): Promise<number> {
+  const result = await getControlPlanePool().query(
+    `UPDATE orchestrator_jobs
+     SET status = 'queued',
+         attempts = 0,
+         available_at = NOW(),
+         leased_by = NULL,
+         lease_expires_at = NULL,
+         worker_container_id = NULL,
+         worker_starting = FALSE,
+         last_error = LEFT('Retrying in the high-memory lane. Previous error: ' || COALESCE(last_error, ''), 1000),
+         payload = jsonb_set(
+           jsonb_set(payload, '{metadata,largeOfficeBatch}', 'true'::jsonb),
+           '{metadata,highMemoryRetried}', 'true'::jsonb
+         ),
+         updated_at = NOW()
+     WHERE phase = 'files'
+       AND status = 'dead_letter'
+       AND payload->>'fileId' = $1
+       AND payload->'metadata'->>'runKey' = $2
+       AND payload->'metadata'->>'filesBatch' = 'true'
+       AND payload->'metadata'->>'highMemoryRetried' IS DISTINCT FROM 'true'
+       AND payload->'metadata'->>'filesFallback' IS DISTINCT FROM 'true'
+       AND payload->'metadata'->>'superseded' IS DISTINCT FROM 'true'
+       AND NOT EXISTS (
+         SELECT 1 FROM orchestrator_jobs other
+         WHERE other.phase = orchestrator_jobs.phase
+           AND other.dedupe_key = orchestrator_jobs.dedupe_key
+           AND other.id <> orchestrator_jobs.id
+           AND other.status IN ('queued', 'leased', 'running', 'awaiting_external')
+       )`,
+    [fileId, runKey],
+  );
+  return result.rowCount ?? 0;
+}
+
 export async function listFailedFilesBatches(
   fileId: string,
   runKey: string,

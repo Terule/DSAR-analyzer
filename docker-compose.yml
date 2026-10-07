@@ -59,8 +59,10 @@ services:
       # Normal Files work runs in parallel; how many workers is a System
       # setting. Large Office files are scheduled in a deferred, one-worker lane
       # with a larger container memory limit.
-      LARGE_FILES_JOB_MEMORY_MB: "3072"
-      OFFICE_WORKER_HEAP_MB: "2048"
+      # The large lane runs one job at a time, after the regular batches have
+      # settled, so it can be generous. Failed batches get one retry here.
+      # The spreadsheet thread's heap is derived from this (two thirds).
+      LARGE_FILES_JOB_MEMORY_MB: "${LARGE_FILES_JOB_MEMORY_MB:-6144}"
       # Render converts spreadsheet attachments entirely in memory, so a very
       # large workbook needs far more than the 2048MB default. Unset (empty)
       # keeps the built-in defaults; set these in .env, sized to what Docker
