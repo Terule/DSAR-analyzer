@@ -434,6 +434,74 @@ export async function countCaseDeliverableFiles(
 }
 
 /** Upload one verified deliverable from the durable artifact outbox. */
+// The upload worker sends thousands of files to the same few folders. Looking
+// up the token, the drive and each folder once per process (instead of once per
+// file) removes most Graph requests, and sharing the in-flight lookups keeps
+// parallel uploads from racing to create the same folder.
+const TOKEN_TTL_MS = 45 * 60_000;
+let uploadContext:
+  | {
+      siteUrl: string;
+      expiresAt: number;
+      token: string;
+      drive: SharePointDrive;
+    }
+  | undefined;
+let uploadContextPending:
+  | Promise<NonNullable<typeof uploadContext>>
+  | undefined;
+const sharedFolderIds = new Map<string, string>();
+const folderLookups = new Map<string, Promise<string>>();
+
+async function sharedUploadContext(siteUrl: string | null | undefined) {
+  const site = siteUrl ?? "";
+  if (
+    uploadContext &&
+    uploadContext.siteUrl === site &&
+    uploadContext.expiresAt > Date.now()
+  ) {
+    return uploadContext;
+  }
+  if (!uploadContextPending) {
+    uploadContextPending = (async () => {
+      const token = await graphAccessToken();
+      const drive = await getSharePointDrive(token);
+      uploadContext = {
+        siteUrl: site,
+        expiresAt: Date.now() + TOKEN_TTL_MS,
+        token,
+        drive,
+      };
+      return uploadContext;
+    })().finally(() => {
+      uploadContextPending = undefined;
+    });
+  }
+  return uploadContextPending;
+}
+
+function ensureFolderOnce(
+  driveId: string,
+  parentId: string,
+  name: string,
+  token: string,
+): Promise<string> {
+  const key = `${driveId}:${parentId}:${name}`;
+  const known = sharedFolderIds.get(key);
+  if (known) return Promise.resolve(known);
+  let lookup = folderLookups.get(key);
+  if (!lookup) {
+    lookup = ensureFolder(driveId, parentId, name, token, new Map())
+      .then((id) => {
+        sharedFolderIds.set(key, id);
+        return id;
+      })
+      .finally(() => folderLookups.delete(key));
+    folderLookups.set(key, lookup);
+  }
+  return lookup;
+}
+
 export async function uploadSharePointArtifact(input: {
   requestKey: string;
   localPath: string;
@@ -463,25 +531,23 @@ export async function uploadSharePointArtifact(input: {
     );
   }
 
-  const token = await graphAccessToken();
-  const drive = await getSharePointDrive(token);
-  const cache = new Map<string, string>();
-  let destination = await ensureFolder(
+  const { token, drive } = await sharedUploadContext(
+    settings.sharePointSiteUrl,
+  );
+  let destination = await ensureFolderOnce(
     drive.id,
     settings.sharePointFolderId,
     `DSR-${caseName}`,
     token,
-    cache,
   );
-  destination = await ensureFolder(
+  destination = await ensureFolderOnce(
     drive.id,
     destination,
     requestName,
     token,
-    cache,
   );
   for (const part of relativeParts) {
-    destination = await ensureFolder(drive.id, destination, part, token, cache);
+    destination = await ensureFolderOnce(drive.id, destination, part, token);
   }
   await uploadFile(drive.id, destination, input.localPath, stat.size, token);
 }

@@ -7,30 +7,17 @@ import { refreshSharePointUploadProgress } from "../../src/lib/sharepoint-artifa
 const MAX_ATTEMPTS = 5;
 const LEASE_MS = 5 * 60_000;
 const IDLE_POLLS = 5;
+const UPLOAD_CONCURRENCY = Math.min(
+  8,
+  Math.max(1, Number(process.env.SHAREPOINT_UPLOAD_CONCURRENCY) || 4),
+);
 const leaseOwner = crypto.randomUUID();
 
 function wait(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-async function main() {
-  // Ensure the singleton row exists before taking the cross-container lease.
-  await getAiBatchSettings();
-  const lease = await prisma.pipelineSettings.updateMany({
-    where: {
-      id: "global",
-      OR: [
-        { sharepoint_upload_lease_until: null },
-        { sharepoint_upload_lease_until: { lt: BigInt(Date.now()) } },
-      ],
-    },
-    data: {
-      sharepoint_upload_lease_owner: leaseOwner,
-      sharepoint_upload_lease_until: BigInt(Date.now() + LEASE_MS),
-    },
-  });
-  if (lease.count === 0) return;
-
+async function uploadLoop(): Promise<void> {
   let idlePolls = 0;
   for (;;) {
     const next = await prisma.sharePointUploadArtifact.findFirst({
@@ -99,6 +86,27 @@ async function main() {
     }
     await refreshSharePointUploadProgress(next.source_file_id);
   }
+}
+
+async function main() {
+  // Ensure the singleton row exists before taking the cross-container lease.
+  await getAiBatchSettings();
+  const lease = await prisma.pipelineSettings.updateMany({
+    where: {
+      id: "global",
+      OR: [
+        { sharepoint_upload_lease_until: null },
+        { sharepoint_upload_lease_until: { lt: BigInt(Date.now()) } },
+      ],
+    },
+    data: {
+      sharepoint_upload_lease_owner: leaseOwner,
+      sharepoint_upload_lease_until: BigInt(Date.now() + LEASE_MS),
+    },
+  });
+  if (lease.count === 0) return;
+
+  await Promise.all(Array.from({ length: UPLOAD_CONCURRENCY }, uploadLoop));
 }
 
 main()
