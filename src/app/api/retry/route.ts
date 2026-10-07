@@ -12,6 +12,7 @@ import {
   enqueueFilePhase,
   isControlPlanePipelineEnabled,
 } from "@/lib/control-plane/pipeline";
+import { clearFilesAiState } from "@/lib/files-ai-gate";
 import { prisma } from "@/lib/prisma";
 import { getPstArtifactPaths } from "@/lib/pst-artifacts";
 import {
@@ -151,6 +152,15 @@ export async function POST(request: Request) {
         await filesRetryBases(row.case_request_id, row.filepath),
       );
       await clearFilesBatchResults(fileId);
+      await clearFilesAiState({
+        fileId,
+        requestOutputDir: path.join(
+          process.env.EXTRACTED_PATH || "",
+          path.dirname(
+            path.relative(process.env.STAGING_PATH || "", row.filepath),
+          ),
+        ),
+      });
       await prisma.processedFile.update({
         where: { id: fileId },
         data: {

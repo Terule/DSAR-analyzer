@@ -1,3 +1,5 @@
+import fs from "node:fs";
+import path from "node:path";
 import {
   getFilesStageJobState,
   recordFilesBatchResult,
@@ -131,12 +133,28 @@ export async function applyFilesAiVerdicts(input: {
     requestOutputDir: input.requestOutputDir,
     discards,
   });
+  // The CSV lists every discard of the request, so a later wave does not erase
+  // the rows an earlier wave wrote.
+  const owner = await prisma.processedFile.findUnique({
+    where: { id: input.fileId },
+    select: { case_request_id: true },
+  });
+  const requestDiscards = owner?.case_request_id
+    ? await prisma.filesAiVerdict.findMany({
+        where: {
+          verdict: "discard",
+          file: { case_request_id: owner.case_request_id, kind: "files" },
+        },
+        select: { rel_path: true, reason: true },
+        orderBy: [{ file_id: "asc" }, { rel_path: "asc" }],
+      })
+    : verdicts;
   writeVerdictsCsv({
     requestOutputDir: input.requestOutputDir,
-    rows: discards.map((d) => ({
-      relPath: d.relPath,
+    rows: requestDiscards.map((v) => ({
+      relPath: v.rel_path,
       verdict: "discard",
-      reason: d.reason,
+      reason: v.reason ?? "",
     })),
   });
   const effective = moved + alreadyMoved;
@@ -156,4 +174,26 @@ export async function applyFilesAiVerdicts(input: {
     },
   });
   return { discarded: verdicts.length, moved, alreadyMoved };
+}
+
+/**
+ * Forgets one Files row's AI state before its run is retried: its verdicts and
+ * batch runs, and the files it moved to `Discarded/` (other waves' discards stay).
+ * In-flight OpenAI batches are not cancelled; their results are never read.
+ */
+export async function clearFilesAiState(input: {
+  fileId: string;
+  requestOutputDir: string;
+}): Promise<void> {
+  const discarded = await prisma.filesAiVerdict.findMany({
+    where: { file_id: input.fileId, verdict: "discard" },
+    select: { rel_path: true },
+  });
+  for (const { rel_path } of discarded) {
+    fs.rmSync(path.join(input.requestOutputDir, "Discarded", rel_path), {
+      force: true,
+    });
+  }
+  await prisma.filesAiVerdict.deleteMany({ where: { file_id: input.fileId } });
+  await prisma.filesAiBatchRun.deleteMany({ where: { file_id: input.fileId } });
 }
