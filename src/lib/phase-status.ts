@@ -40,3 +40,34 @@ export function renderPhaseStatus(rows: RenderRow[]): string {
   if (rows.some((row) => row.pdf_status === "processing")) return "processing";
   return "pending";
 }
+
+interface RenderCountRow extends RenderRow {
+  pdf_total: number;
+  pdf_processed: number;
+}
+
+/**
+ * Render's counters. A row that has not finished only contributes the emails
+ * Render has actually counted, so the total stays 0 (the tile reads "Waiting")
+ * until Render starts instead of showing one placeholder per PST. A finished
+ * row counts as at least one, so a Render with nothing to deliver still
+ * completes.
+ */
+export function renderProgress(rows: RenderCountRow[]): {
+  done: number;
+  total: number;
+} {
+  let done = 0;
+  let total = 0;
+  for (const row of rows) {
+    if (row.pdf_status === "completed") {
+      const size = Math.max(row.pdf_total, 1);
+      done += size;
+      total += size;
+    } else {
+      done += row.pdf_processed;
+      total += row.pdf_total;
+    }
+  }
+  return { done, total };
+}

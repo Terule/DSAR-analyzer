@@ -4,6 +4,7 @@ import {
   extractPhaseStatus,
   parsePhaseStatus,
   renderPhaseStatus,
+  renderProgress,
 } from "../../../src/lib/phase-status";
 
 const rows = (...statuses: string[]) => statuses.map((status) => ({ status }));
@@ -75,5 +76,42 @@ describe("renderPhaseStatus", () => {
   });
   it("is pending for an empty request", () => {
     assert.equal(renderPhaseStatus([]), "pending");
+  });
+});
+
+describe("renderProgress", () => {
+  const row = (
+    pdf_status: string,
+    pdf_total: number,
+    pdf_processed: number,
+  ) => ({
+    pdf_status,
+    pdf_total,
+    pdf_processed,
+  });
+
+  it("has no total until Render has counted its emails", () => {
+    assert.deepEqual(
+      renderProgress([row("pending", 0, 0), row("pending", 0, 0)]),
+      { done: 0, total: 0 },
+    );
+  });
+
+  it("counts only the emails Render knows about while it runs", () => {
+    assert.deepEqual(
+      renderProgress([
+        row("processing", 500, 120),
+        row("pending", 0, 0),
+        row("pending", 0, 0),
+      ]),
+      { done: 120, total: 500 },
+    );
+  });
+
+  it("counts a finished row as at least one so an empty Render still completes", () => {
+    assert.deepEqual(
+      renderProgress([row("completed", 59, 59), row("completed", 0, 0)]),
+      { done: 60, total: 60 },
+    );
   });
 });

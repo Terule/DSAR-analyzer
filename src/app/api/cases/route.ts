@@ -6,6 +6,7 @@ import {
   extractPhaseStatus,
   parsePhaseStatus,
   renderPhaseStatus,
+  renderProgress,
 } from "@/lib/phase-status";
 import { getAiBatchSettings } from "@/lib/pipeline-settings";
 import { prisma } from "@/lib/prisma";
@@ -47,18 +48,7 @@ function phaseProgress(
       right.ai_batches_total - left.ai_batches_total ||
       right.ai_batches_done - left.ai_batches_done,
   )[0];
-  const renderTotal = pstRows.reduce(
-    (count, row) => count + Math.max(row.pdf_total, 1),
-    0,
-  );
-  const renderDone = pstRows.reduce(
-    (count, row) =>
-      count +
-      (row.pdf_status === "completed"
-        ? Math.max(row.pdf_total, 1)
-        : row.pdf_processed),
-    0,
-  );
+  const render = renderProgress(pstRows);
   // A case can have several source rows, but only rows with an upload total
   // own deliverables. Sibling PSTs that never queued anything keep a default
   // `pending`/`idle` status with a zero total; counting them would stop the
@@ -105,8 +95,8 @@ function phaseProgress(
       status: coordinator?.ai_status || "pending",
     },
     render: {
-      done: renderDone,
-      total: renderTotal,
+      done: render.done,
+      total: render.total,
       status: renderPhaseStatus(pstRows),
     },
     files: {
