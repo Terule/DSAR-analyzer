@@ -995,7 +995,7 @@ export function CaseManager() {
                                       const tone =
                                         phase.group === "files"
                                           ? {
-                                              border: "border-amber-400/25",
+                                              border: "border-indigo-400/20",
                                               icon: "text-amber-300",
                                               bar: "bg-amber-400/80",
                                             }
