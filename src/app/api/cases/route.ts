@@ -15,6 +15,32 @@ import { retryTargets } from "@/lib/retry-targets";
 
 export const dynamic = "force-dynamic";
 
+type UploadCounts = { done: number; total: number; status: string };
+
+function uploadCounts(byStatus: Record<string, number>): UploadCounts {
+  const done = byStatus.completed ?? 0;
+  const failed = byStatus.failed ?? 0;
+  const processing = byStatus.processing ?? 0;
+  const pending = byStatus.pending ?? 0;
+  const total = done + failed + processing + pending;
+  return {
+    done,
+    total,
+    status:
+      total === 0
+        ? "pending"
+        : failed > 0
+          ? "failed"
+          : processing > 0
+            ? "processing"
+            : pending > 0
+              ? done > 0
+                ? "processing"
+                : "pending"
+              : "completed",
+  };
+}
+
 function phaseProgress(
   rows: Array<{
     wave: number;
@@ -34,6 +60,7 @@ function phaseProgress(
     upload_uploaded: number;
   }>,
   filesAi?: { done: number; total: number },
+  uploads?: { emails: UploadCounts; files: UploadCounts },
 ) {
   // Newest wave first: Parse reports the first row's status when nothing is
   // running, and that has to be the wave still waiting to start.
@@ -139,6 +166,8 @@ function phaseProgress(
       total: filesAi?.total ?? 0,
       status: filesAiStatus,
     },
+    uploadEmails: uploads?.emails ?? { done: 0, total: 0, status: "pending" },
+    uploadFiles: uploads?.files ?? { done: 0, total: 0, status: "pending" },
     upload: {
       done: uploadDone,
       total: uploadTotal,
@@ -234,6 +263,38 @@ export async function GET(request: Request) {
         .map((file) => file.id),
     ),
   );
+  // Uploads split by what they carry: mail PDFs live under Emails/, files and
+  // Teams messages under Documents/ and Messages/.
+  const allRowIds = cases.flatMap((item) =>
+    item.requests.flatMap((req) => req.processed_files.map((file) => file.id)),
+  );
+  const [uploadAll, uploadMail] = await Promise.all([
+    prisma.sharePointUploadArtifact.groupBy({
+      by: ["source_file_id", "status"],
+      where: { source_file_id: { in: allRowIds } },
+      _count: { _all: true },
+    }),
+    prisma.sharePointUploadArtifact.groupBy({
+      by: ["source_file_id", "status"],
+      where: {
+        source_file_id: { in: allRowIds },
+        relative_path: { startsWith: "Emails/" },
+      },
+      _count: { _all: true },
+    }),
+  ]);
+  const tally = (
+    groups: typeof uploadAll,
+    rowIds: Set<string>,
+  ): Record<string, number> => {
+    const byStatus: Record<string, number> = {};
+    for (const group of groups) {
+      if (!rowIds.has(group.source_file_id)) continue;
+      byStatus[group.status] =
+        (byStatus[group.status] ?? 0) + group._count._all;
+    }
+    return byStatus;
+  };
   const filesAiById = new Map(
     await Promise.all(
       filesRowIds.map(async (id) => {
@@ -276,6 +337,19 @@ export async function GET(request: Request) {
                 .filter((file) => file.kind === "files")
                 .map((file) => filesAiById.get(file.id)),
             ),
+            (() => {
+              const ids = new Set(processed_files.map((file) => file.id));
+              const all = tally(uploadAll, ids);
+              const mail = tally(uploadMail, ids);
+              const rest: Record<string, number> = {};
+              for (const [status, count] of Object.entries(all)) {
+                rest[status] = count - (mail[status] ?? 0);
+              }
+              return {
+                emails: uploadCounts(mail),
+                files: uploadCounts(rest),
+              };
+            })(),
           ),
           phaseTiming: phaseTiming(processed_files),
           // Rows the dashboard's Retry re-runs: the failed steps of this wave.

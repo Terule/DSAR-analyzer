@@ -68,7 +68,15 @@ type RequestItem = {
   total_emails: number;
   emails_exported: number;
   phaseProgress?: Record<
-    "parse" | "extract" | "ai" | "render" | "files" | "filesAi" | "upload",
+    | "parse"
+    | "extract"
+    | "ai"
+    | "render"
+    | "files"
+    | "filesAi"
+    | "upload"
+    | "uploadEmails"
+    | "uploadFiles",
     PhaseState
   >;
   phaseTiming?: PhaseTiming;
@@ -160,7 +168,7 @@ function phaseCards(request: RequestItem) {
   const phases: Array<{
     name: string;
     key: PhaseKey;
-    group: "mail" | "files" | "shared";
+    group: "mail" | "files";
   }> = [];
   if (request.scope !== "files") {
     phases.push(
@@ -169,6 +177,9 @@ function phaseCards(request: RequestItem) {
       { name: "AI audit", key: "ai", group: "mail" },
       { name: "Render", key: "render", group: "mail" },
     );
+    if (request.case_type !== "client") {
+      phases.push({ name: "Upload", key: "uploadEmails", group: "mail" });
+    }
   }
   if (request.scope !== "mail") {
     phases.push({ name: "Files Render", key: "files", group: "files" });
@@ -177,8 +188,8 @@ function phaseCards(request: RequestItem) {
       phases.push({ name: "Files AI audit", key: "filesAi", group: "files" });
     }
   }
-  if (request.case_type !== "client") {
-    phases.push({ name: "Upload", key: "upload", group: "shared" });
+  if (request.scope !== "mail" && request.case_type !== "client") {
+    phases.push({ name: "Upload", key: "uploadFiles", group: "files" });
   }
   return phases.map((phase) => {
     const state = request.phaseProgress?.[phase.key];
@@ -199,6 +210,7 @@ function phaseCards(request: RequestItem) {
     return {
       name: phase.name,
       group: phase.group,
+      key: phase.key,
       progress,
       active,
       detail:
@@ -961,75 +973,88 @@ export function CaseManager() {
                                 </div>
                               )}
                             </div>
-                            <div
-                              className={`mt-5 grid gap-3 sm:grid-cols-2 ${phaseCards(request).length > 5 ? "xl:grid-cols-7" : "xl:grid-cols-5"}`}
-                            >
-                              {phaseCards(request).map((phase) => {
-                                const tone =
-                                  phase.group === "files"
-                                    ? {
-                                        border: "border-amber-400/25",
-                                        icon: "text-amber-300",
-                                        bar: "bg-amber-400/80",
-                                      }
-                                    : {
-                                        border: "border-indigo-400/20",
-                                        icon: "text-indigo-300",
-                                        bar: "bg-indigo-400/80",
-                                      };
-                                const Icon =
-                                  phase.name === "Parse"
-                                    ? Database
-                                    : phase.name === "Extract"
-                                      ? Archive
-                                      : phase.name === "AI audit" ||
-                                          phase.name === "Files AI audit"
-                                        ? Cpu
-                                        : phase.name === "Upload"
-                                          ? Upload
-                                          : FileText;
+                            <div className="mt-5 space-y-3">
+                              {(["mail", "files"] as const).map((group) => {
+                                const cards = phaseCards(request).filter(
+                                  (card) => card.group === group,
+                                );
+                                if (cards.length === 0) return null;
                                 return (
                                   <div
-                                    key={phase.name}
-                                    className={`min-h-44 rounded-2xl border ${tone.border} bg-slate-900/65 p-4 text-center`}
+                                    key={group}
+                                    className="grid gap-3 sm:grid-cols-2 xl:grid-cols-5"
                                   >
-                                    {phase.active ? (
-                                      <Loader2
-                                        className={`mx-auto size-6 animate-spin ${tone.icon}`}
-                                      />
-                                    ) : (
-                                      <Icon
-                                        className={
-                                          phase.progress === 100
-                                            ? "mx-auto size-6 text-emerald-300"
-                                            : `mx-auto size-6 ${tone.icon}`
-                                        }
-                                      />
-                                    )}
-                                    <p className="mt-3 whitespace-nowrap text-xs font-bold tracking-[0.14em] text-slate-200">
-                                      {phase.name.toUpperCase()}
-                                    </p>
-                                    <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-800">
-                                      <div
-                                        className={
-                                          phase.progress === 100
-                                            ? "h-full bg-emerald-400"
-                                            : `h-full ${tone.bar}`
-                                        }
-                                        style={{ width: `${phase.progress}%` }}
-                                      />
-                                    </div>
-                                    <p className="mt-3 text-lg font-semibold text-slate-200">
-                                      {phase.progress}%
-                                    </p>
-                                    <p className="mt-1 text-xs text-slate-500">
-                                      {phase.label}
-                                    </p>
-                                    {phase.detail && (
-                                      <p className="mt-1 text-xs tabular-nums text-slate-400">
-                                        {phase.detail}
-                                      </p>
-                                    )}
+                                    {cards.map((phase) => {
+                                      const tone =
+                                        phase.group === "files"
+                                          ? {
+                                              border: "border-amber-400/25",
+                                              icon: "text-amber-300",
+                                              bar: "bg-amber-400/80",
+                                            }
+                                          : {
+                                              border: "border-indigo-400/20",
+                                              icon: "text-indigo-300",
+                                              bar: "bg-indigo-400/80",
+                                            };
+                                      const Icon =
+                                        phase.name === "Parse"
+                                          ? Database
+                                          : phase.name === "Extract"
+                                            ? Archive
+                                            : phase.name === "AI audit" ||
+                                                phase.name === "Files AI audit"
+                                              ? Cpu
+                                              : phase.name === "Upload"
+                                                ? Upload
+                                                : FileText;
+                                      return (
+                                        <div
+                                          key={phase.key}
+                                          className={`min-h-44 rounded-2xl border ${tone.border} bg-slate-900/65 p-4 text-center`}
+                                        >
+                                          {phase.active ? (
+                                            <Loader2
+                                              className={`mx-auto size-6 animate-spin ${tone.icon}`}
+                                            />
+                                          ) : (
+                                            <Icon
+                                              className={
+                                                phase.progress === 100
+                                                  ? "mx-auto size-6 text-emerald-300"
+                                                  : `mx-auto size-6 ${tone.icon}`
+                                              }
+                                            />
+                                          )}
+                                          <p className="mt-3 whitespace-nowrap text-xs font-bold tracking-[0.14em] text-slate-200">
+                                            {phase.name.toUpperCase()}
+                                          </p>
+                                          <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-800">
+                                            <div
+                                              className={
+                                                phase.progress === 100
+                                                  ? "h-full bg-emerald-400"
+                                                  : `h-full ${tone.bar}`
+                                              }
+                                              style={{
+                                                width: `${phase.progress}%`,
+                                              }}
+                                            />
+                                          </div>
+                                          <p className="mt-3 text-lg font-semibold text-slate-200">
+                                            {phase.progress}%
+                                          </p>
+                                          <p className="mt-1 text-xs text-slate-500">
+                                            {phase.label}
+                                          </p>
+                                          {phase.detail && (
+                                            <p className="mt-1 text-[11px] tabular-nums text-slate-400">
+                                              {phase.detail}
+                                            </p>
+                                          )}
+                                        </div>
+                                      );
+                                    })}
                                   </div>
                                 );
                               })}
