@@ -193,13 +193,20 @@ function phaseCards(request: RequestItem) {
   }
   return phases.map((phase) => {
     const state = request.phaseProgress?.[phase.key];
-    const complete = state?.status === "completed";
-    const active = [
-      "processing",
-      "batch_ready",
-      "extracting",
-      "analyzed",
-    ].includes(state?.status || "");
+    // Files Render has handled every file well before the row finishes: the
+    // AI audit and finalize still run after it, and the Files AI audit card
+    // shows that work.
+    const filesHandled =
+      phase.key === "files" &&
+      state?.status === "processing" &&
+      state.total > 0 &&
+      state.done >= state.total;
+    const complete = state?.status === "completed" || filesHandled;
+    const active =
+      !filesHandled &&
+      ["processing", "batch_ready", "extracting", "analyzed"].includes(
+        state?.status || "",
+      );
     const progress = complete
       ? 100
       : state && state.total > 0
