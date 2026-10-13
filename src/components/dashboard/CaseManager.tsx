@@ -1027,7 +1027,8 @@ export function CaseManager() {
                                           ) : (
                                             <Icon
                                               className={
-                                                phase.progress === 100
+                                                phase.progress === 100 &&
+                                                phase.group !== "files"
                                                   ? "mx-auto size-6 text-emerald-300"
                                                   : `mx-auto size-6 ${tone.icon}`
                                               }
@@ -1039,7 +1040,8 @@ export function CaseManager() {
                                           <div className="mt-5 h-2 overflow-hidden rounded-full bg-slate-800">
                                             <div
                                               className={
-                                                phase.progress === 100
+                                                phase.progress === 100 &&
+                                                phase.group !== "files"
                                                   ? "h-full bg-emerald-400"
                                                   : `h-full ${tone.bar}`
                                               }
