@@ -1016,6 +1016,7 @@ export async function convertToPdfBatch(
     select: {
       filepath: true,
       case_request_id: true,
+      pdf_total: true,
       subject_name: true,
       subject_email: true,
       subject_personal_email: true,
@@ -1105,9 +1106,13 @@ export async function convertToPdfBatch(
       "Email",
       ledger.max + emlFiles.length,
     );
+    // A retry only sees the emails still waiting (rendered ones are deleted),
+    // so keep the earlier total and count the finished ones as done.
+    const renderedBefore = Math.max(0, (row.pdf_total ?? 0) - emlFiles.length);
+    const renderTotal = renderedBefore + emlFiles.length;
     await prisma.processedFile.update({
       where: { id: fileId },
-      data: { pdf_total: emlFiles.length, pdf_processed: 0 },
+      data: { pdf_total: renderTotal, pdf_processed: renderedBefore },
     });
     let lastProgressWrite = 0;
 
@@ -1340,7 +1345,7 @@ export async function convertToPdfBatch(
         lastProgressWrite = now;
         await prisma.processedFile.update({
           where: { id: fileId },
-          data: { pdf_processed: idx + 1 },
+          data: { pdf_processed: renderedBefore + idx + 1 },
         });
       }
       await yieldToEventLoop();
@@ -1480,7 +1485,7 @@ export async function convertToPdfBatch(
         data: {
           pdf_status: "completed",
           pdf_duration_ms: durationMs,
-          pdf_processed: emlFiles.length,
+          pdf_processed: renderTotal,
           ...(isClientCase
             ? {
                 upload_status: "idle",
