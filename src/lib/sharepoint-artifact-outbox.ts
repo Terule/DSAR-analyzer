@@ -7,7 +7,7 @@ import { prisma } from "./prisma";
 export async function refreshSharePointUploadProgress(
   fileId: string,
 ): Promise<void> {
-  const [total, completed, active] = await Promise.all([
+  const [total, completed, active, failed] = await Promise.all([
     prisma.sharePointUploadArtifact.count({
       where: { source_file_id: fileId },
     }),
@@ -20,15 +20,24 @@ export async function refreshSharePointUploadProgress(
         status: { in: ["pending", "processing"] },
       },
     }),
+    prisma.sharePointUploadArtifact.count({
+      where: { source_file_id: fileId, status: "failed" },
+    }),
   ]);
   await prisma.processedFile.update({
     where: { id: fileId },
     data: {
       upload_status:
-        total === 0 ? "idle" : active > 0 ? "processing" : "completed",
+        total === 0
+          ? "idle"
+          : active > 0
+            ? "processing"
+            : failed > 0
+              ? "failed"
+              : "completed",
       upload_total: total,
       upload_uploaded: completed,
-      upload_error: null,
+      upload_error: failed > 0 ? `${failed} file(s) failed to upload.` : null,
       upload_heartbeat_at: BigInt(Date.now()),
     },
   });
