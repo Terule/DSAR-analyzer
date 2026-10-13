@@ -353,9 +353,14 @@ function sanitizeFontsForPdf(html: string): string {
          too, otherwise their intrinsic width can still make a parent table
          overflow the printable area. Preserve explicit preformatted content
          below, but re-enable normal wrapping for regular email markup. */
+      /* max-width is applied to block-level elements only: a percentage
+         max-width on inline boxes crashes WeasyPrint 57 (TypeError in
+         resolve_percentages) for some nested email layouts. */
+      body div, body p, body td, body th, body table, body pre, body hr {
+        max-width: 100% !important;
+      }
       body * {
         min-width: 0 !important;
-        max-width: 100% !important;
         overflow-wrap: anywhere !important;
         word-wrap: break-word !important;
         word-break: break-all !important;
@@ -367,8 +372,9 @@ function sanitizeFontsForPdf(html: string): string {
          the printable A4 area. Give every table a fixed layout inside the
          available width so WeasyPrint reflows it instead of clipping its right
          edge. This also covers tables nested inside the email body. */
+      /* No forced width: Outlook signatures nest many shrink-to-fit tables,
+         and stretching each to 100% pushes their columns apart. */
       table {
-        width: 100% !important;
         max-width: 100% !important;
         table-layout: fixed !important;
         page-break-inside: auto !important;
@@ -376,6 +382,11 @@ function sanitizeFontsForPdf(html: string): string {
       table, td, th {
         box-sizing: border-box !important;
         max-width: 100% !important;
+      }
+      /* Cell widths from the sender (e.g. 830pt wide) are ignored so the
+         columns shrink to the printable width instead of overflowing it. */
+      td, th {
+        width: auto !important;
       }
       td, th, pre {
         white-space: pre-wrap !important;
@@ -390,10 +401,9 @@ function sanitizeFontsForPdf(html: string): string {
         /* Inline email images are overwhelmingly signatures/logos. Outlook
            often supplies their original pixel dimensions, which can consume
            an entire A4 page in WeasyPrint. Attachments are exported separately
-           so keep inline images deliberately signature-sized. */
+           so keep inline images deliberately signature-sized. Width and height
+           are not forced, so a size declared by the sender is respected. */
         display: inline-block !important;
-        width: auto !important;
-        height: auto !important;
         max-width: 55mm !important;
         max-height: 38mm !important;
         object-fit: contain !important;
@@ -407,7 +417,30 @@ function sanitizeFontsForPdf(html: string): string {
     sanitized = `<!DOCTYPE html><html><head>${fontOverride}</head><body>${sanitized}</body></html>`;
   }
 
-  return sanitized;
+  return imageDimensionsToStyle(sanitized);
+}
+
+/**
+ * WeasyPrint ignores the width/height attributes of <img> (Outlook puts the
+ * real size there), so copy them into the inline style. An image that already
+ * declares a width in its style is left alone.
+ */
+export function imageDimensionsToStyle(html: string): string {
+  return html.replace(/<img\b[^>]*>/gi, (tag) => {
+    const attr = (name: string) =>
+      tag.match(
+        new RegExp(`\\s${name}\\s*=\\s*["']?(\\d+)(?:px)?["']?`, "i"),
+      )?.[1];
+    const width = attr("width");
+    const height = attr("height");
+    if (!width && !height) return tag;
+    const declared = `${width ? `width:${width}px;` : ""}${height ? `height:${height}px;` : ""}`;
+    if (/style\s*=\s*"/i.test(tag)) {
+      if (/(^|[;"\s])width\s*:/i.test(tag)) return tag;
+      return tag.replace(/style\s*=\s*"/i, `style="${declared}`);
+    }
+    return tag.replace(/<img\b/i, `<img style="${declared}"`);
+  });
 }
 
 export function normalizeHtmlForPdf(html: string): string {
