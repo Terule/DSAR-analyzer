@@ -95,6 +95,11 @@ function memoryMbForPhase(phase: ControlPhase): number {
 }
 
 function memoryMbForJob(job: ControlJobRecord): number {
+  // Reading thousands of PDFs for the relevance check peaks above 1.1 GB on
+  // large files, which killed the 1.5 GB Files container on the GA run.
+  if (job.phase === "files" && job.payload.metadata?.filesAiPrepare === true) {
+    return Number(process.env.FILES_AI_JOB_MEMORY_MB || 4096);
+  }
   if (
     job.phase === "files" &&
     job.payload.metadata?.largeOfficeBatch === true
