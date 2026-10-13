@@ -30,7 +30,6 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { needsPolling } from "@/lib/dashboard-polling";
-import { filesAiReview } from "@/lib/files-ai-progress";
 import {
   formatBytes,
   maskCaseName,
@@ -69,7 +68,7 @@ type RequestItem = {
   total_emails: number;
   emails_exported: number;
   phaseProgress?: Record<
-    "parse" | "extract" | "ai" | "render" | "files" | "upload",
+    "parse" | "extract" | "ai" | "render" | "files" | "filesAi" | "upload",
     PhaseState
   >;
   phaseTiming?: PhaseTiming;
@@ -158,18 +157,28 @@ function aggregateCaseRequests(requests: RequestItem[]): RequestItem {
 
 function phaseCards(request: RequestItem) {
   type PhaseKey = keyof NonNullable<RequestItem["phaseProgress"]>;
-  const phases: Array<{ name: string; key: PhaseKey }> = [];
+  const phases: Array<{
+    name: string;
+    key: PhaseKey;
+    group: "mail" | "files" | "shared";
+  }> = [];
   if (request.scope !== "files") {
     phases.push(
-      { name: "Parse", key: "parse" },
-      { name: "Extract", key: "extract" },
-      { name: "AI audit", key: "ai" },
-      { name: "Render", key: "render" },
+      { name: "Parse", key: "parse", group: "mail" },
+      { name: "Extract", key: "extract", group: "mail" },
+      { name: "AI audit", key: "ai", group: "mail" },
+      { name: "Render", key: "render", group: "mail" },
     );
   }
-  if (request.scope !== "mail") phases.push({ name: "Files", key: "files" });
+  if (request.scope !== "mail") {
+    phases.push({ name: "Files Render", key: "files", group: "files" });
+    // Client cases never run the Files AI check.
+    if (request.case_type !== "client") {
+      phases.push({ name: "Files AI audit", key: "filesAi", group: "files" });
+    }
+  }
   if (request.case_type !== "client") {
-    phases.push({ name: "Upload", key: "upload" });
+    phases.push({ name: "Upload", key: "upload", group: "shared" });
   }
   return phases.map((phase) => {
     const state = request.phaseProgress?.[phase.key];
@@ -187,29 +196,28 @@ function phaseCards(request: RequestItem) {
         : active
           ? 10
           : 0;
-    const aiReview = phase.key === "files" ? filesAiReview(state) : null;
     return {
       name: phase.name,
+      group: phase.group,
       progress,
       active,
       detail:
-        aiReview?.detail ??
-        (state && state.total > 0
+        state && state.total > 0
           ? phase.key === "ai"
             ? `${state.done}/${state.total} batches complete`
-            : `${state.done}/${state.total}`
-          : undefined),
-      label: aiReview
-        ? aiReview.label
-        : complete
-          ? "Complete"
-          : state?.status === "failed"
-            ? "Failed"
-            : phase.key === "ai" && state?.status === "batch_ready"
-              ? "Waiting on OpenAI"
-              : active
-                ? "In progress"
-                : "Waiting",
+            : phase.key === "filesAi"
+              ? `${state.done}/${state.total} reviewed`
+              : `${state.done}/${state.total}`
+          : undefined,
+      label: complete
+        ? "Complete"
+        : state?.status === "failed"
+          ? "Failed"
+          : phase.key === "ai" && state?.status === "batch_ready"
+            ? "Waiting on OpenAI"
+            : active
+              ? "In progress"
+              : "Waiting",
     };
   });
 }
@@ -953,14 +961,29 @@ export function CaseManager() {
                                 </div>
                               )}
                             </div>
-                            <div className="mt-5 grid gap-3 sm:grid-cols-2 xl:grid-cols-5">
+                            <div
+                              className={`mt-5 grid gap-3 sm:grid-cols-2 ${phaseCards(request).length > 5 ? "xl:grid-cols-7" : "xl:grid-cols-5"}`}
+                            >
                               {phaseCards(request).map((phase) => {
+                                const tone =
+                                  phase.group === "files"
+                                    ? {
+                                        border: "border-amber-400/25",
+                                        icon: "text-amber-300",
+                                        bar: "bg-amber-400/80",
+                                      }
+                                    : {
+                                        border: "border-indigo-400/20",
+                                        icon: "text-indigo-300",
+                                        bar: "bg-indigo-400/80",
+                                      };
                                 const Icon =
                                   phase.name === "Parse"
                                     ? Database
                                     : phase.name === "Extract"
                                       ? Archive
-                                      : phase.name === "AI audit"
+                                      : phase.name === "AI audit" ||
+                                          phase.name === "Files AI audit"
                                         ? Cpu
                                         : phase.name === "Upload"
                                           ? Upload
@@ -968,16 +991,18 @@ export function CaseManager() {
                                 return (
                                   <div
                                     key={phase.name}
-                                    className="min-h-44 rounded-2xl border border-indigo-400/20 bg-slate-900/65 p-4 text-center"
+                                    className={`min-h-44 rounded-2xl border ${tone.border} bg-slate-900/65 p-4 text-center`}
                                   >
                                     {phase.active ? (
-                                      <Loader2 className="mx-auto size-6 animate-spin text-indigo-300" />
+                                      <Loader2
+                                        className={`mx-auto size-6 animate-spin ${tone.icon}`}
+                                      />
                                     ) : (
                                       <Icon
                                         className={
                                           phase.progress === 100
                                             ? "mx-auto size-6 text-emerald-300"
-                                            : "mx-auto size-6 text-indigo-300"
+                                            : `mx-auto size-6 ${tone.icon}`
                                         }
                                       />
                                     )}
@@ -989,7 +1014,7 @@ export function CaseManager() {
                                         className={
                                           phase.progress === 100
                                             ? "h-full bg-emerald-400"
-                                            : "h-full bg-indigo-400/80"
+                                            : `h-full ${tone.bar}`
                                         }
                                         style={{ width: `${phase.progress}%` }}
                                       />

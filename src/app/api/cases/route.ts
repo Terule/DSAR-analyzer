@@ -95,6 +95,19 @@ function phaseProgress(
           : uploadRows.some((row) => row.upload_status === "processing")
             ? "processing"
             : "pending";
+  const filesStatus = combinePhaseStatus(
+    filesRows.map((row) => row.files_status),
+  );
+  const aiTotal = filesAi?.total ?? 0;
+  const aiDone = filesAi?.done ?? 0;
+  // The check only has work once Files has submitted something; a finished
+  // Files run with nothing to review (setting off, nothing eligible) is done.
+  const filesAiStatus =
+    aiTotal > 0 && aiDone < aiTotal
+      ? "processing"
+      : filesStatus === "completed"
+        ? "completed"
+        : "pending";
   return {
     parse: {
       done: parsed,
@@ -119,8 +132,12 @@ function phaseProgress(
     files: {
       done: filesRows.reduce((sum, row) => sum + row.files_progress_handled, 0),
       total: filesRows.reduce((sum, row) => sum + row.files_total, 0),
-      status: combinePhaseStatus(filesRows.map((row) => row.files_status)),
-      ...(filesAi && filesAi.total > 0 ? { ai: filesAi } : {}),
+      status: filesStatus,
+    },
+    filesAi: {
+      done: filesAi?.done ?? 0,
+      total: filesAi?.total ?? 0,
+      status: filesAiStatus,
     },
     upload: {
       done: uploadDone,
