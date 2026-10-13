@@ -71,3 +71,19 @@ export function renderProgress(rows: RenderCountRow[]): {
   }
   return { done, total };
 }
+
+/**
+ * One status for a phase that spans several waves: a failure shows, a finished
+ * phase needs every wave finished, and otherwise the newest wave that is
+ * actually moving wins. Later entries are newer waves.
+ */
+export function combinePhaseStatus(statuses: string[]): string {
+  if (statuses.some((status) => status === "failed")) return "failed";
+  if (statuses.length > 0 && statuses.every((s) => s === "completed")) {
+    return "completed";
+  }
+  const active = [...statuses]
+    .reverse()
+    .find((status) => status !== "pending" && status !== "completed");
+  return active ?? "pending";
+}

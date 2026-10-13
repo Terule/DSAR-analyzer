@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
+  combinePhaseStatus,
   extractPhaseStatus,
   parsePhaseStatus,
   renderPhaseStatus,
@@ -113,5 +114,34 @@ describe("renderProgress", () => {
       renderProgress([row("completed", 59, 59), row("completed", 0, 0)]),
       { done: 60, total: 60 },
     );
+  });
+});
+
+describe("combinePhaseStatus", () => {
+  it("keeps an earlier wave's completion while a later wave has not started", () => {
+    assert.equal(combinePhaseStatus(["completed", "pending"]), "pending");
+    assert.equal(combinePhaseStatus(["completed"]), "completed");
+  });
+
+  it("is completed only when every wave is", () => {
+    assert.equal(combinePhaseStatus(["completed", "completed"]), "completed");
+  });
+
+  it("shows the newest wave that is moving", () => {
+    assert.equal(combinePhaseStatus(["completed", "processing"]), "processing");
+    assert.equal(
+      combinePhaseStatus(["processing", "completed", "extracting"]),
+      "extracting",
+    );
+  });
+
+  it("surfaces a failure from any wave", () => {
+    assert.equal(combinePhaseStatus(["failed", "completed"]), "failed");
+  });
+
+  it("matches a single wave and an empty list", () => {
+    assert.equal(combinePhaseStatus(["processing"]), "processing");
+    assert.equal(combinePhaseStatus(["pending"]), "pending");
+    assert.equal(combinePhaseStatus([]), "pending");
   });
 });

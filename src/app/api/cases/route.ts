@@ -3,6 +3,7 @@ import { createManagedCase, refreshRequestLifecycle } from "@/lib/cases";
 import { getFilesAiState } from "@/lib/files-ai";
 import { oneTrustRequestUrl } from "@/lib/onetrust-links";
 import {
+  combinePhaseStatus,
   extractPhaseStatus,
   parsePhaseStatus,
   renderPhaseStatus,
@@ -16,6 +17,7 @@ export const dynamic = "force-dynamic";
 
 function phaseProgress(
   rows: Array<{
+    wave: number;
     kind: string;
     status: string;
     ai_status: string;
@@ -33,8 +35,14 @@ function phaseProgress(
   }>,
   filesAi?: { done: number; total: number },
 ) {
-  const pstRows = rows.filter((row) => row.kind === "pst");
-  const filesRow = rows.find((row) => row.kind === "files");
+  // Newest wave first: Parse reports the first row's status when nothing is
+  // running, and that has to be the wave still waiting to start.
+  const pstRows = rows
+    .filter((row) => row.kind === "pst")
+    .sort((left, right) => right.wave - left.wave);
+  const filesRows = rows
+    .filter((row) => row.kind === "files")
+    .sort((left, right) => left.wave - right.wave);
   const totalPst = pstRows.length;
   const parsed = pstRows.filter((row) =>
     ["analyzed", "extracting", "completed"].includes(row.status),
@@ -43,11 +51,20 @@ function phaseProgress(
   // Only the deterministic coordinator row owns live Batch counters. Sibling
   // PST rows remain `pending` while it works, so lexical status ordering can
   // incorrectly select a sibling and make a nearly-complete audit look idle.
-  const coordinator = [...pstRows].sort(
-    (left, right) =>
-      right.ai_batches_total - left.ai_batches_total ||
-      right.ai_batches_done - left.ai_batches_done,
-  )[0];
+  // Each wave audits its own PSTs, so every wave has its own coordinator and
+  // the AI card adds them up.
+  const coordinators = [...new Set(pstRows.map((row) => row.wave))]
+    .sort((left, right) => left - right)
+    .flatMap((wave) => {
+      const [top] = pstRows
+        .filter((row) => row.wave === wave)
+        .sort(
+          (left, right) =>
+            right.ai_batches_total - left.ai_batches_total ||
+            right.ai_batches_done - left.ai_batches_done,
+        );
+      return top ? [top] : [];
+    });
   const render = renderProgress(pstRows);
   // A case can have several source rows, but only rows with an upload total
   // own deliverables. Sibling PSTs that never queued anything keep a default
@@ -90,9 +107,9 @@ function phaseProgress(
       status: extractPhaseStatus(pstRows),
     },
     ai: {
-      done: coordinator?.ai_batches_done || 0,
-      total: coordinator?.ai_batches_total || 0,
-      status: coordinator?.ai_status || "pending",
+      done: coordinators.reduce((sum, row) => sum + row.ai_batches_done, 0),
+      total: coordinators.reduce((sum, row) => sum + row.ai_batches_total, 0),
+      status: combinePhaseStatus(coordinators.map((row) => row.ai_status)),
     },
     render: {
       done: render.done,
@@ -100,9 +117,9 @@ function phaseProgress(
       status: renderPhaseStatus(pstRows),
     },
     files: {
-      done: filesRow?.files_progress_handled || 0,
-      total: filesRow?.files_total || 0,
-      status: filesRow?.files_status || "pending",
+      done: filesRows.reduce((sum, row) => sum + row.files_progress_handled, 0),
+      total: filesRows.reduce((sum, row) => sum + row.files_total, 0),
+      status: combinePhaseStatus(filesRows.map((row) => row.files_status)),
       ...(filesAi && filesAi.total > 0 ? { ai: filesAi } : {}),
     },
     upload: {
@@ -135,6 +152,18 @@ function phaseTiming(
     }),
     { parse: 0, extract: 0, ai: 0, render: 0, files: 0 },
   );
+}
+
+function sumFilesAi(
+  states: Array<{ done: number; total: number } | undefined>,
+): { done: number; total: number } {
+  let done = 0;
+  let total = 0;
+  for (const state of states) {
+    done += state?.done ?? 0;
+    total += state?.total ?? 0;
+  }
+  return { done, total };
 }
 
 export async function GET(request: Request) {
@@ -211,8 +240,9 @@ export async function GET(request: Request) {
             )
           : null,
       requests: item.requests.map(({ processed_files, ...request }) => {
-        // Phase cards describe the wave that is running; earlier waves are
-        // finished and only contribute to the cumulative header totals.
+        // Phase cards are cumulative: a later wave adds to what earlier waves
+        // finished instead of resetting it. Retry still targets the running
+        // wave only.
         const currentWave = processed_files.filter(
           (file) => file.wave === request.wave,
         );
@@ -223,12 +253,14 @@ export async function GET(request: Request) {
           files_size_bytes: Number(request.files_size_bytes),
           deliverable_size_bytes: Number(request.deliverable_size_bytes),
           phaseProgress: phaseProgress(
-            currentWave,
-            filesAiById.get(
-              currentWave.find((file) => file.kind === "files")?.id ?? "",
+            processed_files,
+            sumFilesAi(
+              processed_files
+                .filter((file) => file.kind === "files")
+                .map((file) => filesAiById.get(file.id)),
             ),
           ),
-          phaseTiming: phaseTiming(currentWave),
+          phaseTiming: phaseTiming(processed_files),
           // Rows the dashboard's Retry re-runs: the failed steps of this wave.
           retryTargets: retryTargets(currentWave),
         };
