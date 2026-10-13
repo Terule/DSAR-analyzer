@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import OpenAI from "openai";
 import { DEFAULT_MAX_TOKENS_PER_BATCH, fillAiBatchSlots } from "./ai";
+import { AI_MODEL, AI_REASONING_EFFORT } from "./ai-model";
 import {
   getCasePstFileIds,
   isCaseAiSettled,
@@ -277,8 +278,9 @@ Rules:
 Return JSON only: {"decision":"keep"|"discard","reason":"brief"}`;
 
   const response = await (await getOpenAi()).chat.completions.create({
-    model: "gpt-4o-mini",
+    model: AI_MODEL,
     temperature: 0.0,
+    reasoning_effort: AI_REASONING_EFFORT,
     max_completion_tokens: 80,
     messages: [
       { role: "system", content: systemPrompt },

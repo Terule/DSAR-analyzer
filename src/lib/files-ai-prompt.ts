@@ -1,3 +1,5 @@
+import { AI_MODEL, AI_REASONING_EFFORT } from "./ai-model";
+
 export interface FilesAiCriteria {
   name: string;
   email: string;
@@ -5,7 +7,7 @@ export interface FilesAiCriteria {
   aliases: string[];
 }
 
-export const FILES_AI_MODEL = "gpt-4o-mini";
+export const FILES_AI_MODEL = AI_MODEL;
 
 export const FILES_AI_RESPONSE_FORMAT = {
   type: "json_schema",
@@ -64,6 +66,7 @@ export function buildFilesAiBatchRequest(input: {
         { role: "user", content: input.userContent },
       ],
       temperature: 0,
+      reasoning_effort: AI_REASONING_EFFORT,
       max_completion_tokens: 120,
       response_format: FILES_AI_RESPONSE_FORMAT,
     },

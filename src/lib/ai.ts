@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
+import { AI_MODEL, AI_REASONING_EFFORT, AI_TOKENIZER_MODEL } from "./ai-model";
 import { getCasePstFileIds, markCaseAiCompleted } from "./case-utils";
 import { runtimeCredentials } from "./credentials";
 import { stripEmailSignature } from "./email-content";
@@ -21,7 +22,7 @@ async function getOpenAi(): Promise<OpenAI> {
   openai = new OpenAI({ apiKey: key });
   return openai;
 }
-const MODEL_NAME = "gpt-4o-mini";
+const MODEL_NAME = AI_MODEL;
 
 /** Best-effort cancellation of external Batch work before a case is removed. */
 export async function cancelOpenAiBatchesForFiles(fileIds: string[]) {
@@ -45,7 +46,7 @@ export async function cancelOpenAiBatchesForFiles(fileIds: string[]) {
     ),
   );
 }
-const TOKENIZER = encodingForModel(MODEL_NAME);
+const TOKENIZER = encodingForModel(AI_TOKENIZER_MODEL);
 
 // Parallel batches are intentionally bounded well below the 40M-token Tier 3
 // queue.  A 2M-token chunk keeps retries contained; four in flight gives the
@@ -391,6 +392,7 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
           { role: "user", content: userContent },
         ],
         temperature: 0,
+        reasoning_effort: AI_REASONING_EFFORT,
         max_completion_tokens: 150,
         response_format: RESPONSE_FORMAT,
       },

@@ -13,6 +13,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
+import { AI_TOKENIZER_MODEL } from "../../src/lib/ai-model";
 import {
   listFilesAiCandidates,
   readPdfText,
@@ -20,12 +21,11 @@ import {
 import {
   buildFilesAiSystemPrompt,
   buildFilesAiUserContent,
-  FILES_AI_MODEL,
 } from "../../src/lib/files-ai-prompt";
 import { buildSample, subjectMentionTokens } from "../../src/lib/files-ai-text";
 
-// Estimated gpt-4o-mini Batch input price per 1M tokens (check current pricing).
-const INPUT_USD_PER_MILLION = 0.075;
+// gpt-6-luna Batch input price per 1M tokens (OpenAI pricing page, Oct 2026).
+const INPUT_USD_PER_MILLION = 0.05;
 
 function listAllPdfs(dir: string, kind: "Document" | "Message") {
   if (!fs.existsSync(dir)) return [];
@@ -77,7 +77,7 @@ async function main() {
 
   const criteria = { name: subject, email: "", aliases };
   const systemPrompt = buildFilesAiSystemPrompt(criteria);
-  const tokenizer = encodingForModel(FILES_AI_MODEL);
+  const tokenizer = encodingForModel(AI_TOKENIZER_MODEL);
   const systemTokens = tokenizer.encode(systemPrompt).length;
   const mentionTokens = subjectMentionTokens(criteria);
 

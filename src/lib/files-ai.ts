@@ -3,13 +3,13 @@ import fs from "node:fs";
 import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
+import { AI_TOKENIZER_MODEL } from "./ai-model";
 import { runtimeCredentials } from "./credentials";
 import { listFilesAiCandidates, readPdfText } from "./files-ai-extract";
 import {
   buildFilesAiBatchRequest,
   buildFilesAiSystemPrompt,
   buildFilesAiUserContent,
-  FILES_AI_MODEL,
   type FilesAiCriteria,
   parseFilesAiVerdict,
 } from "./files-ai-prompt";
@@ -20,7 +20,7 @@ import {
 } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
-const TOKENIZER = encodingForModel(FILES_AI_MODEL);
+const TOKENIZER = encodingForModel(AI_TOKENIZER_MODEL);
 const REQUEST_OVERHEAD_TOKENS = 24;
 const MESSAGE_OVERHEAD_TOKENS = 12;
 
