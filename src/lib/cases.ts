@@ -560,9 +560,36 @@ export async function reopenRequestForRetry(
   });
 }
 
+// The dashboard polls every few seconds and each refresh walks every running
+// request's deliverables. Under heavy worker I/O that walk takes tens of
+// seconds, so overlapping polls piled up and exhausted the app's memory.
+// Poll-driven refreshes run in the background, one at a time, at most this often.
+const DASHBOARD_REFRESH_MIN_INTERVAL_MS = 15_000;
+let dashboardRefresh: Promise<void> | null = null;
+let dashboardRefreshedAt = 0;
+
 export async function refreshRequestLifecycle(
   requestId?: string,
 ): Promise<void> {
+  if (requestId) return refreshRequestLifecycleNow(requestId);
+  // The result is written to the database, so a poll does not wait for it.
+  if (
+    dashboardRefresh ||
+    Date.now() - dashboardRefreshedAt < DASHBOARD_REFRESH_MIN_INTERVAL_MS
+  ) {
+    return;
+  }
+  dashboardRefresh = refreshRequestLifecycleNow()
+    .catch((error) =>
+      console.warn(`[cases] lifecycle refresh failed: ${error}`),
+    )
+    .finally(() => {
+      dashboardRefreshedAt = Date.now();
+      dashboardRefresh = null;
+    });
+}
+
+async function refreshRequestLifecycleNow(requestId?: string): Promise<void> {
   const requests = await prisma.caseRequest.findMany({
     where: requestId
       ? { id: requestId }
