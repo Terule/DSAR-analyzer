@@ -13,7 +13,11 @@ import {
   type FilesAiCriteria,
   parseFilesAiVerdict,
 } from "./files-ai-prompt";
-import { buildSample, subjectMentionTokens } from "./files-ai-text";
+import {
+  buildSample,
+  subjectClearlyInvolved,
+  subjectMentionTokens,
+} from "./files-ai-text";
 import {
   DEFAULT_AI_BATCH_SETTINGS,
   getAiBatchSettings,
@@ -114,6 +118,10 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
     if (!text.trim()) {
       await keepNow("No extractable text; kept without AI review.");
       keptNoText++;
+      continue;
+    }
+    if (subjectClearlyInvolved(text, criteria)) {
+      await keepNow("Subject is an author, speaker or addressee; kept.");
       continue;
     }
     const sample = buildSample(text, mentionTokens);

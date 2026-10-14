@@ -2,10 +2,12 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildSample,
-  LARGE_TEXT_CHARS,
   SAMPLE_LIMITS,
+  subjectClearlyInvolved,
   subjectMentionTokens,
 } from "../../../src/lib/files-ai-text";
+
+const LARGE = SAMPLE_LIMITS.maxChars * 10;
 
 describe("buildSample", () => {
   it("sends short text whole and not sampled", () => {
@@ -14,16 +16,16 @@ describe("buildSample", () => {
     assert.equal(out.text, "Hello Jonathan Wheeler");
   });
 
-  it("truncates medium text at maxChars without marking it sampled", () => {
-    const text = "a".repeat(SAMPLE_LIMITS.maxChars + 500);
-    const out = buildSample(text, ["x"]);
-    assert.equal(out.sampled, false);
-    assert.equal(out.text.length, SAMPLE_LIMITS.maxChars);
+  it("samples text that does not fit instead of cutting it off", () => {
+    const text = `${"a".repeat(SAMPLE_LIMITS.maxChars + 500)}\nJonathan Wheeler wrote this`;
+    const out = buildSample(text, ["jonathan wheeler"]);
+    assert.equal(out.sampled, true);
+    assert.ok(out.text.includes("Jonathan Wheeler wrote this"));
   });
 
   it("samples large text: head plus the lines that mention the subject", () => {
     const filler = "lorem ipsum dolor sit amet\n".repeat(
-      Math.ceil(LARGE_TEXT_CHARS / 27) + 10,
+      Math.ceil(LARGE / 27) + 10,
     );
     const text = `${filler}row 999 | Jonathan Wheeler | approved\n${filler}`;
     const out = buildSample(text, ["jonathan wheeler"]);
@@ -37,7 +39,7 @@ describe("buildSample", () => {
       { length: 200 },
       (_, i) => `line ${i} jonathan wheeler ${"y".repeat(1000)}`,
     ).join("\n");
-    const text = `${"z".repeat(LARGE_TEXT_CHARS)}\n${lines}`;
+    const text = `${"z".repeat(LARGE)}\n${lines}`;
     const out = buildSample(text, ["jonathan wheeler"]);
     const mentionLines = out.text
       .split("\n")
@@ -67,5 +69,49 @@ describe("subjectMentionTokens", () => {
       "jw@corp.com",
       "jw@home.com",
     ]);
+  });
+});
+
+describe("subjectClearlyInvolved", () => {
+  const criteria = {
+    name: "Gemma Anderson",
+    email: "ganderson@corp.com",
+    aliases: ["Gemma Helen Anderson"],
+  };
+
+  it("keeps a file that contains the subject's email", () => {
+    assert.equal(
+      subjectClearlyInvolved("cc: GAnderson@corp.com\nhello", criteria),
+      true,
+    );
+  });
+
+  it("keeps a chat the subject wrote or a transcript they speak in", () => {
+    assert.equal(
+      subjectClearlyInvolved("Gemma Anderson 6/17/2026 5:56 PM\nhi", criteria),
+      true,
+    );
+    assert.equal(
+      subjectClearlyInvolved(
+        "Message edited: Gemma Anderson <x> 4/15/2026",
+        criteria,
+      ),
+      true,
+    );
+    assert.equal(
+      subjectClearlyInvolved(
+        "Bob 25:40\nok\nGemma Anderson 25:47\nYeah",
+        criteria,
+      ),
+      true,
+    );
+  });
+
+  it("leaves a name that only appears in the body to the AI", () => {
+    assert.equal(
+      subjectClearlyInvolved("please ask Gemma Anderson about it", criteria),
+      false,
+    );
+    assert.equal(subjectClearlyInvolved("", criteria), false);
   });
 });
