@@ -127,11 +127,15 @@ function phaseProgress(
   );
   const aiTotal = filesAi?.total ?? 0;
   const aiDone = filesAi?.done ?? 0;
-  // The check only has work once Files has submitted something; a finished
-  // Files run with nothing to review (setting off, nothing eligible) is done.
+  // Complete once everything submitted so far is reviewed, even while Files is
+  // still converting; a later wave that adds files brings it back below 100%.
+  // With nothing submitted it is done only when Files finished (setting off,
+  // nothing eligible).
   const filesAiStatus =
-    aiTotal > 0 && aiDone < aiTotal
-      ? "processing"
+    aiTotal > 0
+      ? aiDone >= aiTotal
+        ? "completed"
+        : "processing"
       : filesStatus === "completed"
         ? "completed"
         : "pending";
