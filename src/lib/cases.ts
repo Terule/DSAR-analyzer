@@ -261,10 +261,15 @@ export async function continueRequest(requestId: string, addRaw: string) {
   return prisma.caseRequest.findUniqueOrThrow({ where: { id: requestId } });
 }
 
-async function summary(directory: string, test: (name: string) => boolean) {
+async function summary(
+  directory: string,
+  test: (name: string) => boolean,
+  skipDirectories: readonly string[] = [],
+) {
   let count = 0;
   let size = 0;
-  async function walk(current: string) {
+  const byTopLevel: Record<string, number> = {};
+  async function walk(current: string, topLevel = "") {
     let entries: import("node:fs").Dirent[] = [];
     try {
       entries = await fs.readdir(current, { withFileTypes: true });
@@ -277,14 +282,17 @@ async function summary(directory: string, test: (name: string) => boolean) {
       // is being collected.
       if (entry.name.startsWith(".")) continue;
       const full = path.join(current, entry.name);
-      if (entry.isDirectory()) await walk(full);
-      else if (entry.isFile() && test(entry.name)) {
+      if (entry.isDirectory()) {
+        if (skipDirectories.includes(entry.name)) continue;
+        await walk(full, topLevel || entry.name);
+      } else if (entry.isFile() && test(entry.name)) {
         try {
           // Extraction/render moves source files concurrently. A disappeared
           // file is simply absent from this point-in-time metric snapshot.
           const stat = await fs.stat(full);
           count++;
           size += stat.size;
+          if (topLevel) byTopLevel[topLevel] = (byTopLevel[topLevel] ?? 0) + 1;
         } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
         }
@@ -292,7 +300,7 @@ async function summary(directory: string, test: (name: string) => boolean) {
     }
   }
   await walk(directory);
-  return { count, size };
+  return { count, size, byTopLevel };
 }
 
 export async function scanRequestSources(requestId: string) {
@@ -594,7 +602,12 @@ async function refreshRequestLifecycleNow(requestId?: string): Promise<void> {
     where: requestId
       ? { id: requestId }
       : { status: { in: ["running", "queued"] } },
-    select: { id: true, deliverable_path: true },
+    select: {
+      id: true,
+      deliverable_path: true,
+      status: true,
+      completed_at: true,
+    },
   });
   for (const request of requests) {
     const rows = await prisma.processedFile.findMany({
@@ -613,15 +626,23 @@ async function refreshRequestLifecycleNow(requestId?: string): Promise<void> {
         ? ["completed", "failed"].includes(row.files_status)
         : ["completed", "failed"].includes(row.pdf_status),
     );
+    // `Discarded/` holds files the AI relevance check removed and
+    // `Unconverted/` fallback originals; neither is delivered or uploaded.
     const output = await summary(
       request.deliverable_path,
       (name) => !name.startsWith("."),
+      ["Discarded", "Unconverted"],
     );
     await prisma.caseRequest.update({
       where: { id: request.id },
       data: {
         status: done ? "completed" : "running",
-        completed_at: done ? new Date() : null,
+        // Recalculating a request that already finished keeps its completion time.
+        completed_at: done
+          ? request.status === "completed" && request.completed_at
+            ? request.completed_at
+            : new Date()
+          : null,
         total_emails: rows.reduce((sum, row) => sum + row.total_emails, 0),
         emails_exported: rows.reduce(
           (sum, row) => sum + row.ai_approved_count,
@@ -629,7 +650,10 @@ async function refreshRequestLifecycleNow(requestId?: string): Promise<void> {
         ),
         deliverable_files: output.count,
         deliverable_size_bytes: BigInt(output.size),
-        files_exported: output.count,
+        // Files delivered besides the email PDFs (Teams messages, documents).
+        files_exported:
+          (output.byTopLevel.Messages ?? 0) +
+          (output.byTopLevel.Documents ?? 0),
       },
     });
   }

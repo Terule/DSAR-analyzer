@@ -11,6 +11,7 @@ import {
 } from "@/lib/phase-status";
 import { getAiBatchSettings } from "@/lib/pipeline-settings";
 import { prisma } from "@/lib/prisma";
+import { buildRequestStats } from "@/lib/request-stats";
 import { retryTargets } from "@/lib/retry-targets";
 
 export const dynamic = "force-dynamic";
@@ -253,6 +254,14 @@ export async function GET(request: Request) {
               files_duration_ms: true,
               files_paused_ms: true,
               wave: true,
+              total_emails: true,
+              unique_emails: true,
+              duplicate_emails: true,
+              ai_approved_count: true,
+              ai_discarded_count: true,
+              files_processed: true,
+              files_skipped: true,
+              files_duplicates: true,
             },
           },
         },
@@ -299,6 +308,15 @@ export async function GET(request: Request) {
     }
     return byStatus;
   };
+  const aiDiscarded = new Map(
+    (
+      await prisma.filesAiVerdict.groupBy({
+        by: ["file_id"],
+        where: { verdict: "discard", file_id: { in: filesRowIds } },
+        _count: { _all: true },
+      })
+    ).map((group) => [group.file_id, group._count._all] as const),
+  );
   const filesAiById = new Map(
     await Promise.all(
       filesRowIds.map(async (id) => {
@@ -356,6 +374,7 @@ export async function GET(request: Request) {
             })(),
           ),
           phaseTiming: phaseTiming(processed_files),
+          stats: buildRequestStats(processed_files, aiDiscarded),
           // Rows the dashboard's Retry re-runs: the failed steps of this wave.
           retryTargets: retryTargets(currentWave),
         };

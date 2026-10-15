@@ -35,6 +35,7 @@ import {
   maskCaseName,
   maskSubjectInformation,
 } from "@/lib/format";
+import { mergeRequestStats, type RequestStats } from "@/lib/request-stats";
 import { SystemSettingsDialog } from "./SystemSettingsDialog";
 
 type Scope = "mail" | "files" | "both";
@@ -80,6 +81,8 @@ type RequestItem = {
     PhaseState
   >;
   phaseTiming?: PhaseTiming;
+  stats?: RequestStats;
+  files_exported?: number;
   /** Rows with a failed step; when present, Retry replaces Run. */
   retryTargets?: string[];
 };
@@ -149,6 +152,10 @@ function aggregateCaseRequests(requests: RequestItem[]): RequestItem {
     total_emails: 0,
     emails_exported: 0,
     phaseTiming: timing,
+    stats: mergeRequestStats(
+      requests.map((request) => ({ name: request.name, stats: request.stats })),
+    ),
+    files_exported: 0,
   };
   for (const request of requests) {
     total.pst_count += request.pst_count;
@@ -159,8 +166,288 @@ function aggregateCaseRequests(requests: RequestItem[]): RequestItem {
     total.deliverable_size_bytes += request.deliverable_size_bytes;
     total.total_emails += request.total_emails;
     total.emails_exported += request.emails_exported;
+    total.files_exported =
+      (total.files_exported ?? 0) + (request.files_exported ?? 0);
   }
   return total;
+}
+
+const count = (value: number) => value.toLocaleString("en-GB");
+
+function FunnelRow({
+  label,
+  value,
+  of,
+  note,
+  bar,
+}: {
+  label: string;
+  value: number;
+  of: number;
+  note?: string;
+  bar: string;
+}) {
+  const share = of > 0 ? Math.min(100, (value / of) * 100) : 0;
+  return (
+    <div>
+      <div className="flex items-baseline justify-between gap-3 text-sm">
+        <span className="text-slate-300">{label}</span>
+        <span className="tabular-nums text-slate-100">
+          {count(value)}
+          <span className="ml-2 text-xs text-slate-500">
+            {of > 0
+              ? `${share < 1 && value > 0 ? "<1" : Math.round(share)}%`
+              : ""}
+          </span>
+        </span>
+      </div>
+      <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-slate-800">
+        <div className={`h-full ${bar}`} style={{ width: `${share}%` }} />
+      </div>
+      {note && <p className="mt-1 text-xs text-slate-500">{note}</p>}
+    </div>
+  );
+}
+
+function RequestStatistics({ request }: { request: RequestItem }) {
+  const stats = request.stats;
+  const mail = stats?.mail;
+  const files = stats?.files;
+  const timing = request.phaseTiming;
+  const totalWork = Object.values(timing || {}).reduce(
+    (sum, duration) => sum + duration,
+    0,
+  );
+  const waves = stats?.waves ?? [];
+  const progress = request.phaseProgress;
+  const hasUploads = request.case_type !== "client";
+  const ran = (wave: (typeof waves)[number]) =>
+    wave.mail.sources > 0 && wave.files.found > 0
+      ? "Mail + files"
+      : wave.mail.sources > 0
+        ? "Mail"
+        : "Files";
+  return (
+    <section className="rounded-2xl bg-[#1a2742] p-2">
+      <div className="flex items-baseline justify-between">
+        <strong>{request.name}</strong>
+        <span className="capitalize text-slate-400">{request.status}</span>
+      </div>
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        <div className="rounded-3xl bg-slate-950/45 p-5 text-center">
+          <p className="text-xs font-bold tracking-wider text-slate-500">
+            SOURCE SIZE
+          </p>
+          <strong className="mt-2 block text-2xl">
+            {formatBytes(request.pst_size_bytes + request.files_size_bytes)}
+          </strong>
+          <p className="mt-1 text-xs text-slate-500">
+            {mail && mail.sources > 0 && request.pst_size_bytes === 0
+              ? "PST size not kept (sources deleted)"
+              : `PST ${formatBytes(request.pst_size_bytes)}`}{" "}
+            · Files {formatBytes(request.files_size_bytes)}
+          </p>
+        </div>
+        <div className="rounded-3xl bg-slate-950/45 p-5 text-center">
+          <p className="text-xs font-bold tracking-wider text-slate-500">
+            DELIVERABLE SIZE
+          </p>
+          <strong className="mt-2 block text-2xl">
+            {formatBytes(request.deliverable_size_bytes)}
+          </strong>
+          <p className="mt-1 text-xs text-slate-500">
+            {count(request.deliverable_files)} files delivered
+          </p>
+        </div>
+        <div className="rounded-3xl bg-slate-950/45 p-5 text-center">
+          <p className="text-xs font-bold tracking-wider text-slate-500">
+            WORK TIME
+          </p>
+          <strong className="mt-2 block text-2xl">
+            {formatDuration(totalWork)}
+          </strong>
+          <p className="mt-1 text-xs text-slate-500">
+            {waves.length} {waves.length === 1 ? "wave" : "waves"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-4 grid gap-3 md:grid-cols-2">
+        <div className="rounded-3xl border border-indigo-400/20 bg-slate-950/45 p-5">
+          <div className="flex items-baseline justify-between">
+            <p className="text-xs font-bold tracking-wider text-indigo-300">
+              MAIL
+            </p>
+            <span className="text-xs text-slate-500">
+              {mail?.sources ?? 0} PST{" "}
+              {mail?.sources === 1 ? "source" : "sources"}
+            </span>
+          </div>
+          {mail && mail.scanned > 0 ? (
+            <div className="mt-4 space-y-4">
+              <FunnelRow
+                label="Emails scanned"
+                value={mail.scanned}
+                of={mail.scanned}
+                bar="bg-indigo-400/80"
+              />
+              <FunnelRow
+                label="Duplicates removed"
+                value={mail.duplicates}
+                of={mail.scanned}
+                bar="bg-slate-500"
+              />
+              <FunnelRow
+                label="Excluded by AI audit and rules"
+                value={mail.excluded}
+                of={mail.scanned}
+                bar="bg-slate-500"
+                note={`${count(mail.unique)} unique emails were audited`}
+              />
+              <FunnelRow
+                label="Selected and delivered"
+                value={mail.selected}
+                of={mail.scanned}
+                bar="bg-emerald-400"
+              />
+              {hasUploads && progress && progress.uploadEmails.total > 0 && (
+                <p className="text-xs text-slate-500">
+                  Uploaded to SharePoint: {count(progress.uploadEmails.done)} /{" "}
+                  {count(progress.uploadEmails.total)}
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="mt-4 text-sm text-slate-500">
+              No mail in this request.
+            </p>
+          )}
+        </div>
+
+        <div className="rounded-3xl border border-amber-400/25 bg-slate-950/45 p-5">
+          <div className="flex items-baseline justify-between">
+            <p className="text-xs font-bold tracking-wider text-amber-300">
+              FILES
+            </p>
+          </div>
+          {files && files.found > 0 ? (
+            <div className="mt-4 space-y-4">
+              <FunnelRow
+                label="Files found"
+                value={files.found}
+                of={files.found}
+                bar="bg-amber-400/80"
+              />
+              <FunnelRow
+                label="Skipped"
+                value={files.skipped}
+                of={files.found}
+                bar="bg-slate-500"
+                note={`Includes ${count(files.duplicates)} duplicates${
+                  request.case_type === "client"
+                    ? ""
+                    : ` and ${count(files.aiDiscarded)} discarded by the AI audit`
+                }`}
+              />
+              <FunnelRow
+                label="Converted and delivered"
+                value={files.delivered}
+                of={files.found}
+                bar="bg-amber-400"
+              />
+              {hasUploads && progress && progress.uploadFiles.total > 0 && (
+                <p className="text-xs text-slate-500">
+                  Uploaded to SharePoint: {count(progress.uploadFiles.done)} /{" "}
+                  {count(progress.uploadFiles.total)}
+                </p>
+              )}
+            </div>
+          ) : (
+            <p className="mt-4 text-sm text-slate-500">
+              No files in this request.
+            </p>
+          )}
+        </div>
+      </div>
+
+      <div className="mt-4 rounded-3xl bg-slate-950/45 p-5">
+        <p className="text-xs font-bold tracking-wider text-slate-500">
+          WORK TIME BY PHASE
+        </p>
+        <dl className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-5">
+          {(
+            [
+              ["Parse", timing?.parse || 0],
+              ["Extract", timing?.extract || 0],
+              ["AI audit", timing?.ai || 0],
+              ["Render", timing?.render || 0],
+              ["Files", timing?.files || 0],
+            ] as const
+          ).map(([phase, duration]) => (
+            <div
+              key={phase}
+              className="rounded-2xl border border-indigo-400/15 bg-slate-900/65 p-4 text-center"
+            >
+              <dt className="text-xs text-slate-500">{phase}</dt>
+              <dd className="mt-2 font-mono text-base text-slate-100">
+                {formatDuration(duration)}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      </div>
+
+      {waves.length > 0 && (
+        <div className="mt-4 overflow-x-auto rounded-3xl bg-slate-950/45 p-5">
+          <p className="text-xs font-bold tracking-wider text-slate-500">
+            WAVES
+          </p>
+          <table className="mt-3 w-full min-w-[34rem] text-left text-sm">
+            <thead className="text-xs text-slate-500">
+              <tr>
+                <th className="pb-2 font-medium">Wave</th>
+                <th className="pb-2 font-medium">Ran</th>
+                <th className="pb-2 text-right font-medium">
+                  Emails scanned → delivered
+                </th>
+                <th className="pb-2 text-right font-medium">
+                  Files found → delivered
+                </th>
+                <th className="pb-2 text-right font-medium">Work time</th>
+              </tr>
+            </thead>
+            <tbody className="tabular-nums text-slate-200">
+              {waves.map((wave) => (
+                <tr
+                  key={`${wave.request ?? ""}-${wave.wave}`}
+                  className="border-t border-slate-800"
+                >
+                  <td className="py-2">
+                    {wave.request ? `${wave.request} · ` : ""}
+                    {wave.wave}
+                  </td>
+                  <td className="py-2 text-slate-400">{ran(wave)}</td>
+                  <td className="py-2 text-right">
+                    {wave.mail.sources > 0
+                      ? `${count(wave.mail.scanned)} → ${count(wave.mail.selected)}`
+                      : "—"}
+                  </td>
+                  <td className="py-2 text-right">
+                    {wave.files.found > 0
+                      ? `${count(wave.files.found)} → ${count(wave.files.delivered)}`
+                      : "—"}
+                  </td>
+                  <td className="py-2 text-right">
+                    {formatDuration(wave.workMs)}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
 }
 
 function phaseCards(request: RequestItem) {
@@ -1538,94 +1825,7 @@ export function CaseManager() {
               ? [statisticsRequest]
               : [aggregateCaseRequests(statisticsTarget?.requests || [])]
             ).map((request) => (
-              <section
-                key={request.id}
-                className="rounded-2xl bg-[#1a2742] p-2"
-              >
-                <div className="flex justify-between">
-                  <strong>{request.name}</strong>
-                  <span className="capitalize text-slate-400">
-                    {request.status}
-                  </span>
-                </div>
-                <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                  <div className="rounded-3xl bg-slate-950/45 p-5 text-center">
-                    <p className="text-xs font-bold tracking-wider text-slate-500">
-                      TOTAL SOURCE SIZE
-                    </p>
-                    <strong className="mt-3 block text-2xl">
-                      {formatBytes(
-                        request.pst_size_bytes + request.files_size_bytes,
-                      )}
-                    </strong>
-                  </div>
-                  <div className="rounded-3xl bg-slate-950/45 p-5 text-center">
-                    <p className="text-xs font-bold tracking-wider text-slate-500">
-                      DELIVERABLE SIZE
-                    </p>
-                    <strong className="mt-3 block text-2xl">
-                      {formatBytes(request.deliverable_size_bytes)}
-                    </strong>
-                  </div>
-                </div>
-                <dl className="mt-5 grid grid-cols-2 gap-3 text-sm md:grid-cols-4">
-                  <div className="rounded-2xl bg-slate-950/45 p-4">
-                    <dt className="text-slate-500">PST sources</dt>
-                    <dd className="mt-2 text-lg">{request.pst_count}</dd>
-                  </div>
-                  <div className="rounded-2xl bg-slate-950/45 p-4">
-                    <dt className="text-slate-500">Files sources</dt>
-                    <dd className="mt-2 text-lg">{request.files_count}</dd>
-                  </div>
-                  <div className="rounded-2xl bg-slate-950/45 p-4">
-                    <dt className="text-slate-500">Emails</dt>
-                    <dd className="mt-2 text-lg">{request.total_emails}</dd>
-                  </div>
-                  <div className="rounded-2xl bg-slate-950/45 p-4">
-                    <dt className="text-slate-500">Exported</dt>
-                    <dd className="mt-2 text-lg text-indigo-200">
-                      {request.emails_exported}
-                    </dd>
-                  </div>
-                </dl>
-                <div className="mt-5 rounded-3xl bg-slate-950/45 p-5">
-                  <div className="flex items-baseline justify-between gap-3">
-                    <p className="text-xs font-bold tracking-wider text-slate-500">
-                      ENGINE TELEMETRY · EXECUTION TIME
-                    </p>
-                    <span className="text-sm text-indigo-200">
-                      Cumulative work{" "}
-                      {formatDuration(
-                        Object.values(request.phaseTiming || {}).reduce(
-                          (sum, duration) => sum + duration,
-                          0,
-                        ),
-                      )}
-                    </span>
-                  </div>
-                  <dl className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-5">
-                    {(
-                      [
-                        ["Parse", request.phaseTiming?.parse || 0],
-                        ["Extract", request.phaseTiming?.extract || 0],
-                        ["AI audit", request.phaseTiming?.ai || 0],
-                        ["Render", request.phaseTiming?.render || 0],
-                        ["Files", request.phaseTiming?.files || 0],
-                      ] as const
-                    ).map(([phase, duration]) => (
-                      <div
-                        key={phase}
-                        className="rounded-2xl border border-indigo-400/15 bg-slate-900/65 p-4 text-center"
-                      >
-                        <dt className="text-xs text-slate-500">{phase}</dt>
-                        <dd className="mt-2 font-mono text-base text-slate-100">
-                          {formatDuration(duration)}
-                        </dd>
-                      </div>
-                    ))}
-                  </dl>
-                </div>
-              </section>
+              <RequestStatistics key={request.id} request={request} />
             ))}
           </div>
         </DialogContent>
