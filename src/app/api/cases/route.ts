@@ -254,6 +254,7 @@ export async function GET(request: Request) {
               files_duration_ms: true,
               files_paused_ms: true,
               wave: true,
+              file_size_bytes: true,
               total_emails: true,
               unique_emails: true,
               duplicate_emails: true,
@@ -343,13 +344,24 @@ export async function GET(request: Request) {
         // Phase cards are cumulative: a later wave adds to what earlier waves
         // finished instead of resetting it. Retry still targets the running
         // wave only.
+        const pstSources = processed_files.filter(
+          (file) => file.kind === "pst",
+        );
         const currentWave = processed_files.filter(
           (file) => file.wave === request.wave,
         );
         return {
           ...request,
           case_type: item.case_type,
-          pst_size_bytes: Number(request.pst_size_bytes),
+          // The rows outlive the staging folders; the request columns only
+          // held the latest scan.
+          pst_count: pstSources.length || request.pst_count,
+          pst_size_bytes: pstSources.length
+            ? pstSources.reduce(
+                (sum, file) => sum + Number(file.file_size_bytes),
+                0,
+              )
+            : Number(request.pst_size_bytes),
           files_size_bytes: Number(request.files_size_bytes),
           deliverable_size_bytes: Number(request.deliverable_size_bytes),
           phaseProgress: phaseProgress(

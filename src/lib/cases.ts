@@ -402,6 +402,19 @@ export async function scanRequestSources(requestId: string) {
       select: { id: true },
     })
   ).map((row) => row.id);
+  // Source totals are recorded on the request and must outlive the staging
+  // folders (sources are deleted after processing). PSTs add up across waves,
+  // from the rows earlier waves left behind; a scan never overwrites the side
+  // (mail or files) it did not look at.
+  const earlierPst = await prisma.processedFile.aggregate({
+    where: {
+      case_request_id: managedRequest.id,
+      kind: "pst",
+      wave: { not: wave },
+    },
+    _count: { _all: true },
+    _sum: { file_size_bytes: true },
+  });
   await prisma.$transaction([
     prisma.email.deleteMany({ where: { file_id: { in: previousIds } } }),
     prisma.processedFile.deleteMany({
@@ -427,10 +440,20 @@ export async function scanRequestSources(requestId: string) {
     prisma.caseRequest.update({
       where: { id: managedRequest.id },
       data: {
-        pst_count: pst.count,
-        pst_size_bytes: BigInt(pst.size),
-        files_count: files.count,
-        files_size_bytes: BigInt(files.size),
+        ...(scope === "files"
+          ? {}
+          : {
+              pst_count: earlierPst._count._all + pst.count,
+              pst_size_bytes:
+                (earlierPst._sum.file_size_bytes ?? BigInt(0)) +
+                BigInt(pst.size),
+            }),
+        ...(scope === "mail"
+          ? {}
+          : {
+              files_count: files.count,
+              files_size_bytes: BigInt(files.size),
+            }),
         status: "queued",
         error: null,
         ...(wave > 1
@@ -628,11 +651,19 @@ async function refreshRequestLifecycleNow(requestId?: string): Promise<void> {
     );
     // `Discarded/` holds files the AI relevance check removed and
     // `Unconverted/` fallback originals; neither is delivered or uploaded.
-    const output = await summary(
-      request.deliverable_path,
-      (name) => !name.startsWith("."),
-      ["Discarded", "Unconverted"],
-    );
+    // An output folder that was removed (archived or cleaned up) keeps the
+    // figures recorded while it existed instead of reading as empty.
+    const outputExists = await fs
+      .stat(request.deliverable_path)
+      .then((stat) => stat.isDirectory())
+      .catch(() => false);
+    const output = outputExists
+      ? await summary(
+          request.deliverable_path,
+          (name) => !name.startsWith("."),
+          ["Discarded", "Unconverted"],
+        )
+      : null;
     await prisma.caseRequest.update({
       where: { id: request.id },
       data: {
@@ -648,12 +679,17 @@ async function refreshRequestLifecycleNow(requestId?: string): Promise<void> {
           (sum, row) => sum + row.ai_approved_count,
           0,
         ),
-        deliverable_files: output.count,
-        deliverable_size_bytes: BigInt(output.size),
-        // Files delivered besides the email PDFs (Teams messages, documents).
-        files_exported:
-          (output.byTopLevel.Messages ?? 0) +
-          (output.byTopLevel.Documents ?? 0),
+        ...(output
+          ? {
+              deliverable_files: output.count,
+              deliverable_size_bytes: BigInt(output.size),
+              // Files delivered besides the email PDFs (Teams messages,
+              // documents).
+              files_exported:
+                (output.byTopLevel.Messages ?? 0) +
+                (output.byTopLevel.Documents ?? 0),
+            }
+          : {}),
       },
     });
   }
