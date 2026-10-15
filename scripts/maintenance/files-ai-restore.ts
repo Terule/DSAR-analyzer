@@ -206,7 +206,11 @@ async function main() {
 }
 
 main()
-  .then(() => prisma.$disconnect())
+  .then(async () => {
+    await prisma.$disconnect();
+    // The control-plane pool would otherwise keep the process alive.
+    process.exit(0);
+  })
   .catch(async (error) => {
     console.error(error);
     await prisma.$disconnect();
