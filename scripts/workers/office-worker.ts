@@ -13,6 +13,10 @@ import fs from "node:fs";
 import { parentPort, workerData } from "node:worker_threads";
 import * as xlsx from "xlsx";
 import { processDocxToPdf, processExcelToPdf } from "../../src/lib/converter";
+import {
+  isPasswordProtectedFile,
+  isPasswordProtectionError,
+} from "../../src/lib/password-protection";
 import { normalizeSpreadsheetText } from "../../src/lib/text-encoding";
 
 interface OfficeWorkerData {
@@ -22,11 +26,6 @@ interface OfficeWorkerData {
   criteria: string[];
   docTitle: string;
   bypassFilters?: boolean;
-}
-
-function isLikelyPasswordProtectedOffice(buffer: Buffer): boolean {
-  // OOXML encrypted containers usually include this marker.
-  return buffer.includes(Buffer.from("EncryptedPackage", "utf-8"));
 }
 
 /** A stable fingerprint of what an Excel user can see, ignoring package metadata. */
@@ -60,9 +59,7 @@ async function main() {
     workerData as OfficeWorkerData;
 
   try {
-    const buffer = fs.readFileSync(filePath);
-
-    if (isLikelyPasswordProtectedOffice(buffer)) {
+    if (isPasswordProtectedFile(filePath)) {
       parentPort?.postMessage({
         ok: true,
         success: false,
@@ -71,6 +68,7 @@ async function main() {
       return;
     }
 
+    const buffer = fs.readFileSync(filePath);
     const contentKey = kind === "excel" ? excelContentKey(buffer) : undefined;
     const success =
       kind === "docx"
@@ -98,6 +96,16 @@ async function main() {
       contentKey,
     });
   } catch (error) {
+    // A parser that reports "password-protected" is as good as the signature
+    // check: the file is confidential and must not be retried or delivered.
+    if (isPasswordProtectionError(error)) {
+      parentPort?.postMessage({
+        ok: true,
+        success: false,
+        passwordProtected: true,
+      });
+      return;
+    }
     parentPort?.postMessage({
       ok: false,
       error: error instanceof Error ? error.message : String(error),

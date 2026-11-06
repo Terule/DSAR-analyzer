@@ -296,13 +296,13 @@ function extractionDir(zipPath: string): string {
 export interface ArchiveExpansion {
   /** Archives that were extracted (and removed). */
   expanded: number;
-  /** Password-protected; left untouched in place and excluded from delivery. */
+  /** Password-protected (any case type); left untouched and never delivered. */
   confidential: string[];
   /** Unreadable archives; already deleted from staging. */
   corrupted: string[];
   /**
    * Original archives that must be delivered as-is (over the safety limits;
-   * in client mode also password-protected and corrupt ones). The caller
+   * in client mode also corrupt ones). The caller
    * copies them to Unconverted/ and removes the source.
    */
   keep: string[];
@@ -339,20 +339,21 @@ export async function expandArchives(
     if (zips.length === 0) break;
 
     for (const zipPath of zips) {
+      const inspection = inspectZip(zipPath, limits);
+      // A password-protected archive is confidential in every case type and at
+      // any nesting depth: never opened, never delivered.
+      if (inspection.kind === "encrypted") {
+        settled.add(zipPath);
+        result.confidential.push(zipPath);
+        continue;
+      }
       // Archives nested deeper than the limit are delivered untouched.
       if (depth > limits.maxDepth) {
         keepOriginal(zipPath);
         continue;
       }
-      const inspection = inspectZip(zipPath, limits);
       if (inspection.kind === "overLimit") {
         keepOriginal(zipPath);
-      } else if (inspection.kind === "encrypted") {
-        if (options.clientMode) keepOriginal(zipPath);
-        else {
-          settled.add(zipPath);
-          result.confidential.push(zipPath);
-        }
       } else if (inspection.kind === "corrupt") {
         if (options.clientMode) keepOriginal(zipPath);
         else {

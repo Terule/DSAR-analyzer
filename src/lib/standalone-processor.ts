@@ -11,6 +11,10 @@ import { normalizeHtmlForPdf } from "./converter";
 import { stripEmailSignature } from "./email-content";
 import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
 import {
+  isPasswordProtectedFile,
+  isPasswordProtectionError,
+} from "./password-protection";
+import {
   type FilesPrefix,
   formatNumber,
   highestNumber,
@@ -80,6 +84,13 @@ export async function copyUnconvertedStandaloneFiles(input: {
   for (const filePath of input.filePaths) {
     if (!fs.existsSync(filePath)) {
       missing++;
+      continue;
+    }
+    if (isPasswordProtectedFile(filePath)) {
+      console.log(
+        `[Standalone Filter] Not delivering unconverted ${path.basename(filePath)}: password-protected/encrypted file.`,
+      );
+      dropped++;
       continue;
     }
     const extension = path.extname(filePath).toLowerCase();
@@ -401,15 +412,6 @@ function escapeRegExp(value: string): string {
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
-}
-
-function isPasswordProtectionError(error: unknown): boolean {
-  const msg = String(
-    error instanceof Error ? error.message : error,
-  ).toLowerCase();
-  return /(password|passphrase|encrypted|encryption|decrypt|protected)/.test(
-    msg,
-  );
 }
 
 async function hashFileSha256(filePath: string): Promise<string> {
@@ -1155,6 +1157,16 @@ export async function runStandaloneBatch(
 
       const ext = path.extname(file).toLowerCase();
 
+      // A file that needs a password to open is confidential: it is discarded
+      // in every case type (client included), whatever its format.
+      if (isPasswordProtectedFile(filePath)) {
+        console.log(
+          `[Standalone Filter] Discarded ${file}: Password-protected/encrypted file.`,
+        );
+        skippedCount++;
+        continue;
+      }
+
       // --- CRYPTOGRAPHIC DEDUPLICATION CHECK ---
       const fileHash = await withTimeout(
         hashFileSha256(filePath),
@@ -1216,10 +1228,8 @@ export async function runStandaloneBatch(
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
           );
-          if (!bypassFilters) {
-            skippedCount++;
-            continue;
-          }
+          skippedCount++;
+          continue;
         }
         success = outcome.success;
         semanticContentKey = outcome.contentKey;
@@ -1263,10 +1273,8 @@ export async function runStandaloneBatch(
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
           );
-          if (!bypassFilters) {
-            skippedCount++;
-            continue;
-          }
+          skippedCount++;
+          continue;
         }
         success = outcome.success;
         semanticContentKey = outcome.contentKey;
@@ -1637,7 +1645,8 @@ export async function runStandaloneBatch(
       }
 
       // A client case must still deliver a unique source that cannot be
-      // rendered (for example an encrypted Office file or malformed message).
+      // rendered (for example a malformed message). Password-protected files never
+      // get here: they are discarded up front in every case type.
       // Keep it in its natural output category with a collision-safe name.
       if (bypassFilters && !success) {
         const fallbackPath = path.join(targetDir, `${seqName}${ext}`);
