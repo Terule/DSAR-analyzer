@@ -12,6 +12,7 @@ import {
 import mammoth from "mammoth";
 import * as xlsx from "xlsx";
 import { getCasePstFileIds } from "./case-utils";
+import { flattenAttachments } from "./email-attachments";
 import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
 import { archiveCompletedCase } from "./history";
 import { prisma } from "./prisma";
@@ -551,21 +552,6 @@ async function runWeasyPrint(htmlPath: string, pdfPath: string) {
   }
 }
 
-async function extractZipAttachment(zipPath: string, outputDir: string) {
-  try {
-    fs.mkdirSync(outputDir, { recursive: true });
-    await runCommand(
-      "unzip",
-      ["-oq", zipPath, "-d", outputDir],
-      60_000,
-      "ZIP extraction",
-    );
-    return true;
-  } catch (_err) {
-    return false;
-  }
-}
-
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
@@ -974,15 +960,8 @@ export async function processPdfAttachment(
 ): Promise<boolean> {
   try {
     const rawText = (await extractPdfText(buffer)).toLowerCase();
-    const exclusions = [
-      "confidential",
-      "confidentiality",
-      "privileged",
-      "cro",
-      "cros",
-    ];
-    const exclusionsRegex = new RegExp(`\\b(${exclusions.join("|")})\\b`, "i");
-    if (!bypassKeywordFilter && exclusionsRegex.test(rawText)) return false;
+    if (!bypassKeywordFilter && PRIVILEGED_KEYWORDS_RE.test(rawText))
+      return false;
 
     const mentionsSubject =
       criteria.length === 0 ||
@@ -1003,6 +982,99 @@ export async function processPdfAttachment(
   } catch (_err) {
     return false;
   }
+}
+
+function finalizeAttachmentNames(outputDir: string, currentBaseName: string) {
+  const escapedBase = currentBaseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const attachmentPattern = new RegExp(
+    `^${escapedBase} Attachment (\\d+)(\\.[^.]+)$`,
+  );
+  const attachments = fs
+    .readdirSync(outputDir, { withFileTypes: true })
+    .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
+    .map((entry) => ({
+      name: entry.name,
+      match: entry.name.match(attachmentPattern),
+    }))
+    .filter(
+      (item): item is { name: string; match: RegExpMatchArray } =>
+        item.match !== null,
+    )
+    .sort((a, b) => Number(a.match[1]) - Number(b.match[1]));
+  if (attachments.length === 0) return;
+
+  const width = String(attachments.length).length;
+  const staged = attachments.map(({ name, match }, index) => ({
+    from: name,
+    to: `${currentBaseName} Attachment ${String(index + 1).padStart(width, "0")}${match[2]}`,
+    temporary: `.__aida-attachment-${crypto.randomUUID()}`,
+  }));
+  if (staged.every((item) => item.from === item.to)) return;
+  for (const item of staged) {
+    fs.renameSync(
+      path.join(outputDir, item.from),
+      path.join(outputDir, item.temporary),
+    );
+  }
+  for (const item of staged) {
+    fs.renameSync(
+      path.join(outputDir, item.temporary),
+      path.join(outputDir, item.to),
+    );
+  }
+}
+
+/**
+ * Renders an email's attachments next to its PDF as `<Email> Attachment N`.
+ * Only convertible, non-protected files survive (see `flattenAttachments`); a
+ * zip is never delivered itself nor as raw extracted files.
+ */
+export async function renderEmailAttachments(input: {
+  attachments: Attachment[];
+  currentBaseName: string;
+  outputDir: string;
+  criteria: string[];
+  bypassKeywordFilter?: boolean;
+}): Promise<void> {
+  const { currentBaseName, outputDir, criteria } = input;
+  const bypassKeywordFilter = input.bypassKeywordFilter ?? false;
+  const files = await flattenAttachments(input.attachments);
+  const padLen = String(Math.max(1, files.length)).length;
+  let counter = 1;
+  for (const file of files) {
+    const ext = path.extname(file.filename).toLowerCase();
+    const attSeqName = `${currentBaseName} Attachment ${String(counter).padStart(padLen, "0")}`;
+    counter++;
+    if (ext === ".docx" || ext === ".doc") {
+      await processDocxToPdf(
+        file.content,
+        path.join(outputDir, `${attSeqName}.pdf`),
+        criteria,
+        attSeqName,
+        undefined,
+        bypassKeywordFilter,
+      );
+    } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
+      await processExcelToPdf(
+        file.content,
+        path.join(outputDir, `${attSeqName}.pdf`),
+        criteria,
+        attSeqName,
+        undefined,
+        bypassKeywordFilter,
+      );
+    } else if (ext === ".pdf") {
+      await processPdfAttachment(
+        file.content,
+        path.join(outputDir, `${attSeqName}${ext}`),
+        criteria,
+        attSeqName,
+        undefined,
+        bypassKeywordFilter,
+      );
+    }
+  }
+  finalizeAttachmentNames(outputDir, currentBaseName);
 }
 
 export async function convertToPdfBatch(
@@ -1132,122 +1204,20 @@ export async function convertToPdfBatch(
       .trim()
       .toLowerCase();
 
-    const finalizeAttachmentNames = (
-      outputDir: string,
-      currentBaseName: string,
-    ) => {
-      const escapedBase = currentBaseName.replace(
-        /[.*+?^${}()|[\]\\]/g,
-        "\\$&",
-      );
-      const attachmentPattern = new RegExp(
-        `^${escapedBase} Attachment (\\d+)(\\.[^.]+)$`,
-      );
-      const attachments = fs
-        .readdirSync(outputDir, { withFileTypes: true })
-        .filter((entry) => entry.isFile() && !entry.name.startsWith("."))
-        .map((entry) => ({
-          name: entry.name,
-          match: entry.name.match(attachmentPattern),
-        }))
-        .filter(
-          (item): item is { name: string; match: RegExpMatchArray } =>
-            item.match !== null,
-        )
-        .sort((a, b) => Number(a.match[1]) - Number(b.match[1]));
-      if (attachments.length === 0) return;
-
-      const width = String(attachments.length).length;
-      const staged = attachments.map(({ name, match }, index) => ({
-        from: name,
-        to: `${currentBaseName} Attachment ${String(index + 1).padStart(width, "0")}${match[2]}`,
-        temporary: `.__aida-attachment-${crypto.randomUUID()}`,
-      }));
-      if (staged.every((item) => item.from === item.to)) return;
-      for (const item of staged) {
-        fs.renameSync(
-          path.join(outputDir, item.from),
-          path.join(outputDir, item.temporary),
-        );
-      }
-      for (const item of staged) {
-        fs.renameSync(
-          path.join(outputDir, item.temporary),
-          path.join(outputDir, item.to),
-        );
-      }
-    };
-
     // Shared attachment renderer — used for both normal and warning emails.
-    const renderNestedAttachments = async (
+    const renderNestedAttachments = (
       attachments: Attachment[],
       currentBaseName: string,
       outputDir: string,
       bypassKeywordFilter = false,
-    ) => {
-      let attachmentCounter = 1;
-      const padLen = String(Math.max(1, attachments.length)).length;
-
-      for (const att of attachments) {
-        if (!att || !att.content) continue;
-        const ext = path.extname(att.filename || "").toLowerCase();
-        const contentBuf = Buffer.isBuffer(att.content)
-          ? att.content
-          : Buffer.from(att.content);
-
-        const attSeqName = `${currentBaseName} Attachment ${String(attachmentCounter).padStart(padLen, "0")}`;
-        attachmentCounter++;
-
-        const allowedExtensions = [
-          ".zip",
-          ".pdf",
-          ".docx",
-          ".doc",
-          ".xlsx",
-          ".xls",
-          ".csv",
-        ];
-        if (!allowedExtensions.includes(ext)) continue;
-
-        if (ext === ".docx" || ext === ".doc") {
-          await processDocxToPdf(
-            contentBuf,
-            path.join(outputDir, `${attSeqName}.pdf`),
-            filterCriteria,
-            attSeqName,
-            undefined,
-            bypassKeywordFilter,
-          );
-        } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
-          await processExcelToPdf(
-            contentBuf,
-            path.join(outputDir, `${attSeqName}.pdf`),
-            filterCriteria,
-            attSeqName,
-            undefined,
-            bypassKeywordFilter,
-          );
-        } else if (ext === ".pdf") {
-          await processPdfAttachment(
-            contentBuf,
-            path.join(outputDir, `${attSeqName}${ext}`),
-            filterCriteria,
-            attSeqName,
-            undefined,
-            bypassKeywordFilter,
-          );
-        } else if (ext === ".zip") {
-          const zipPath = path.join(outputDir, `${attSeqName}${ext}`);
-          fs.writeFileSync(zipPath, contentBuf);
-          const extractedDir = path.join(outputDir, `${attSeqName}_unzipped`);
-          const extracted = await extractZipAttachment(zipPath, extractedDir);
-          if (!extracted) {
-            fs.rmSync(extractedDir, { recursive: true, force: true });
-          }
-        }
-      }
-      finalizeAttachmentNames(outputDir, currentBaseName);
-    };
+    ) =>
+      renderEmailAttachments({
+        attachments,
+        currentBaseName,
+        outputDir,
+        criteria: filterCriteria,
+        bypassKeywordFilter,
+      });
 
     for (let idx = 0; idx < emlFiles.length; idx++) {
       const filename = emlFiles[idx];
