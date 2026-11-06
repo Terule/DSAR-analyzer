@@ -9,28 +9,36 @@ import {
   type FilesAiClient,
   getFilesAiState,
   isFilesAiSettled,
-  keepUnsubmittedFiles,
   openAiFilesAiClient,
   prepareFilesAi,
+  reviewUnsubmittedFiles,
+  sendCandidatesToReview,
 } from "./files-ai";
-import { applyDiscards, writeVerdictsCsv } from "./files-ai-apply";
+import {
+  applyDiscards,
+  applyReviews,
+  HUMAN_REVIEW_DIR,
+  writeReviewCsv,
+  writeVerdictsCsv,
+} from "./files-ai-apply";
 import type { FilesAiCriteria } from "./files-ai-prompt";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
 export type FilesAiGate = "waiting" | "ready" | "failed";
 
-/** The AI check runs for employee cases with the setting on; client cases never. */
+/**
+ * The AI check runs for every case type while the setting is on: employee cases
+ * are screened for relevance and confidentiality, client cases for
+ * confidentiality only.
+ */
 export async function filesAiRequired(fileId: string): Promise<boolean> {
   if (!(await getAiBatchSettings()).filesAiEnabled) return false;
   const row = await prisma.processedFile.findUnique({
     where: { id: fileId },
-    select: {
-      case_request: { select: { case: { select: { case_type: true } } } },
-    },
+    select: { case_request_id: true },
   });
-  const caseType = row?.case_request?.case.case_type;
-  return caseType !== undefined && caseType !== "client";
+  return Boolean(row?.case_request_id);
 }
 
 /**
@@ -60,7 +68,7 @@ export async function advanceFilesAi(
     // discards must not be dropped) and keep the files that were never sent.
     const state = await getFilesAiState(fileId);
     if (state.total === 0 && state.activeRuns === 0) return "ready";
-    await keepUnsubmittedFiles(fileId);
+    await reviewUnsubmittedFiles(fileId);
   }
   if (!(await isFilesAiSettled(fileId))) return "waiting";
 
@@ -91,8 +99,15 @@ export async function runFilesAiPrepare(input: {
       ? await openAiFilesAiClient().catch(() => null)
       : input.client;
   if (!client) {
-    console.warn("[Files AI] No OpenAI client; delivering everything.");
-    return { operation: "files-ai-skipped" };
+    console.warn(
+      "[Files AI] No OpenAI client; sending every file to human review.",
+    );
+    const reviewed = await sendCandidatesToReview(
+      input.fileId,
+      input.dirs,
+      "No AI screening available; needs human review.",
+    );
+    return { operation: "files-ai-skipped", reviewed };
   }
   try {
     const result = await prepareFilesAi({
@@ -104,12 +119,14 @@ export async function runFilesAiPrepare(input: {
     });
     return { operation: "files-ai-prepared", ...result };
   } catch (error) {
-    console.warn(`[Files AI] prepare failed: ${error}; delivering everything.`);
+    console.warn(
+      `[Files AI] prepare failed: ${error}; unreviewed files go to human review.`,
+    );
     await prisma.filesAiVerdict.updateMany({
       where: { file_id: input.fileId, verdict: null },
       data: {
-        verdict: "keep",
-        reason: "AI step failed; kept.",
+        verdict: "review",
+        reason: "AI step failed; needs human review.",
         resolved_at: new Date(),
       },
     });
@@ -126,13 +143,64 @@ export async function applyFilesAiVerdicts(input: {
   jobId: string;
   fileId: string;
   requestOutputDir: string;
-}): Promise<{ discarded: number; moved: number; alreadyMoved: number }> {
+}): Promise<{
+  discarded: number;
+  moved: number;
+  alreadyMoved: number;
+  reviewed: number;
+}> {
+  const owner = await prisma.processedFile.findUnique({
+    where: { id: input.fileId },
+    select: { case_request_id: true },
+  });
+  const requestScope = owner?.case_request_id
+    ? { case_request_id: owner.case_request_id, kind: "files" }
+    : undefined;
+
+  // Files the AI could not settle are held back from numbering and delivered
+  // in their own folder. They stay delivered, so the counters do not move.
+  const reviews = await prisma.filesAiVerdict.findMany({
+    where: { file_id: input.fileId, verdict: "review" },
+    select: { rel_path: true, reason: true },
+    orderBy: { rel_path: "asc" },
+  });
+  if (reviews.length > 0) {
+    applyReviews({
+      requestOutputDir: input.requestOutputDir,
+      reviews: reviews.map((v) => ({
+        relPath: v.rel_path,
+        reason: v.reason ?? "",
+      })),
+    });
+    const requestReviews = requestScope
+      ? await prisma.filesAiVerdict.findMany({
+          where: { verdict: "review", file: requestScope },
+          select: { rel_path: true, reason: true },
+          orderBy: [{ file_id: "asc" }, { rel_path: "asc" }],
+        })
+      : reviews;
+    writeReviewCsv({
+      requestOutputDir: input.requestOutputDir,
+      rows: requestReviews.map((v) => ({
+        relPath: v.rel_path,
+        reason: v.reason ?? "",
+      })),
+    });
+  }
+
   const verdicts = await prisma.filesAiVerdict.findMany({
     where: { file_id: input.fileId, verdict: "discard" },
     select: { rel_path: true, reason: true },
     orderBy: { rel_path: "asc" },
   });
-  if (verdicts.length === 0) return { discarded: 0, moved: 0, alreadyMoved: 0 };
+  if (verdicts.length === 0) {
+    return {
+      discarded: 0,
+      moved: 0,
+      alreadyMoved: 0,
+      reviewed: reviews.length,
+    };
+  }
 
   const discards = verdicts.map((v) => ({
     relPath: v.rel_path,
@@ -144,16 +212,9 @@ export async function applyFilesAiVerdicts(input: {
   });
   // The CSV lists every discard of the request, so a later wave does not erase
   // the rows an earlier wave wrote.
-  const owner = await prisma.processedFile.findUnique({
-    where: { id: input.fileId },
-    select: { case_request_id: true },
-  });
-  const requestDiscards = owner?.case_request_id
+  const requestDiscards = requestScope
     ? await prisma.filesAiVerdict.findMany({
-        where: {
-          verdict: "discard",
-          file: { case_request_id: owner.case_request_id, kind: "files" },
-        },
+        where: { verdict: "discard", file: requestScope },
         select: { rel_path: true, reason: true },
         orderBy: [{ file_id: "asc" }, { rel_path: "asc" }],
       })
@@ -182,7 +243,12 @@ export async function applyFilesAiVerdicts(input: {
       files_duplicates: totals.duplicates,
     },
   });
-  return { discarded: verdicts.length, moved, alreadyMoved };
+  return {
+    discarded: verdicts.length,
+    moved,
+    alreadyMoved,
+    reviewed: reviews.length,
+  };
 }
 
 /**
@@ -200,6 +266,15 @@ export async function clearFilesAiState(input: {
   });
   for (const { rel_path } of discarded) {
     fs.rmSync(path.join(input.requestOutputDir, "Discarded", rel_path), {
+      force: true,
+    });
+  }
+  const reviewed = await prisma.filesAiVerdict.findMany({
+    where: { file_id: input.fileId, verdict: "review" },
+    select: { rel_path: true },
+  });
+  for (const { rel_path } of reviewed) {
+    fs.rmSync(path.join(input.requestOutputDir, HUMAN_REVIEW_DIR, rel_path), {
       force: true,
     });
   }

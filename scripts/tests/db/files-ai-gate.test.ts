@@ -171,11 +171,8 @@ describe("Files AI gate", () => {
       );
       await updateAiBatchSettings({ ...current, filesAiEnabled: true });
     });
-    it("is false for a client case", async () => {
-      assert.equal(
-        await filesAiRequired(await makeFilesRow(clientCase)),
-        false,
-      );
+    it("is true for a client case (screened for confidentiality)", async () => {
+      assert.equal(await filesAiRequired(await makeFilesRow(clientCase)), true);
     });
     it("is false for a row with no request", async () => {
       assert.equal(await filesAiRequired(await makeFilesRow(null)), false);
@@ -254,7 +251,7 @@ describe("Files AI gate", () => {
       const unsent = await prisma.filesAiVerdict.findUniqueOrThrow({
         where: { id: `${fileId}:Documents/Document 6666666666666666.pdf` },
       });
-      assert.equal(unsent.verdict, "keep");
+      assert.equal(unsent.verdict, "review");
 
       // Once the batch is read, its discard is applied before finalize.
       await prisma.filesAiVerdict.update({
@@ -368,6 +365,42 @@ describe("Files AI gate", () => {
       assert.equal(again.files_skipped, 7);
     });
 
+    it("moves files for human review into their own folder without changing the counters", async () => {
+      const fileId = await makeFilesRow(employeeCase);
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "fag-review-"));
+      fs.mkdirSync(path.join(root, "Documents"));
+      const name = "Document eeeeeeeeeeeeeeee.pdf";
+      fs.writeFileSync(path.join(root, "Documents", name), "e");
+      await prisma.filesAiVerdict.create({
+        data: {
+          id: `${fileId}:Documents/${name}`,
+          file_id: fileId,
+          rel_path: `Documents/${name}`,
+          verdict: "review",
+          reason: "Large file judged from a sample",
+        },
+      });
+      const result = await applyFilesAiVerdicts({
+        jobId: await makeJob(fileId),
+        fileId,
+        requestOutputDir: root,
+      });
+      assert.equal(result.reviewed, 1);
+      assert.equal(
+        fs.existsSync(path.join(root, "For Human Review", "Documents", name)),
+        true,
+      );
+      assert.equal(fs.existsSync(path.join(root, "Documents", name)), false);
+      assert.match(
+        fs.readFileSync(
+          path.join(root, "For Human Review", "review.csv"),
+          "utf8",
+        ),
+        /Large file judged from a sample/,
+      );
+      assert.equal(fs.existsSync(path.join(root, "Discarded")), false);
+    });
+
     it("changes nothing when there are no discards", async () => {
       const fileId = await makeFilesRow(employeeCase);
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "fag-"));
@@ -388,18 +421,32 @@ describe("Files AI gate", () => {
       aliases: [],
     };
 
-    it("delivers everything when there is no OpenAI client", async () => {
+    it("sends every file to human review when there is no OpenAI client", async () => {
       const fileId = await makeFilesRow(employeeCase);
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), "fag-nokey-"));
+      fs.mkdirSync(path.join(root, "Documents"));
+      fs.writeFileSync(
+        path.join(root, "Documents", "Document ffffffffffffffff.pdf"),
+        "f",
+      );
       const result = await runFilesAiPrepare({
         fileId,
         criteria,
         client: null,
-        dirs: { documentsDir: "/nope", messagesDir: "/nada" },
+        dirs: {
+          documentsDir: path.join(root, "Documents"),
+          messagesDir: path.join(root, "Messages"),
+        },
       });
       assert.equal(result.operation, "files-ai-skipped");
+      const rows = await prisma.filesAiVerdict.findMany({
+        where: { file_id: fileId },
+      });
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0].verdict, "review");
     });
 
-    it("resolves pending verdicts to keep when submitting throws", async () => {
+    it("sends pending verdicts to human review when submitting throws", async () => {
       const fileId = await makeFilesRow(employeeCase);
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "fag-"));
       fs.mkdirSync(path.join(root, "Documents"));
@@ -430,7 +477,7 @@ describe("Files AI gate", () => {
         where: { file_id: fileId },
       });
       assert.equal(rows.length, 1);
-      assert.equal(rows[0].verdict, "keep");
+      assert.equal(rows[0].verdict, "review");
     });
   });
 });

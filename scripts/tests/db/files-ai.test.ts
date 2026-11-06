@@ -137,7 +137,7 @@ describe("Files AI", () => {
     assert.equal(client.batches.length, 1);
   });
 
-  it("keeps a file with no extractable text without sending it", async () => {
+  it("sends a file with no extractable text to human review without sending it", async () => {
     const fileId = await makeFile();
     const dirs = makeDirs([`Document ${H(4)}.pdf`]);
     const client = new FakeClient();
@@ -154,11 +154,11 @@ describe("Files AI", () => {
     const verdict = await prisma.filesAiVerdict.findFirstOrThrow({
       where: { file_id: fileId },
     });
-    assert.equal(verdict.verdict, "keep");
+    assert.equal(verdict.verdict, "review");
     assert.equal(await isFilesAiSettled(fileId), true);
   });
 
-  it("applies discard, keeps garbage, and keeps ids missing from the output", async () => {
+  it("applies discard, sends garbage and missing ids to human review", async () => {
     const fileId = await makeFile();
     const names = [
       `Document ${H(5)}.pdf`,
@@ -185,7 +185,11 @@ describe("Files AI", () => {
       [
         outputLine(
           a,
-          JSON.stringify({ decision: "discard", reason: "Unrelated memo" }),
+          JSON.stringify({
+            relevance: "irrelevant",
+            sensitivity: "none",
+            reason: "Unrelated memo",
+          }),
         ),
         outputLine(b, "this is not json"),
       ].join("\n"),
@@ -197,18 +201,21 @@ describe("Files AI", () => {
     const byId = new Map(rows.map((r) => [r.id, r]));
     assert.equal(byId.get(a)?.verdict, "discard");
     assert.equal(byId.get(a)?.reason, "Unrelated memo");
-    assert.equal(byId.get(b)?.verdict, "keep");
+    assert.equal(byId.get(b)?.verdict, "review");
     const missing = client.uploads[0].find(
       (id) => id !== a && id !== b,
     ) as string;
-    assert.equal(byId.get(missing)?.verdict, "keep");
-    assert.equal(byId.get(missing)?.reason, "No AI result returned; kept.");
+    assert.equal(byId.get(missing)?.verdict, "review");
+    assert.equal(
+      byId.get(missing)?.reason,
+      "No AI result returned; needs human review.",
+    );
     const state = await getFilesAiState(fileId);
     assert.equal(state.discards, 1);
     assert.equal(await isFilesAiSettled(fileId), true);
   });
 
-  it("resolves everything to keep when the batch fails", async () => {
+  it("sends everything to human review when the batch fails", async () => {
     const fileId = await makeFile();
     const dirs = makeDirs([`Document ${H(8)}.pdf`]);
     const client = new FakeClient();
@@ -314,7 +321,7 @@ describe("Files AI", () => {
     assert.equal(client.uploads.flat().length, 3);
   });
 
-  it("keeps a single request that exceeds the whole budget", async () => {
+  it("sends a single request that exceeds the whole budget to human review", async () => {
     const fileId = await makeFile();
     const dirs = makeDirs([`Document ${H(30)}.pdf`]);
     const client = new FakeClient();
@@ -331,7 +338,84 @@ describe("Files AI", () => {
     const row = await prisma.filesAiVerdict.findFirstOrThrow({
       where: { file_id: fileId },
     });
-    assert.equal(row.verdict, "keep");
-    assert.equal(row.reason, "Too large to review; kept.");
+    assert.equal(row.verdict, "review");
+    assert.equal(row.reason, "Too large to screen; needs human review.");
+  });
+
+  describe("screening for confidential content", () => {
+    async function runOne(
+      answer: string,
+      options: { text?: string; totalPages?: number } = {},
+    ) {
+      const fileId = await makeFile();
+      const dirs = makeDirs([`Document ${H(50)}.pdf`]);
+      const client = new FakeClient();
+      await prepareFilesAi({
+        fileId,
+        dirs,
+        criteria,
+        client,
+        readSample: async () => ({
+          text: options.text ?? "A normal document body.",
+          totalPages: options.totalPages ?? 1,
+        }),
+        batchDir,
+      });
+      assert.equal(client.uploads.length, 1, "the file must go to the AI");
+      const id = client.uploads[0][0];
+      client.statuses.set(client.batches[0], {
+        status: "completed",
+        outputFileId: "out-x",
+      });
+      client.outputs.set("out-x", outputLine(id, answer));
+      await pollFilesAiBatches(fileId, client);
+      return prisma.filesAiVerdict.findUniqueOrThrow({ where: { id } });
+    }
+
+    const answer = (relevance: string, sensitivity: string) =>
+      JSON.stringify({ relevance, sensitivity, reason: "because" });
+
+    it("discards an unprotected salary spreadsheet even when the subject is plainly involved", async () => {
+      const row = await runOne(answer("relevant", "payroll_compensation"), {
+        // The subject's email is in the text: this used to skip the AI.
+        text: "Name | Salary\njw@corp.com | 90000\nAnn | 80000",
+      });
+      assert.equal(row.verdict, "discard");
+      assert.equal(row.sensitivity, "payroll_compensation");
+      assert.equal(row.subject_involved, true);
+    });
+
+    it("keeps a relevant, non-confidential, normal-sized file", async () => {
+      const row = await runOne(answer("relevant", "none"));
+      assert.equal(row.verdict, "keep");
+    });
+
+    it("sends a relevant, non-confidential large file to human review", async () => {
+      const row = await runOne(answer("relevant", "none"), {
+        totalPages: 400,
+      });
+      assert.equal(row.verdict, "review");
+      assert.equal(row.large_file, true);
+    });
+
+    it("discards a large file that is confidential or irrelevant", async () => {
+      assert.equal(
+        (
+          await runOne(answer("relevant", "legal_privileged"), {
+            totalPages: 400,
+          })
+        ).verdict,
+        "discard",
+      );
+      assert.equal(
+        (await runOne(answer("irrelevant", "none"), { totalPages: 400 }))
+          .verdict,
+        "discard",
+      );
+    });
+
+    it("sends an unparseable answer to human review", async () => {
+      assert.equal((await runOne("not json")).verdict, "review");
+    });
   });
 });

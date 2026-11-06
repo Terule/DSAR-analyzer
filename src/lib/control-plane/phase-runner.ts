@@ -11,6 +11,7 @@ import {
 import { enqueueFilePhase } from "@/lib/control-plane/pipeline";
 import { convertToPdfBatch } from "@/lib/converter";
 import { extractUniqueEmails } from "@/lib/exporter";
+import { listHumanReviewDeliverables } from "@/lib/files-ai-apply";
 import { applyFilesAiVerdicts, runFilesAiPrepare } from "@/lib/files-ai-gate";
 import { archiveCompletedCase } from "@/lib/history";
 import { prisma } from "@/lib/prisma";
@@ -352,10 +353,10 @@ export async function runPhaseJob(
     });
     const queued = isClientCase
       ? 0
-      : await queueSharePointArtifacts(
-          fileId,
-          listFinalizedStandaloneDeliverables(directories),
-        );
+      : await queueSharePointArtifacts(fileId, [
+          ...listFinalizedStandaloneDeliverables(directories),
+          ...listHumanReviewDeliverables(path.join(outputBase, requestPath)),
+        ]);
     if (queued > 0) startSharePointArtifactWorker();
     await archiveCompletedCase(fileId);
     return { operation: "files-finalized", queuedForUpload: queued, ...result };

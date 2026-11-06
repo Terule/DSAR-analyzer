@@ -244,6 +244,12 @@ model FilesAiVerdict {
   verdict      String?
   reason       String?
   sampled      Boolean  @default(false)
+  // verdict is keep | discard | review. "review" = a person decides; the file
+  // sits in "For Human Review/" and is neither numbered nor uploaded.
+  relevance    String?
+  sensitivity  String?
+  subject_involved Boolean @default(false)
+  large_file   Boolean  @default(false)
   batch_run_id String?
   created_at   DateTime @default(now())
   resolved_at  DateTime?

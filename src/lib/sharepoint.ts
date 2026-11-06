@@ -365,7 +365,12 @@ export async function uploadCaseDeliverables(
       token,
       folderCache,
     );
-    for (const category of ["Emails", "Messages", "Documents"]) {
+    for (const category of [
+      "Emails",
+      "Messages",
+      "Documents",
+      "For Human Review",
+    ]) {
       const localDirectory = path.join(outputRoot, requestKey, category);
       try {
         const stat = await fs.stat(localDirectory);
@@ -419,7 +424,12 @@ export async function countCaseDeliverableFiles(
 
   let total = 0;
   for (const requestKey of requestKeys) {
-    for (const category of ["Emails", "Messages", "Documents"]) {
+    for (const category of [
+      "Emails",
+      "Messages",
+      "Documents",
+      "For Human Review",
+    ]) {
       const localDirectory = path.join(outputRoot, requestKey, category);
       try {
         const stat = await fs.stat(localDirectory);

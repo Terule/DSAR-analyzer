@@ -5,13 +5,15 @@ import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
 import { AI_TOKENIZER_MODEL } from "./ai-model";
 import { runtimeCredentials } from "./credentials";
-import { listFilesAiCandidates, readPdfText } from "./files-ai-extract";
+import { listFilesAiCandidates, readPdfSample } from "./files-ai-extract";
 import {
   buildFilesAiBatchRequest,
   buildFilesAiSystemPrompt,
   buildFilesAiUserContent,
+  decideFilesAi,
   type FilesAiCriteria,
-  parseFilesAiVerdict,
+  type FilesAiMode,
+  parseFilesAiJudgement,
 } from "./files-ai-prompt";
 import {
   buildSample,
@@ -25,6 +27,30 @@ import {
 import { prisma } from "./prisma";
 
 const TOKENIZER = encodingForModel(AI_TOKENIZER_MODEL);
+/**
+ * A PDF with more pages than this is judged from a sample only (the start plus
+ * the lines that mention the subject). If the sample is relevant and not
+ * confidential, a person reviews it.
+ */
+export function largeFilePages(): number {
+  const value = Number(process.env.FILES_AI_LARGE_FILE_PAGES);
+  return Number.isFinite(value) && value > 0 ? value : 30;
+}
+
+/**
+ * Employee cases are judged for relevance and confidentiality; client cases
+ * only for confidentiality.
+ */
+export async function filesAiModeFor(fileId: string): Promise<FilesAiMode> {
+  const row = await prisma.processedFile.findUnique({
+    where: { id: fileId },
+    select: {
+      case_request: { select: { case: { select: { case_type: true } } } },
+    },
+  });
+  return row?.case_request?.case.case_type === "client" ? "client" : "employee";
+}
+
 const REQUEST_OVERHEAD_TOKENS = 24;
 const MESSAGE_OVERHEAD_TOKENS = 12;
 
@@ -43,10 +69,15 @@ export interface PrepareFilesAiInput {
   dirs: { messagesDir: string; documentsDir: string };
   criteria: FilesAiCriteria;
   client: FilesAiClient;
+  mode?: FilesAiMode;
   maxTokensPerBatch?: number;
   batchDir?: string;
   /** Overridable so tests need no real PDFs. */
   readText?: (absPath: string) => Promise<string>;
+  /** Like `readText` but also reports the page count (tests). */
+  readSample?: (
+    absPath: string,
+  ) => Promise<{ text: string; totalPages: number }>;
 }
 
 interface QueuedRequest {
@@ -72,7 +103,8 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
   submittedBatches: number;
 }> {
   const { fileId, dirs, criteria, client } = input;
-  const readText = input.readText ?? readPdfText;
+  const mode = input.mode ?? (await filesAiModeFor(fileId));
+  const readText = input.readText;
   const maxTokens =
     input.maxTokensPerBatch ??
     (await getAiBatchSettings()).maxTokensPerBatch ??
@@ -86,7 +118,7 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
       })
     ).map((row) => [row.rel_path, row]),
   );
-  const systemPrompt = buildFilesAiSystemPrompt(criteria);
+  const systemPrompt = buildFilesAiSystemPrompt(criteria, mode);
   const mentionTokens = subjectMentionTokens(criteria);
   const systemTokens = TOKENIZER.encode(systemPrompt).length;
 
@@ -98,32 +130,45 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
       continue;
     }
     const id = verdictId(fileId, candidate.relPath);
-    const keepNow = async (reason: string, sampled = false) => {
+    const resolveNow = async (
+      verdict: "keep" | "review",
+      reason: string,
+      extra: { sampled?: boolean; largeFile?: boolean } = {},
+    ) => {
+      const data = {
+        verdict,
+        reason,
+        sampled: extra.sampled ?? false,
+        large_file: extra.largeFile ?? false,
+        resolved_at: new Date(),
+      };
       await prisma.filesAiVerdict.upsert({
         where: { id },
-        create: {
-          id,
-          file_id: fileId,
-          rel_path: candidate.relPath,
-          verdict: "keep",
-          reason,
-          sampled,
-          resolved_at: new Date(),
-        },
-        update: { verdict: "keep", reason, sampled, resolved_at: new Date() },
+        create: { id, file_id: fileId, rel_path: candidate.relPath, ...data },
+        update: data,
       });
     };
 
-    const text = await readText(candidate.absPath);
+    const read = input.readSample
+      ? await input.readSample(candidate.absPath)
+      : readText
+        ? { text: await readText(candidate.absPath), totalPages: 0 }
+        : await readPdfSample(candidate.absPath);
+    const text = read.text;
     if (!text.trim()) {
-      await keepNow("No extractable text; kept without AI review.");
+      // Nothing to read means nothing to screen: a person decides.
+      await resolveNow(
+        "review",
+        "No extractable text; could not be screened, needs human review.",
+      );
       keptNoText++;
       continue;
     }
-    if (subjectClearlyInvolved(text, criteria)) {
-      await keepNow("Subject is an author, speaker or addressee; kept.");
-      continue;
-    }
+    // Every file with text is screened for confidentiality. Being plainly
+    // involved only protects against an "irrelevant" answer, never skips the AI.
+    const subjectInvolved =
+      mode === "employee" && subjectClearlyInvolved(text, criteria);
+    const largeFile = read.totalPages > largeFilePages();
     const sample = buildSample(text, mentionTokens);
     const userContent = buildFilesAiUserContent({
       fileName: candidate.fileName,
@@ -137,7 +182,10 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
       2 * MESSAGE_OVERHEAD_TOKENS +
       REQUEST_OVERHEAD_TOKENS;
     if (estimate > maxTokens) {
-      await keepNow("Too large to review; kept.", sample.sampled);
+      await resolveNow("review", "Too large to screen; needs human review.", {
+        sampled: sample.sampled,
+        largeFile: true,
+      });
       continue;
     }
     if (!known) {
@@ -147,6 +195,8 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
           file_id: fileId,
           rel_path: candidate.relPath,
           sampled: sample.sampled,
+          subject_involved: subjectInvolved,
+          large_file: largeFile,
         },
       });
     }
@@ -235,7 +285,7 @@ async function submitChunk(
   }
 }
 
-/** Resolves a run's pending files to keep and marks the run failed. */
+/** Sends a run's pending files to human review and marks the run failed. */
 export async function failFilesAiRun(
   runId: string,
   error: string,
@@ -243,8 +293,8 @@ export async function failFilesAiRun(
   await prisma.filesAiVerdict.updateMany({
     where: { batch_run_id: runId, verdict: null },
     data: {
-      verdict: "keep",
-      reason: "AI batch failed; kept.",
+      verdict: "review",
+      reason: "AI batch failed; needs human review.",
       resolved_at: new Date(),
     },
   });
@@ -255,16 +305,17 @@ export async function failFilesAiRun(
 }
 
 /**
- * Keeps every file that was never handed to a batch (pending and unclaimed).
+ * Sends every file that was never handed to a batch (pending and unclaimed) to
+ * human review.
  * Used when the prepare job dead-lettered: those files will not be submitted,
  * but batches that did go out are still read.
  */
-export async function keepUnsubmittedFiles(fileId: string): Promise<number> {
+export async function reviewUnsubmittedFiles(fileId: string): Promise<number> {
   const result = await prisma.filesAiVerdict.updateMany({
     where: { file_id: fileId, verdict: null, batch_run_id: null },
     data: {
-      verdict: "keep",
-      reason: "AI step failed; kept.",
+      verdict: "review",
+      reason: "AI step failed; needs human review.",
       resolved_at: new Date(),
     },
   });
@@ -276,6 +327,7 @@ export async function pollFilesAiBatches(
   fileId: string,
   client: FilesAiClient,
 ): Promise<void> {
+  const mode = await filesAiModeFor(fileId);
   const runs = await prisma.filesAiBatchRun.findMany({
     where: {
       file_id: fileId,
@@ -309,20 +361,37 @@ export async function pollFilesAiBatches(
         continue;
       }
       if (!parsed.custom_id) continue;
-      const verdict = parseFilesAiVerdict(
+      const judgement = parseFilesAiJudgement(
         parsed.response?.body?.choices?.[0]?.message?.content,
       );
+      const row = await prisma.filesAiVerdict.findFirst({
+        where: { id: parsed.custom_id, verdict: null },
+        select: { subject_involved: true, large_file: true },
+      });
+      if (!row) continue;
+      const decision = decideFilesAi({
+        judgement,
+        mode,
+        largeFile: row.large_file,
+        subjectInvolved: row.subject_involved,
+      });
       await prisma.filesAiVerdict.updateMany({
         where: { id: parsed.custom_id, verdict: null },
-        data: { ...verdict, resolved_at: new Date() },
+        data: {
+          verdict: decision.verdict,
+          reason: decision.reason,
+          relevance: judgement.relevance,
+          sensitivity: judgement.sensitivity,
+          resolved_at: new Date(),
+        },
       });
     }
-    // Anything the output did not mention is kept.
+    // Anything the output did not mention goes to a person.
     await prisma.filesAiVerdict.updateMany({
       where: { batch_run_id: run.id, verdict: null },
       data: {
-        verdict: "keep",
-        reason: "No AI result returned; kept.",
+        verdict: "review",
+        reason: "No AI result returned; needs human review.",
         resolved_at: new Date(),
       },
     });
@@ -400,4 +469,26 @@ export async function openAiFilesAiClient(): Promise<FilesAiClient> {
       return (await openai.files.content(fileId)).text();
     },
   };
+}
+
+/**
+ * With no way to screen (no OpenAI key), nothing may be delivered unchecked:
+ * every converted file of this wave goes to human review instead.
+ */
+export async function sendCandidatesToReview(
+  fileId: string,
+  dirs: { messagesDir: string; documentsDir: string },
+  reason: string,
+): Promise<number> {
+  const candidates = listFilesAiCandidates(dirs);
+  for (const candidate of candidates) {
+    const id = verdictId(fileId, candidate.relPath);
+    const data = { verdict: "review", reason, resolved_at: new Date() };
+    await prisma.filesAiVerdict.upsert({
+      where: { id },
+      create: { id, file_id: fileId, rel_path: candidate.relPath, ...data },
+      update: data,
+    });
+  }
+  return candidates.length;
 }

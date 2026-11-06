@@ -63,7 +63,7 @@ describe("Files AI poller", () => {
     const row = await prisma.filesAiVerdict.findFirstOrThrow({
       where: { file_id: fileId },
     });
-    assert.equal(row.verdict, "keep"); // empty output: missing results are kept
+    assert.equal(row.verdict, "review"); // empty output: missing results need a person
   });
 
   it("leaves a recent run alone when there is no OpenAI key", async () => {
@@ -83,7 +83,7 @@ describe("Files AI poller", () => {
     );
   });
 
-  it("gives up on a stale run when there is still no key, and keeps its files", async () => {
+  it("gives up on a stale run when there is still no key, and sends its files to human review", async () => {
     const { fileId, runId } = await makeRun({ ageMinutes: 90, batchId: "c" });
     await pollFilesAiRuns(noKey);
     const run = await prisma.filesAiBatchRun.findUniqueOrThrow({
@@ -96,11 +96,11 @@ describe("Files AI poller", () => {
           where: { file_id: fileId },
         })
       ).verdict,
-      "keep",
+      "review",
     );
   });
 
-  it("gives up on a run stuck in claiming and keeps its files", async () => {
+  it("gives up on a run stuck in claiming and sends its files to human review", async () => {
     n++;
     const fileId = `t-fap-${tag}-${n}`;
     fileIds.push(fileId);
@@ -145,7 +145,7 @@ describe("Files AI poller", () => {
     const rows = await prisma.filesAiVerdict.findMany({
       where: { file_id: fileId },
     });
-    assert.equal(rows.find((r) => r.batch_run_id === stale)?.verdict, "keep");
+    assert.equal(rows.find((r) => r.batch_run_id === stale)?.verdict, "review");
     assert.equal(rows.find((r) => r.batch_run_id === fresh)?.verdict, null);
   });
 

@@ -50,21 +50,32 @@ export function listFilesAiCandidates(dirs: {
   ];
 }
 
-/** Text of the first pages of a PDF, or "" when it cannot be read. */
-export async function readPdfText(
+/** Text of the first pages of a PDF plus its total page count. */
+export async function readPdfSample(
   absPath: string,
   maxPages = 12,
-): Promise<string> {
+): Promise<{ text: string; totalPages: number }> {
   try {
     const { PDFParse } = await import("pdf-parse");
     const parser = new PDFParse({ data: fs.readFileSync(absPath) });
     try {
       const result = await parser.getText({ first: maxPages });
-      return (result.text ?? "").trim();
+      return {
+        text: (result.text ?? "").trim(),
+        totalPages: result.total ?? 0,
+      };
     } finally {
       await parser.destroy().catch(() => undefined);
     }
   } catch {
-    return "";
+    return { text: "", totalPages: 0 };
   }
+}
+
+/** Text of the first pages of a PDF, or "" when it cannot be read. */
+export async function readPdfText(
+  absPath: string,
+  maxPages = 12,
+): Promise<string> {
+  return (await readPdfSample(absPath, maxPages)).text;
 }
