@@ -5,7 +5,11 @@ import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
 import { AI_TOKENIZER_MODEL } from "./ai-model";
 import { runtimeCredentials } from "./credentials";
-import { listFilesAiCandidates, readPdfSample } from "./files-ai-extract";
+import {
+  type FilesAiCandidate,
+  listFilesAiCandidates,
+  readPdfSample,
+} from "./files-ai-extract";
 import {
   buildFilesAiBatchRequest,
   buildFilesAiSystemPrompt,
@@ -51,6 +55,12 @@ export async function filesAiModeFor(fileId: string): Promise<FilesAiMode> {
   return row?.case_request?.case.case_type === "client" ? "client" : "employee";
 }
 
+/** Email bodies and attachments are keyed `mail:<content hash>`. */
+export const MAIL_ITEM_PREFIX = "mail:";
+export function isMailItem(relPath: string): boolean {
+  return relPath.startsWith(MAIL_ITEM_PREFIX);
+}
+
 const REQUEST_OVERHEAD_TOKENS = 24;
 const MESSAGE_OVERHEAD_TOKENS = 12;
 
@@ -70,6 +80,8 @@ export interface PrepareFilesAiInput {
   criteria: FilesAiCriteria;
   client: FilesAiClient;
   mode?: FilesAiMode;
+  /** Explicit items (email bodies and attachments); defaults to the converted PDFs of this wave. */
+  candidates?: FilesAiCandidate[];
   maxTokensPerBatch?: number;
   batchDir?: string;
   /** Overridable so tests need no real PDFs. */
@@ -109,7 +121,7 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
     input.maxTokensPerBatch ??
     (await getAiBatchSettings()).maxTokensPerBatch ??
     DEFAULT_AI_BATCH_SETTINGS.maxTokensPerBatch;
-  const candidates = listFilesAiCandidates(dirs);
+  const candidates = input.candidates ?? listFilesAiCandidates(dirs);
   const existing = new Map(
     (
       await prisma.filesAiVerdict.findMany({
@@ -366,12 +378,12 @@ export async function pollFilesAiBatches(
       );
       const row = await prisma.filesAiVerdict.findFirst({
         where: { id: parsed.custom_id, verdict: null },
-        select: { subject_involved: true, large_file: true },
+        select: { subject_involved: true, large_file: true, rel_path: true },
       });
       if (!row) continue;
       const decision = decideFilesAi({
         judgement,
-        mode,
+        mode: isMailItem(row.rel_path) ? "mail" : mode,
         largeFile: row.large_file,
         subjectInvolved: row.subject_involved,
       });
@@ -480,7 +492,15 @@ export async function sendCandidatesToReview(
   dirs: { messagesDir: string; documentsDir: string },
   reason: string,
 ): Promise<number> {
-  const candidates = listFilesAiCandidates(dirs);
+  return sendItemsToReview(fileId, listFilesAiCandidates(dirs), reason);
+}
+
+/** Same as `sendCandidatesToReview` for an explicit list (email bodies, attachments). */
+export async function sendItemsToReview(
+  fileId: string,
+  candidates: FilesAiCandidate[],
+  reason: string,
+): Promise<number> {
   for (const candidate of candidates) {
     const id = verdictId(fileId, candidate.relPath);
     const data = { verdict: "review", reason, resolved_at: new Date() };

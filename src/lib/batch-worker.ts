@@ -6,12 +6,12 @@ import { AI_MODEL, AI_REASONING_EFFORT } from "./ai-model";
 import {
   getCasePstFileIds,
   isCaseAiSettled,
-  markCaseAiCompleted,
   markCaseAiFailed,
 } from "./case-utils";
 import { enqueueFilePhase } from "./control-plane/pipeline";
 import { runtimeCredentials } from "./credentials";
 import { applyConfidentiality } from "./email-audit";
+import { startMailScreen } from "./mail-screen";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 
@@ -316,7 +316,7 @@ Return JSON only: {"decision":"keep"|"discard","reason":"brief"}`;
   }
 }
 
-async function queuePdfWorker(fileId: string): Promise<void> {
+export async function queuePdfWorker(fileId: string): Promise<void> {
   // Queue render immediately after AI completion so the pipeline continues even
   // when the UI is not actively orchestrating the case.
   await prisma.processedFile.update({
@@ -728,7 +728,10 @@ async function pollSingleBatchStatus(
         `[Batch Worker] All AI chunks completed successfully for case (coordinator ${fileId}).`,
       );
 
-      await markCaseAiCompleted(
+      // The audit is done. Before Render, what it never read (attachments, and
+      // client email bodies) is screened for confidential content; the case
+      // completes its AI phase once that settles.
+      const screening = await startMailScreen(
         fileId,
         await completedAiElapsedMs(
           fileId,
@@ -740,9 +743,13 @@ async function pollSingleBatchStatus(
 
       adaptiveTokenCapByFile.delete(fileId);
 
-      // Render is case-level (all PST files in a request share the selected/
-      // folder). The case is now settled, so kick off a single render pass.
-      if (await isCaseAiSettled(fileId)) {
+      if (screening === "screening") {
+        console.log(
+          `[Batch Worker] Email audit done for ${fileId}; screening attachments before Render.`,
+        );
+      } else if (await isCaseAiSettled(fileId)) {
+        // Render is case-level (all PST files in a request share the selected/
+        // folder). The case is now settled, so kick off a single render pass.
         await queuePdfWorker(fileId);
       } else {
         console.log(

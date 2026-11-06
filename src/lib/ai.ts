@@ -4,13 +4,14 @@ import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
 import { AI_MODEL, AI_REASONING_EFFORT, AI_TOKENIZER_MODEL } from "./ai-model";
-import { getCasePstFileIds, markCaseAiCompleted } from "./case-utils";
+import { getCasePstFileIds } from "./case-utils";
 import { runtimeCredentials } from "./credentials";
 import {
   EMAIL_CONFIDENTIALITY_PROMPT,
   SENSITIVITY_SCHEMA,
 } from "./email-audit";
 import { stripEmailSignature } from "./email-content";
+import { startMailScreen } from "./mail-screen";
 import {
   DEFAULT_AI_BATCH_SETTINGS,
   getAiBatchSettings,
@@ -425,7 +426,7 @@ Set needs_second_pass = true only when decision is "discard" and attachments may
         status: { in: ["claiming", "submitted", "processing"] },
       },
     });
-    if (activeBatches === 0) await markCaseAiCompleted(fileId, totalAiMs);
+    if (activeBatches === 0) await startMailScreen(fileId, totalAiMs);
     if (fs.existsSync(batchFilePath)) fs.unlinkSync(batchFilePath);
     return activeBatches === 0 ? "completed" : "no_work";
   }

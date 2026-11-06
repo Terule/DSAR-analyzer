@@ -19,6 +19,9 @@ model ProcessedFile {
   estimated_tokens        Int      @default(0)
   created_at              DateTime @default(now())
   ai_status               String   @default("pending")
+  // none | screening | done. Between the email audit and Render the coordinator
+  // screens attachments (and, in client cases, bodies) for confidential content.
+  mail_screen_status      String   @default("none")
   ai_approved_count       Int      @default(0)
   ai_discarded_count      Int      @default(0)
   ai_batches_total        Int      @default(0)

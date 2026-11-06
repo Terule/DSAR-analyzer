@@ -14,7 +14,9 @@ import * as xlsx from "xlsx";
 import { getCasePstFileIds } from "./case-utils";
 import { flattenAttachments } from "./email-attachments";
 import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
+import { listHumanReviewDeliverables } from "./files-ai-apply";
 import { archiveCompletedCase } from "./history";
+import { attachmentKey, getMailScreenVerdicts } from "./mail-screen";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 import { openRenderLedger } from "./render-ledger";
@@ -1035,46 +1037,80 @@ export async function renderEmailAttachments(input: {
   outputDir: string;
   criteria: string[];
   bypassKeywordFilter?: boolean;
+  /**
+   * Screening verdicts keyed by `attachmentKey` (see mail-screen). `null` or
+   * absent delivers everything that survives the filters. An attachment the
+   * screening found confidential is not rendered; one that needs a person, or
+   * that was never screened while screening ran, goes to `reviewDir`.
+   */
+  screen?: Map<string, { verdict: string; reason: string }> | null;
+  reviewDir?: string;
 }): Promise<void> {
-  const { currentBaseName, outputDir, criteria } = input;
+  const { currentBaseName, outputDir, criteria, screen } = input;
   const bypassKeywordFilter = input.bypassKeywordFilter ?? false;
   const files = await flattenAttachments(input.attachments);
-  const padLen = String(Math.max(1, files.length)).length;
-  let counter = 1;
+
+  const deliver: typeof files = [];
+  const review: typeof files = [];
   for (const file of files) {
-    const ext = path.extname(file.filename).toLowerCase();
-    const attSeqName = `${currentBaseName} Attachment ${String(counter).padStart(padLen, "0")}`;
-    counter++;
-    if (ext === ".docx" || ext === ".doc") {
-      await processDocxToPdf(
-        file.content,
-        path.join(outputDir, `${attSeqName}.pdf`),
-        criteria,
-        attSeqName,
-        undefined,
-        bypassKeywordFilter,
-      );
-    } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
-      await processExcelToPdf(
-        file.content,
-        path.join(outputDir, `${attSeqName}.pdf`),
-        criteria,
-        attSeqName,
-        undefined,
-        bypassKeywordFilter,
-      );
-    } else if (ext === ".pdf") {
-      await processPdfAttachment(
-        file.content,
-        path.join(outputDir, `${attSeqName}${ext}`),
-        criteria,
-        attSeqName,
-        undefined,
-        bypassKeywordFilter,
-      );
+    if (!screen) {
+      deliver.push(file);
+      continue;
     }
+    const verdict =
+      screen.get(attachmentKey(file.content))?.verdict ?? "review";
+    if (verdict === "keep") deliver.push(file);
+    else if (verdict === "discard")
+      console.log(
+        `[Attachments] Not delivering ${file.filename} of ${currentBaseName}: confidential.`,
+      );
+    else review.push(file);
   }
-  finalizeAttachmentNames(outputDir, currentBaseName);
+
+  const renderInto = async (batch: typeof files, directory: string) => {
+    fs.mkdirSync(directory, { recursive: true });
+    const padLen = String(Math.max(1, batch.length)).length;
+    let counter = 1;
+    for (const file of batch) {
+      const ext = path.extname(file.filename).toLowerCase();
+      const attSeqName = `${currentBaseName} Attachment ${String(counter).padStart(padLen, "0")}`;
+      counter++;
+      if (ext === ".docx" || ext === ".doc") {
+        await processDocxToPdf(
+          file.content,
+          path.join(directory, `${attSeqName}.pdf`),
+          criteria,
+          attSeqName,
+          undefined,
+          bypassKeywordFilter,
+        );
+      } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
+        await processExcelToPdf(
+          file.content,
+          path.join(directory, `${attSeqName}.pdf`),
+          criteria,
+          attSeqName,
+          undefined,
+          bypassKeywordFilter,
+        );
+      } else if (ext === ".pdf") {
+        await processPdfAttachment(
+          file.content,
+          path.join(directory, `${attSeqName}${ext}`),
+          criteria,
+          attSeqName,
+          undefined,
+          bypassKeywordFilter,
+        );
+      }
+    }
+    finalizeAttachmentNames(directory, currentBaseName);
+  };
+
+  await renderInto(deliver, outputDir);
+  if (review.length > 0 && input.reviewDir) {
+    await renderInto(review, input.reviewDir);
+  }
 }
 
 export async function convertToPdfBatch(
@@ -1205,6 +1241,14 @@ export async function convertToPdfBatch(
       .toLowerCase();
 
     // Shared attachment renderer — used for both normal and warning emails.
+    // What the pre-Render screening decided about each attachment (null when the
+    // case was not screened). Review items are delivered in their own folder.
+    const mailVerdicts = await getMailScreenVerdicts(fileId);
+    const reviewEmailsDir = path.join(
+      targetFolder,
+      "For Human Review",
+      "Emails",
+    );
     const renderNestedAttachments = (
       attachments: Attachment[],
       currentBaseName: string,
@@ -1217,6 +1261,8 @@ export async function convertToPdfBatch(
         outputDir,
         criteria: filterCriteria,
         bypassKeywordFilter,
+        screen: mailVerdicts,
+        reviewDir: reviewEmailsDir,
       });
 
     for (let idx = 0; idx < emlFiles.length; idx++) {
@@ -1442,6 +1488,82 @@ export async function convertToPdfBatch(
       }
     }
 
+    // --- HUMAN-REVIEW EMAILS: bodies the pre-Render screening could not settle ---
+    // (client cases). Delivered apart, as `Review NNNN`, for a person to decide.
+    const reviewEmlDir = path.join(uniqueEmailsFolder, "review");
+    const reviewEmls = fs.existsSync(reviewEmlDir)
+      ? fs
+          .readdirSync(reviewEmlDir)
+          .filter((name) => name.endsWith(".eml"))
+          .sort()
+      : [];
+    if (reviewEmls.length > 0) {
+      fs.mkdirSync(reviewEmailsDir, { recursive: true });
+      const existing = fs.readdirSync(reviewEmailsDir);
+      let nextReview =
+        existing.reduce((max, name) => {
+          const match = name.match(/^Review (\d+)\.pdf$/);
+          return match ? Math.max(max, Number(match[1])) : max;
+        }, 0) + 1;
+      const reviewPad = existing.reduce(
+        (width, name) => {
+          const match = name.match(/^Review (\d+)\.pdf$/);
+          return match ? Math.max(width, match[1].length) : width;
+        },
+        String(nextReview - 1 + reviewEmls.length).length,
+      );
+      for (const name of reviewEmls) {
+        const emlPath = path.join(reviewEmlDir, name);
+        const baseName = `Review ${formatNumber(nextReview, reviewPad)}`;
+        const pdfPath = path.join(reviewEmailsDir, `${baseName}.pdf`);
+        let rendered = false;
+        try {
+          await withTimeout(
+            (async () => {
+              const parsed = await simpleParser(fs.readFileSync(emlPath));
+              const htmlContent = generateEmailHtml(
+                parsed,
+                getAddressText(parsed.from),
+                getAddressText(parsed.to),
+                baseName,
+              );
+              const tempHtml = `${pdfPath}.tmp.html`;
+              fs.writeFileSync(tempHtml, htmlContent);
+              try {
+                await runWeasyPrint(tempHtml, pdfPath);
+              } finally {
+                fs.rmSync(tempHtml, { force: true });
+              }
+              if (parsed.attachments && parsed.attachments.length > 0) {
+                await renderEmailAttachments({
+                  attachments: parsed.attachments,
+                  currentBaseName: baseName,
+                  outputDir: reviewEmailsDir,
+                  reviewDir: reviewEmailsDir,
+                  criteria: filterCriteria,
+                  bypassKeywordFilter: true,
+                  screen: mailVerdicts,
+                });
+              }
+              rendered =
+                fs.existsSync(pdfPath) && fs.statSync(pdfPath).size > 0;
+            })(),
+            PER_EMAIL_TIMEOUT_MS,
+            `Review email render (${name})`,
+          );
+        } catch (err) {
+          console.error(
+            `Skipping review email ${name}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        if (rendered) {
+          nextReview++;
+          fs.rmSync(emlPath, { force: true });
+        }
+        await yieldToEventLoop();
+      }
+    }
+
     const durationMs = Date.now() - startTime;
     // Render covers the whole case's shared selected/ folder, so mark every PST
     // row in the case completed in one pass. Record the real duration only on
@@ -1482,10 +1604,14 @@ export async function convertToPdfBatch(
     ]);
     // Attachments and warning mail can create additional nested deliverables.
     // Queue the final sweep without holding the Render phase open for upload.
-    const finalized = fs
-      .readdirSync(deliverablesDir, { recursive: true })
-      .map((entry) => path.join(deliverablesDir, String(entry)))
-      .filter((entry) => fs.existsSync(entry) && fs.statSync(entry).isFile());
+    const finalized = [
+      ...fs
+        .readdirSync(deliverablesDir, { recursive: true })
+        .map((entry) => path.join(deliverablesDir, String(entry)))
+        .filter((entry) => fs.existsSync(entry) && fs.statSync(entry).isFile()),
+      // Items held for a person are delivered too (the HR folder).
+      ...listHumanReviewDeliverables(targetFolder),
+    ];
     if (!isClientCase) {
       try {
         const queued = await queueSharePointArtifacts(fileId, finalized);

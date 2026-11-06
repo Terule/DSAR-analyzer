@@ -20,7 +20,8 @@ export const SENSITIVITY_CATEGORIES = [
 ] as const;
 export type Sensitivity = (typeof SENSITIVITY_CATEGORIES)[number];
 
-export type FilesAiMode = "employee" | "client";
+/** `client` and `mail` judge confidentiality only; `mail` is for email bodies and attachments. */
+export type FilesAiMode = "employee" | "client" | "mail";
 export type FilesAiVerdictValue = "keep" | "discard" | "review";
 
 export const FILES_AI_RESPONSE_FORMAT = {
@@ -54,8 +55,8 @@ export function buildFilesAiSystemPrompt(
   criteria: FilesAiCriteria,
   mode: FilesAiMode = "employee",
 ): string {
-  if (mode === "client") {
-    return `You are an expert Legal AI screening documents and chat messages before they are delivered to a client.
+  if (mode !== "employee") {
+    return `You are an expert Legal AI screening documents, emails and chat messages before they are delivered.
 Decide only whether the file contains confidential data that must not be delivered.
 
 ${SENSITIVITY_RULES}

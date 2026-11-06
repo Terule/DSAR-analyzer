@@ -3,7 +3,7 @@ import path from "node:path";
 import { fillAiBatchSlots } from "@/lib/ai";
 import { analyzePstDuplicates, scanFileMetadata } from "@/lib/analyzer";
 import { expandArchives } from "@/lib/archive-expander";
-import { getCasePstFileIds, markCaseAiCompleted } from "@/lib/case-utils";
+import { getCasePstFileIds } from "@/lib/case-utils";
 import {
   clearFilesBatchResults,
   recordFilesBatchResult,
@@ -14,6 +14,7 @@ import { extractUniqueEmails } from "@/lib/exporter";
 import { listHumanReviewDeliverables } from "@/lib/files-ai-apply";
 import { applyFilesAiVerdicts, runFilesAiPrepare } from "@/lib/files-ai-gate";
 import { archiveCompletedCase } from "@/lib/history";
+import { startMailScreen } from "@/lib/mail-screen";
 import { prisma } from "@/lib/prisma";
 import { getPstArtifactPaths } from "@/lib/pst-artifacts";
 import { highestFinalizedNumber } from "@/lib/request-waves";
@@ -144,7 +145,11 @@ export async function runPhaseJob(
         },
       });
       if (coordinator?.case_request?.case.case_type === "client") {
-        await markCaseAiCompleted(coordinatorId, 0);
+        // No email audit for clients, but their bodies and attachments are
+        // still screened for confidential content before Render.
+        if ((await startMailScreen(coordinatorId, 0)) === "screening") {
+          return { operation: "client-screening" };
+        }
         await prisma.processedFile.update({
           where: { id: coordinatorId },
           data: {
@@ -181,7 +186,9 @@ export async function runPhaseJob(
         select: { case: { select: { case_type: true } } },
       });
       if (request?.case.case_type === "client") {
-        await markCaseAiCompleted(fileId, 0);
+        if ((await startMailScreen(fileId, 0)) === "screening") {
+          return { operation: "client-screening" };
+        }
         await prisma.processedFile.update({
           where: { id: fileId },
           data: { pdf_status: "processing" },

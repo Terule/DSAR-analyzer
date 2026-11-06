@@ -8,14 +8,15 @@
  */
 
 import path from "node:path";
-import { pollBatchStatus } from "./batch-worker";
-import { getCasePstFileIds } from "./case-utils";
+import { pollBatchStatus, queuePdfWorker } from "./batch-worker";
+import { getCasePstFileIds, isCaseAiSettled } from "./case-utils";
 import { failRowIfJobExhausted } from "./control-plane/exhausted";
 import {
   enqueueFilePhase,
   isControlPlanePipelineEnabled,
 } from "./control-plane/pipeline";
 import { filesAiWorkRemains, pollFilesAiRuns } from "./files-ai-poll";
+import { settleMailScreens } from "./mail-screen";
 import { prisma } from "./prisma";
 
 // OpenAI batches use a 24h completion window; a 1-minute cadence keeps the UI
@@ -183,6 +184,17 @@ export async function runBatchSweep(): Promise<SweepResult> {
   await pollFilesAiRuns().catch((err) =>
     console.error("[Batch Scheduler] Files AI poll failed:", err),
   );
+
+  // Cases whose attachment screening has been fully read complete their AI
+  // phase here, which releases Render.
+  for (const coordinatorId of await settleMailScreens().catch((err) => {
+    console.error("[Batch Scheduler] Mail screening failed:", err);
+    return [] as string[];
+  })) {
+    if (await isCaseAiSettled(coordinatorId)) {
+      await queuePdfWorker(coordinatorId);
+    }
+  }
 
   // 3. Decide whether to keep polling. Stay alive while any file is mid-AI
   // (generating the next chunk = 'processing', awaiting a batch = 'batch_ready')
