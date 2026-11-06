@@ -41,7 +41,7 @@ export const FILES_AI_RESPONSE_FORMAT = {
   },
 } as const;
 
-const SENSITIVITY_RULES = `Sensitivity (confidential content that must never be delivered):
+export const SENSITIVITY_RULES = `Sensitivity (confidential content that must never be delivered):
 - "payroll_compensation": salary, bonus, pay, benefits or compensation data, especially a table or list covering several people.
 - "legal_privileged": legal advice, attorney-client or litigation material.
 - "hr_investigation_or_discipline": investigations, grievances, performance reviews or disciplinary records about people.

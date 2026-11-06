@@ -6,6 +6,10 @@ import OpenAI from "openai";
 import { AI_MODEL, AI_REASONING_EFFORT, AI_TOKENIZER_MODEL } from "./ai-model";
 import { getCasePstFileIds, markCaseAiCompleted } from "./case-utils";
 import { runtimeCredentials } from "./credentials";
+import {
+  EMAIL_CONFIDENTIALITY_PROMPT,
+  SENSITIVITY_SCHEMA,
+} from "./email-audit";
 import { stripEmailSignature } from "./email-content";
 import {
   DEFAULT_AI_BATCH_SETTINGS,
@@ -67,11 +71,12 @@ const RESPONSE_FORMAT = {
     schema: {
       type: "object",
       additionalProperties: false,
-      required: ["decision", "reason", "needs_second_pass"],
+      required: ["decision", "reason", "needs_second_pass", "sensitivity"],
       properties: {
         decision: { type: "string", enum: ["keep", "discard"] },
         reason: { type: "string", maxLength: 240 },
         needs_second_pass: { type: "boolean" },
+        sensitivity: SENSITIVITY_SCHEMA,
       },
     },
   },
@@ -264,6 +269,8 @@ Important: token boundary match only. Do NOT treat substrings like "MICROSOFT" a
 
   4. [DEFAULT]
   If no strong signal is present -> discard.
+
+${EMAIL_CONFIDENTIALITY_PROMPT}
 
 Set needs_second_pass = true only when decision is "discard" and attachments may still contain relevant evidence (especially attached emails/documents).`;
 

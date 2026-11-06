@@ -11,6 +11,7 @@ import {
 } from "./case-utils";
 import { enqueueFilePhase } from "./control-plane/pipeline";
 import { runtimeCredentials } from "./credentials";
+import { applyConfidentiality } from "./email-audit";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 
@@ -509,6 +510,7 @@ async function pollSingleBatchStatus(
         decision?: string;
         reason?: string;
         needs_second_pass?: boolean;
+        sensitivity?: string;
       };
 
       try {
@@ -522,9 +524,17 @@ async function pollSingleBatchStatus(
         };
       }
 
-      let decision: "keep" | "discard" =
-        decisionData.decision === "keep" ? "keep" : "discard";
-      let reason = decisionData.reason || "Audited via GPT.";
+      // Confidential content is never delivered, whatever else the audit
+      // concluded, and a confidential email is not rescued by a second pass.
+      const audited = applyConfidentiality({
+        decision: decisionData.decision === "keep" ? "keep" : "discard",
+        reason: decisionData.reason || "Audited via GPT.",
+        needsSecondPass: decisionData.needs_second_pass === true,
+        sensitivity: decisionData.sensitivity,
+      });
+      let decision: "keep" | "discard" = audited.decision;
+      let reason = audited.reason;
+      decisionData.needs_second_pass = audited.needsSecondPass;
 
       if (decision === "keep") auditStats.firstPassKeep++;
       else auditStats.firstPassDiscard++;
