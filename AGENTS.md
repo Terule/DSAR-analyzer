@@ -14,7 +14,6 @@ This is **Next.js 16.2.7** running on **Node.js**. Many APIs differ from what yo
   - Use `updateMany({ where: { ..., status: "pending" } })` + check `result.count` for atomic "claim a pending row" patterns instead of update-then-re-select.
 - **Bundler**: Turbopack is the Next.js default but this project opts out — `next dev --webpack` and `next build --webpack` are used explicitly (see `package.json`).
 - **Linter/Formatter**: Biome (`biome check`, `biome format --write`). No ESLint. No Prettier.
-- **Styles**: Tailwind CSS v4 via PostCSS.
 
 ---
 
@@ -65,7 +64,10 @@ Same applies to `searchParams` in page components.
 - **Email extraction**: `readpst` (libpst) + `mailparser`. All EML logic lives in `src/lib/analyzer.ts` and `src/lib/exporter.ts`.
 - **Files phase**: Teams messages + loose documents live in a `Files` folder and are processed by `src/lib/standalone-processor.ts` (relevance filter + content dedup + WeasyPrint). It runs **after** the Render phase, never in parallel.
 - **Background workers**: worker entry points live under `scripts/workers/`. Detached legacy workers must be cleaned up on wipe/reset (`/api/wipe` kills matching `scripts/workers/files-worker.ts` processes). Their stdout/stderr is piped to `logs/<name>.log` via `openWorkerLogFd` — never spawn them with `stdio: 'ignore'`. Synchronous CPU-heavy parsing (DOCX/XLSX) must go through `scripts/workers/office-worker.ts` so `withTimeout` can actually interrupt it.
-- **Files AI relevance gate**: between the Files batches and finalize, `settleFilesBatches` (dispatcher) runs `advanceFilesAi` (`src/lib/files-ai-gate.ts`): a `filesAiPrepare` job reads this wave's converted PDFs (hash-named, i.e. unfinalized) and submits OpenAI Batch runs (`src/lib/files-ai.ts`, tables `files_ai_verdicts` / `files_ai_batch_runs`); the dispatcher's `runBatchSweep` polls them (`files-ai-poll.ts`); a `filesAiApply` job then moves `discard` files to `<request>/Discarded/` (never numbered or uploaded), rewrites `Discarded/verdicts.csv` for the whole request, and shifts the counters from processed to skipped. Only an explicit `discard` removes a file — every error keeps it. Large texts are judged from a sample. Employee cases only (client cases never run it); toggle `files_ai_enabled` in System settings. A Files retry clears the row's verdicts/runs/discards (`clearFilesAiState`). Size a run first with `scripts/maintenance/files-ai-rehearsal.ts` (read-only).
+- **Confidentiality screening (every case type, employee and client)**: the AI never delivers confidential content. A verdict is `keep | discard | review`, decided by `decideFilesAi` (`src/lib/files-ai-prompt.ts`) from relevance, sensitivity category (`SENSITIVITY_CATEGORIES`: payroll, legal privilege, HR investigation, third-party personal data, other), large-file flag, subject involvement and mode (`employee | client | mail`). Rules: confidential → discard in every mode (client: always); AI failure/no text/unsettled → `review`; large file (> `FILES_AI_LARGE_FILE_PAGES` pages, default 30) is judged from a sample — relevant → `review`, confidential/irrelevant → discard. Password-protected files of any type are detected by signature (`src/lib/password-protection.ts`: OLE/CFB, ZIP, RAR4/5, 7z) and discarded in every case type, including the unconverted fallback and encrypted archives (`archive-expander.ts`). Never reintroduce a per-type regex check.
+- **Files AI gate**: between the Files batches and finalize, `settleFilesBatches` (dispatcher) runs `advanceFilesAi` (`src/lib/files-ai-gate.ts`): a `filesAiPrepare` job reads this wave's converted PDFs (hash-named, i.e. unfinalized) and submits OpenAI Batch runs (`src/lib/files-ai.ts`, tables `files_ai_verdicts` / `files_ai_batch_runs`); the dispatcher's `runBatchSweep` polls them (`files-ai-poll.ts`); a `filesAiApply` job then moves `discard` files to `<request>/Discarded/` (never numbered or uploaded), `review` files to `<request>/For Human Review/` (plus `review.csv`), rewrites `Discarded/verdicts.csv`, and shifts counters (discard → skipped; review leaves counters unchanged). Runs for every case with a `case_request_id`, client included. No OpenAI client → all candidates go to review. A Files retry clears verdicts/runs/discards/reviews (`clearFilesAiState`). Toggle `files_ai_enabled` in System settings governs all screening. Size a run first with `scripts/maintenance/files-ai-rehearsal.ts` (read-only). Not yet screened: originals in `Unconverted/` and non-PDF client raw copies.
+- **Mail screening (before Render)**: `src/lib/mail-screen.ts`. After the email audit (or directly, when the case skips it — client cases and no-batch paths) `startMailScreen` submits email bodies (client cases; employee bodies are judged in the audit itself via `sensitivity`) and every distinct attachment (content-hash keyed, flattened by `email-attachments.ts`) as `mail:<hash>` / `mail:body:<emailHash>` items in the same `files_ai_verdicts` / `files_ai_batch_runs` tables. The coordinator stays `ai_status="batch_ready"` with `mail_screen_status="screening"` until `settleMailScreens` (called from `batch-scheduler.ts`) releases Render. Render (`converter.ts`, `renderEmailAttachments`) only reads verdicts: keep → delivered, discard → dropped, review/never screened → `<request>/For Human Review/Emails/`. Nested EML/MSG are their own email rows, so the rules apply at every level. Email-body AI failure in employee cases stays a discard ("when in doubt, discard"); in client cases and for attachments it goes to review.
+- **For Human Review/ is part of the delivery**: employee cases upload it to SharePoint (the HR review) via `listHumanReviewDeliverables` (Render sweep and Files finalize). Client cases never upload; the folder stays on disk for a person outside this pipeline. There is no review UI/state in the app by design.
 - **Pipeline phases**: Parse → Extract → AI → Render → Files. Rows carry a `kind` of `'pst'` or `'files'`; email phases apply only to `kind='pst'` rows.
 - **Staging/output layout**: input `STAGING_PATH/[case]/[request]/{PST,Files}`; output `EXTRACTED_PATH/[case]/[request]/{Emails,Messages,Documents}`. Row id is a hash of the full path, so moving a file orphans its row — `syncStagingArea` prunes rows whose backing file/folder no longer exists.
 - **Environment variables**: `OPENAI_API_KEY`, `POSTGRES_URL`, `STAGING_PATH`, `EXTRACTED_PATH` — always read from `process.env`, never hardcode paths.
@@ -73,41 +75,9 @@ Same applies to `searchParams` in page components.
 
 ---
 
-## File Structure
-
-```
-src/
-  app/           # App Router: pages, layouts, API route handlers
-  components/    # React client/server components
-  hooks/         # SSE + notification hooks
-  lib/           # Business logic (no React); batch-scheduler.ts, case-utils.ts,
-                 # exclusions.ts, standalone-processor.ts, worker-log.ts, …
-scripts/
-  orchestrator/     # Dispatcher + one-shot phase runner
-  workers/          # Node worker entry points
-  maintenance/      # Explicit maintenance utilities
-logs/               # Detached-worker stdout/stderr (gitignored)
-batches/            # Ephemeral JSONL files for OpenAI batch uploads (gitignored)
-```
-
----
-
 ## Codex Handoff Snapshot
 
-- SQLite runtime path has been fully removed. `src/lib/db.ts` and `src/lib/history-db.ts` are deleted.
 - Domain data path must remain Prisma-native only (`processed_files`, `emails`, `run_history`, `case_history`).
-- Control-plane scaffold is present and compile-clean:
-  - `src/lib/control-plane/postgres.ts`
-  - `src/lib/control-plane/schema.ts`
-  - `src/lib/control-plane/job-store.ts`
-  - `src/lib/control-plane/types.ts`
-  - `src/lib/queue/factory.ts`
-  - `src/lib/queue/bullmq-adapter.ts`
-  - `src/lib/queue/sqs-adapter.ts` (placeholder)
-  - `src/app/api/orchestrator/health/route.ts`
-  - `src/app/api/orchestrator/bootstrap/route.ts`
-  - `src/app/api/orchestrator/sweep/route.ts`
 - Queue default name uses hyphenated form: `pst-analyser-orchestrator`.
-- Next implementation target: wire producer/consumer flow so phase transitions enqueue and process control-plane jobs while preserving current external API behavior.
 - Control-plane internals may use `pg` SQL primitives where needed for lease semantics (`FOR UPDATE SKIP LOCKED`).
 <!-- END:nextjs-agent-rules -->
