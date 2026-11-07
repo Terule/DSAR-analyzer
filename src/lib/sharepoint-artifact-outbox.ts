@@ -4,6 +4,25 @@ import path from "node:path";
 import { getCaseKey } from "./format";
 import { prisma } from "./prisma";
 
+/**
+ * Only these top-level folders of a request are ever delivered. `Discarded/`
+ * (confidential or irrelevant files), `Unconverted/` and anything else stay
+ * local, whoever asks for the upload.
+ */
+const DELIVERABLE_FOLDERS = new Set([
+  "Emails",
+  "Messages",
+  "Documents",
+  "For Human Review",
+]);
+
+export function isDeliverablePath(relativePath: string): boolean {
+  const parts = relativePath.split(/[\\/]/).filter(Boolean);
+  if (parts.length < 2 || !DELIVERABLE_FOLDERS.has(parts[0])) return false;
+  // Fallback originals live below Documents/Unconverted and Messages/Unconverted.
+  return parts[1] !== "Unconverted";
+}
+
 export async function refreshSharePointUploadProgress(
   fileId: string,
 ): Promise<void> {
@@ -82,7 +101,8 @@ export async function queueSharePointArtifacts(
     if (
       relativePath.startsWith("..") ||
       path.isAbsolute(relativePath) ||
-      relativePath.startsWith(".")
+      relativePath.startsWith(".") ||
+      !isDeliverablePath(relativePath)
     ) {
       continue;
     }

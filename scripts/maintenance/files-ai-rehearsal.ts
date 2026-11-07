@@ -1,5 +1,5 @@
 /**
- * Read-only dry run of the Files AI relevance check. It lists converted PDFs,
+ * Read-only dry run of the Files AI screening (relevance and confidentiality). It lists converted PDFs,
  * builds the exact prompts the AI step would send, and prints counts, token
  * and cost estimates. It never calls OpenAI and never touches the database.
  *
@@ -76,7 +76,8 @@ async function main() {
   const picked = all.filter((_, i) => i % step === 0).slice(0, limit);
 
   const criteria = { name: subject, email: "", aliases };
-  const systemPrompt = buildFilesAiSystemPrompt(criteria);
+  // Employee mode is the longest prompt, so this is a conservative size.
+  const systemPrompt = buildFilesAiSystemPrompt(criteria, "employee");
   const tokenizer = encodingForModel(AI_TOKENIZER_MODEL);
   const systemTokens = tokenizer.encode(systemPrompt).length;
   const mentionTokens = subjectMentionTokens(criteria);
@@ -110,7 +111,7 @@ async function main() {
   console.log(`Candidates in folder:      ${all.length}`);
   console.log(`Inspected (sample):        ${picked.length}`);
   console.log(
-    `  no extractable text:     ${noText} (would be kept without AI)`,
+    `  no extractable text:     ${noText} (would go to human review)`,
   );
   console.log(`  large (sampled text):    ${sampled}`);
   console.log(`  sent to AI:              ${judged}`);

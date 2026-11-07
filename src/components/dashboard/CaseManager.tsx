@@ -44,6 +44,8 @@ type PhaseState = {
   total: number;
   status: string;
   ai?: { done: number; total: number };
+  /** True while attachments (and client bodies) are screened before Render. */
+  screening?: boolean;
 };
 type PhaseTiming = {
   parse: number;
@@ -343,11 +345,7 @@ function RequestStatistics({ request }: { request: RequestItem }) {
                 value={files.skipped}
                 of={files.found}
                 bar="bg-slate-500"
-                note={`Includes ${count(files.duplicates)} duplicates${
-                  request.case_type === "client"
-                    ? ""
-                    : ` and ${count(files.aiDiscarded)} discarded by the AI audit`
-                }`}
+                note={`Includes ${count(files.duplicates)} duplicates and ${count(files.aiDiscarded)} discarded by the AI audit`}
               />
               <FunnelRow
                 label="Converted and delivered"
@@ -470,10 +468,7 @@ function phaseCards(request: RequestItem) {
   }
   if (request.scope !== "mail") {
     phases.push({ name: "Files Render", key: "files", group: "files" });
-    // Client cases never run the Files AI check.
-    if (request.case_type !== "client") {
-      phases.push({ name: "Files AI audit", key: "filesAi", group: "files" });
-    }
+    phases.push({ name: "Files AI audit", key: "filesAi", group: "files" });
   }
   if (request.scope !== "mail" && request.case_type !== "client") {
     phases.push({ name: "Upload", key: "uploadFiles", group: "files" });
@@ -519,11 +514,15 @@ function phaseCards(request: RequestItem) {
         ? "Complete"
         : state?.status === "failed"
           ? "Failed"
-          : phase.key === "ai" && state?.status === "batch_ready"
-            ? "Waiting on OpenAI"
-            : active
-              ? "In progress"
-              : "Waiting",
+          : phase.key === "ai" &&
+              state?.status === "batch_ready" &&
+              state.screening
+            ? "Screening attachments"
+            : phase.key === "ai" && state?.status === "batch_ready"
+              ? "Waiting on OpenAI"
+              : active
+                ? "In progress"
+                : "Waiting",
     };
   });
 }

@@ -50,6 +50,7 @@ function phaseProgress(
     ai_status: string;
     ai_batches_total: number;
     ai_batches_done: number;
+    mail_screen_status: string;
     pdf_status: string;
     pdf_total: number;
     pdf_processed: number;
@@ -155,6 +156,9 @@ function phaseProgress(
       done: coordinators.reduce((sum, row) => sum + row.ai_batches_done, 0),
       total: coordinators.reduce((sum, row) => sum + row.ai_batches_total, 0),
       status: combinePhaseStatus(coordinators.map((row) => row.ai_status)),
+      screening: coordinators.some(
+        (row) => row.mail_screen_status === "screening",
+      ),
     },
     render: {
       done: render.done,
@@ -237,6 +241,7 @@ export async function GET(request: Request) {
               ai_status: true,
               ai_batches_total: true,
               ai_batches_done: true,
+              mail_screen_status: true,
               pdf_status: true,
               pdf_total: true,
               pdf_processed: true,

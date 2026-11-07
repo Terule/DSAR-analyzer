@@ -2,7 +2,10 @@ import fs from "node:fs";
 import path from "node:path";
 import { getCaseKey } from "@/lib/format";
 import { prisma } from "@/lib/prisma";
-import { queueSharePointArtifacts } from "@/lib/sharepoint-artifact-outbox";
+import {
+  isDeliverablePath,
+  queueSharePointArtifacts,
+} from "@/lib/sharepoint-artifact-outbox";
 import { startSharePointArtifactWorker } from "@/lib/sharepoint-artifact-queue";
 import { removeDsStoreFiles } from "@/lib/upload-prep";
 
@@ -42,7 +45,12 @@ export async function POST(request: Request) {
       return fs
         .readdirSync(root, { recursive: true })
         .map((entry) => path.join(root, String(entry)))
-        .filter((entry) => fs.existsSync(entry) && fs.statSync(entry).isFile());
+        .filter(
+          (entry) =>
+            isDeliverablePath(path.relative(root, entry)) &&
+            fs.existsSync(entry) &&
+            fs.statSync(entry).isFile(),
+        );
     });
     const queued = await queueSharePointArtifacts(fileIds[0], artifacts);
     if (queued > 0) startSharePointArtifactWorker();

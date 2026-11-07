@@ -691,8 +691,8 @@ export function SystemSettingsDialog({
                     </label>,
                   )}
                   {section(
-                    "Files AI review",
-                    "Let the AI judge whether converted files are relevant to the case.",
+                    "AI screening",
+                    "Let the AI screen files, email bodies and attachments for confidential content, and judge file relevance.",
                     <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-700 bg-slate-950/45 p-4">
                       <input
                         type="checkbox"
@@ -704,12 +704,15 @@ export function SystemSettingsDialog({
                       />
                       <span>
                         <span className="block text-sm font-semibold text-slate-200">
-                          AI relevance check for files
+                          AI screening for confidential content and relevance
                         </span>
                         <span className="mt-1 block text-xs leading-5 text-slate-400">
-                          Files the AI judges not relevant are not delivered or
-                          uploaded. They are kept in a Discarded folder with the
-                          AI's reason. Client cases are never checked.
+                          Confidential content (payroll, privileged, HR or
+                          third-party personal data) is never delivered, in any
+                          case type; employee cases also drop files that are not
+                          relevant. Discards go to a Discarded folder with the
+                          AI's reason. Anything the AI cannot settle goes to For
+                          Human Review, which is delivered with the case.
                         </span>
                       </span>
                     </label>,

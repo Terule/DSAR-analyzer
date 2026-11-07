@@ -1,17 +1,20 @@
 /**
- * Re-judges the files the Files AI relevance check discarded, using the current
- * rules (subject-involved files are kept without the AI, long files are
- * sampled). Used to correct a request whose discards were made by an older,
- * weaker check.
+ * Re-judges the files the Files AI discarded, using the current rules (every
+ * file is screened for confidentiality, long files are sampled, and a file the
+ * AI cannot settle goes to For Human Review). Used to correct a request whose
+ * discards were made by an older check. Files that were discarded for being
+ * confidential are judged again and discarded again; none is delivered without
+ * a fresh verdict.
  *
  *   node --import tsx scripts/maintenance/files-ai-restore.ts <case> <request>
- *       dry run: reads every discarded PDF and reports how many the keep guard
- *       would now restore. Changes nothing.
+ *       dry run: reads every discarded PDF and reports how many the old
+ *       "subject plainly involved" shortcut would have restored (it no longer
+ *       skips the AI; this is a size estimate only). Changes nothing.
  *
  *   ... --apply
  *       moves every discarded file back, forgets their verdicts, corrects the
- *       counters and runs the Files AI prepare step again. Files the guard
- *       keeps are done; the rest go to OpenAI as a Batch run.
+ *       counters and runs the Files AI prepare step again. Every file goes to
+ *       OpenAI as a Batch run (or to human review if it cannot be read).
  *
  *   ... --finish
  *       once those batches have completed: queues the normal apply job (moves
@@ -149,7 +152,7 @@ async function main() {
     if (subjectClearlyInvolved(await readPdfText(file), criteria)) involved++;
   }
   console.log(
-    `keep guard would restore ${involved}; ${discards.length - involved - missing.length} would go back to the AI; ${missing.length} missing from Discarded/`,
+    `${involved} look plainly subject-related; all ${discards.length - missing.length} readable file(s) would be re-screened by the AI; ${missing.length} missing from Discarded/`,
   );
   if (!apply) {
     console.log("Dry run. Re-run with --apply to restore and re-judge.");

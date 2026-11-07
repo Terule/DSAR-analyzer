@@ -184,6 +184,12 @@ export async function POST(request: Request) {
       }),
       // 1. Delete all child emails from the database for this case
       prisma.email.deleteMany({ where: { file_id: { in: fileIds } } }),
+      // Screening verdicts belong to the run being wiped: a new subject must
+      // be judged afresh, not inherit the old relevance verdicts.
+      prisma.filesAiVerdict.deleteMany({ where: { file_id: { in: fileIds } } }),
+      prisma.filesAiBatchRun.deleteMany({
+        where: { file_id: { in: fileIds } },
+      }),
 
       // 2a. Reset PST rows completely back to zero.
       prisma.processedFile.updateMany({
@@ -191,6 +197,7 @@ export async function POST(request: Request) {
         data: {
           status: "pending",
           ai_status: "pending",
+          mail_screen_status: "none",
           pdf_status: "pending",
           subject_name: null,
           subject_email: null,
