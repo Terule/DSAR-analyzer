@@ -6,6 +6,7 @@ import { expandArchives } from "@/lib/archive-expander";
 import { getCasePstFileIds } from "@/lib/case-utils";
 import {
   clearFilesBatchResults,
+  hasActiveJobForFilePhase,
   recordFilesBatchResult,
 } from "@/lib/control-plane/job-store";
 import { enqueueFilePhase } from "@/lib/control-plane/pipeline";
@@ -53,6 +54,33 @@ function aliases(value: string | null): string[] {
         .map((item) => item.trim())
         .filter(Boolean)
     : [];
+}
+
+/**
+ * True when the case's coordinator already moved past Extract: AI, mail
+ * screening or Render has started or is queued. A retried Extract must then do
+ * nothing, because re-running the hand-off would reset that downstream state.
+ */
+async function caseHasAdvancedPastExtract(fileId: string): Promise<boolean> {
+  const caseIds = await getCasePstFileIds(fileId);
+  const coordinatorId = [...caseIds].sort()[0];
+  if (!coordinatorId) return false;
+  const coordinator = await prisma.processedFile.findUnique({
+    where: { id: coordinatorId },
+    select: { ai_status: true, pdf_status: true, mail_screen_status: true },
+  });
+  if (
+    !coordinator ||
+    coordinator.ai_status !== "pending" ||
+    coordinator.pdf_status !== "pending" ||
+    coordinator.mail_screen_status !== "none"
+  ) {
+    return true;
+  }
+  return (
+    (await hasActiveJobForFilePhase(coordinatorId, "ai")) ||
+    (await hasActiveJobForFilePhase(coordinatorId, "render"))
+  );
 }
 
 export async function runPhaseJob(
@@ -115,7 +143,18 @@ export async function runPhaseJob(
       stagingPath: process.env.STAGING_PATH || "",
       extractedPath: process.env.EXTRACTED_PATH || "",
     });
-    if (row.status !== "analyzed" || !fs.existsSync(artifacts.rawEmlFolder)) {
+    // A worker can die after finishing extraction (the row is "completed" and
+    // the raw folder is already removed) but before reporting. The retry must
+    // not re-parse a finished row: that would redo the dedup and run a second
+    // Parse alongside the AI/Render that extraction already queued.
+    const alreadyExtracted = row.status === "completed";
+    if (alreadyExtracted && (await caseHasAdvancedPastExtract(fileId))) {
+      return { operation: "extract-already-complete" };
+    }
+    if (
+      !alreadyExtracted &&
+      (row.status !== "analyzed" || !fs.existsSync(artifacts.rawEmlFolder))
+    ) {
       // Extract never fabricates a missing Parse artifact. A fresh Parse job has
       // a new durable control-plane row because completed jobs do not dedupe.
       await prisma.processedFile.update({
@@ -125,12 +164,14 @@ export async function runPhaseJob(
       await enqueueFilePhase({ fileId, phase: "parse" });
       return { operation: "parse-recovery-scheduled" };
     }
-    const started = Date.now();
-    await extractUniqueEmails(fileId);
-    await prisma.processedFile.update({
-      where: { id: fileId },
-      data: { extract_duration_ms: { increment: Date.now() - started } },
-    });
+    if (!alreadyExtracted) {
+      const started = Date.now();
+      await extractUniqueEmails(fileId);
+      await prisma.processedFile.update({
+        where: { id: fileId },
+        data: { extract_duration_ms: { increment: Date.now() - started } },
+      });
+    }
     const caseIds = await getCasePstFileIds(fileId);
     const unfinished = await prisma.processedFile.findFirst({
       where: { id: { in: caseIds }, status: { not: "completed" } },
