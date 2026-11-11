@@ -85,7 +85,9 @@ function timeoutMsForPhase(phase: ControlPhase): number {
 function memoryMbForPhase(phase: ControlPhase): number {
   const defaults: Record<ControlPhase, number> = {
     parse: 3072,
-    extract: 1536,
+    // Client cases read every email and attachment here to start the mail
+    // screening; 1536 MB (a ~750 MB V8 heap) was exhausted at ~1.1 GB (exit 133).
+    extract: 3072,
     ai: 1024,
     render: 2048,
     files: 1536,
