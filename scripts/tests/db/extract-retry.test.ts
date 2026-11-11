@@ -105,6 +105,17 @@ describe("extract retry after the worker died post-extraction", () => {
     assert.deepEqual(await jobPhases(r.id), []);
   });
 
+  it("resumes the hand-off when the worker died while preparing the screening", async () => {
+    const r = await row({
+      status: "completed",
+      ai_status: "batch_ready",
+      mail_screen_status: "preparing",
+    });
+    const result = await runPhaseJob(extractJob(r.id));
+    assert.notEqual(result.operation, "extract-already-complete");
+    assert.ok(!(await jobPhases(r.id)).includes("parse"));
+  });
+
   it("finishes the hand-off, without a new Parse, when nothing downstream started", async () => {
     const r = await row({ status: "completed" });
     const result = await runPhaseJob(extractJob(r.id));

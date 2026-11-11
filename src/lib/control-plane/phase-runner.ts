@@ -69,6 +69,9 @@ async function caseHasAdvancedPastExtract(fileId: string): Promise<boolean> {
     where: { id: coordinatorId },
     select: { ai_status: true, pdf_status: true, mail_screen_status: true },
   });
+  // A worker that died while preparing the screening never made its items
+  // durable, so the retry must run the hand-off again (it is idempotent).
+  if (coordinator?.mail_screen_status === "preparing") return false;
   if (
     !coordinator ||
     coordinator.ai_status !== "pending" ||

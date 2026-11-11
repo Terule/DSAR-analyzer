@@ -262,6 +262,21 @@ describe("Mail screening before Render", () => {
   const payroll = pdf("Payroll Ann 80000 Bob 90000 for Jonathan Wheeler team");
   const memo = pdf("Memo to Jonathan Wheeler about the project");
 
+  it("never settles a screening that is still being prepared", async () => {
+    const { id } = await setup("client", [{ hash: "p1", body: "hello" }]);
+    // What startMailScreen leaves while it reads the emails: no items yet.
+    await prisma.processedFile.update({
+      where: { id },
+      data: { mail_screen_status: "preparing", ai_status: "batch_ready" },
+    });
+    assert.deepEqual(await settleMailScreens(), [], "must wait for the items");
+    const row = await prisma.processedFile.findUniqueOrThrow({
+      where: { id },
+    });
+    assert.equal(row.mail_screen_status, "preparing");
+    assert.equal(row.ai_status, "batch_ready");
+  });
+
   it("screens attachments, holds the AI phase open, then releases Render", async () => {
     const { id } = await setup("employee", [
       {

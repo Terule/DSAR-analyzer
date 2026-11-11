@@ -270,10 +270,14 @@ export async function startMailScreen(
     await markCaseAiCompleted(coordinatorId, elapsedMs);
     return "disabled";
   }
+  // "preparing" holds Render back (ai_status stays batch_ready) while the items
+  // are read and submitted, which takes seconds. `settleMailScreens` only looks
+  // at "screening", so it cannot mistake the not-yet-written items for "all
+  // judged" and release Render before anything was screened.
   await prisma.processedFile.update({
     where: { id: coordinatorId },
     data: {
-      mail_screen_status: "screening",
+      mail_screen_status: "preparing",
       ai_status: "batch_ready",
       ai_duration_ms: elapsedMs,
     },
@@ -296,6 +300,11 @@ export async function startMailScreen(
       },
     });
   }
+  // Items and batch runs are now durable: from here the poller may settle it.
+  await prisma.processedFile.update({
+    where: { id: coordinatorId },
+    data: { mail_screen_status: "screening" },
+  });
   if (await isFilesAiSettled(coordinatorId)) {
     await finishMailScreen(coordinatorId);
     return "completed";

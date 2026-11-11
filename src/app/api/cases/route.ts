@@ -157,7 +157,9 @@ function phaseProgress(
       total: coordinators.reduce((sum, row) => sum + row.ai_batches_total, 0),
       status: combinePhaseStatus(coordinators.map((row) => row.ai_status)),
       screening: coordinators.some(
-        (row) => row.mail_screen_status === "screening",
+        (row) =>
+          row.mail_screen_status === "screening" ||
+          row.mail_screen_status === "preparing",
       ),
     },
     render: {
