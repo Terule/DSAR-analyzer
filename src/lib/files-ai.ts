@@ -253,9 +253,8 @@ async function submitChunk(
   batchDir?: string,
 ): Promise<void> {
   const runId = randomUUID();
-  const dir = batchDir ?? path.join(process.cwd(), "batches");
-  fs.mkdirSync(dir, { recursive: true });
-  const jsonlPath = path.join(dir, `files-ai-${runId}.jsonl`);
+  const jsonlPath = runJsonlPath(runId, batchDir);
+  fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
   // The run row exists before the claim so the verdict foreign key holds.
   await prisma.filesAiBatchRun.create({
     data: { id: runId, file_id: fileId, status: "claiming" },
@@ -291,9 +290,97 @@ async function submitChunk(
       data: { batch_run_id: null },
     });
     await prisma.filesAiBatchRun.delete({ where: { id: runId } });
-    throw error;
-  } finally {
     fs.rmSync(jsonlPath, { force: true });
+    throw error;
+  }
+  // On success the request file stays on disk: it is what a failed or expired
+  // batch is resubmitted from. It is removed once the run reaches a final state.
+}
+
+/** Where a run's batch input is kept (shared `batches/` mount by default). */
+export function runJsonlPath(runId: string, batchDir?: string): string {
+  return path.join(
+    batchDir ?? path.join(process.cwd(), "batches"),
+    `files-ai-${runId}.jsonl`,
+  );
+}
+
+/** A batch OpenAI failed, expired or cancelled is resubmitted this many runs in. */
+const MAX_RUN_ATTEMPTS = 2;
+
+/**
+ * Resubmits a failed/expired/cancelled batch once with the very same requests.
+ * Past the limit, or when anything about the resubmission goes wrong, the run is
+ * failed and its files go to human review (the previous behaviour).
+ */
+async function retryOrFailRun(
+  run: {
+    id: string;
+    file_id: string;
+    attempt: number;
+    request_count: number;
+    estimated_tokens: number;
+  },
+  reason: string,
+  client: FilesAiClient,
+  batchDir?: string,
+): Promise<void> {
+  const oldPath = runJsonlPath(run.id, batchDir);
+  if (run.attempt >= MAX_RUN_ATTEMPTS || !fs.existsSync(oldPath)) {
+    await failFilesAiRun(run.id, reason);
+    return;
+  }
+  const newId = randomUUID();
+  const newPath = runJsonlPath(newId, batchDir);
+  try {
+    fs.copyFileSync(oldPath, newPath);
+    await prisma.filesAiBatchRun.create({
+      data: {
+        id: newId,
+        file_id: run.file_id,
+        status: "claiming",
+        attempt: run.attempt + 1,
+      },
+    });
+    const batchId = await client.createBatch(
+      await client.uploadBatchFile(newPath),
+    );
+    // Only once the new batch exists do the files move over, in one step.
+    await prisma.$transaction([
+      prisma.filesAiVerdict.updateMany({
+        where: { batch_run_id: run.id, verdict: null },
+        data: { batch_run_id: newId },
+      }),
+      prisma.filesAiBatchRun.update({
+        where: { id: newId },
+        data: {
+          status: "submitted",
+          openai_batch_id: batchId,
+          request_count: run.request_count,
+          estimated_tokens: run.estimated_tokens,
+          submitted_at: new Date(),
+        },
+      }),
+      prisma.filesAiBatchRun.update({
+        where: { id: run.id },
+        data: {
+          status: "failed",
+          error: `${reason} Resubmitted once.`,
+          completed_at: new Date(),
+        },
+      }),
+    ]);
+    fs.rmSync(oldPath, { force: true });
+    console.warn(
+      `[Files AI] ${reason} Resubmitted ${run.request_count} request(s) as batch ${batchId}.`,
+    );
+  } catch (error) {
+    console.warn(`[Files AI] Could not resubmit run ${run.id}: ${error}`);
+    await prisma.filesAiBatchRun.deleteMany({
+      where: { id: newId, status: "claiming" },
+    });
+    fs.rmSync(newPath, { force: true });
+    await failFilesAiRun(run.id, reason);
   }
 }
 
@@ -314,6 +401,7 @@ export async function failFilesAiRun(
     where: { id: runId },
     data: { status: "failed", error, completed_at: new Date() },
   });
+  fs.rmSync(runJsonlPath(runId), { force: true });
 }
 
 /**
@@ -338,6 +426,7 @@ export async function reviewUnsubmittedFiles(fileId: string): Promise<number> {
 export async function pollFilesAiBatches(
   fileId: string,
   client: FilesAiClient,
+  batchDir?: string,
 ): Promise<void> {
   const mode = await filesAiModeFor(fileId);
   const runs = await prisma.filesAiBatchRun.findMany({
@@ -350,7 +439,12 @@ export async function pollFilesAiBatches(
   for (const run of runs) {
     const batch = await client.retrieveBatch(run.openai_batch_id as string);
     if (["failed", "expired", "cancelled"].includes(batch.status)) {
-      await failFilesAiRun(run.id, `OpenAI batch ${batch.status}.`);
+      await retryOrFailRun(
+        run,
+        `OpenAI batch ${batch.status}.`,
+        client,
+        batchDir,
+      );
       continue;
     }
     if (batch.status !== "completed") continue;
@@ -411,6 +505,7 @@ export async function pollFilesAiBatches(
       where: { id: run.id },
       data: { status: "completed", completed_at: new Date() },
     });
+    fs.rmSync(runJsonlPath(run.id, batchDir), { force: true });
   }
 }
 

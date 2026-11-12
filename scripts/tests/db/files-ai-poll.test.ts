@@ -58,7 +58,7 @@ describe("Files AI poller", () => {
 
   it("polls submitted runs and applies their results", async () => {
     const { fileId } = await makeRun({ ageMinutes: 1, batchId: "a" });
-    const polled = await pollFilesAiRuns(async () => doneClient);
+    const polled = await pollFilesAiRuns(async () => doneClient, fileIds);
     assert.ok(polled >= 1);
     const row = await prisma.filesAiVerdict.findFirstOrThrow({
       where: { file_id: fileId },
@@ -68,7 +68,7 @@ describe("Files AI poller", () => {
 
   it("leaves a recent run alone when there is no OpenAI key", async () => {
     const { fileId, runId } = await makeRun({ ageMinutes: 1, batchId: "b" });
-    await pollFilesAiRuns(noKey);
+    await pollFilesAiRuns(noKey, fileIds);
     const run = await prisma.filesAiBatchRun.findUniqueOrThrow({
       where: { id: runId },
     });
@@ -85,7 +85,7 @@ describe("Files AI poller", () => {
 
   it("gives up on a stale run when there is still no key, and sends its files to human review", async () => {
     const { fileId, runId } = await makeRun({ ageMinutes: 90, batchId: "c" });
-    await pollFilesAiRuns(noKey);
+    await pollFilesAiRuns(noKey, fileIds);
     const run = await prisma.filesAiBatchRun.findUniqueOrThrow({
       where: { id: runId },
     });
@@ -136,7 +136,7 @@ describe("Files AI poller", () => {
         },
       ],
     });
-    await pollFilesAiRuns(async () => doneClient);
+    await pollFilesAiRuns(async () => doneClient, fileIds);
     const runs = await prisma.filesAiBatchRun.findMany({
       where: { file_id: fileId },
     });

@@ -16,11 +16,15 @@ const STALE_RUN_MS = 30 * 60_000;
  */
 export async function pollFilesAiRuns(
   clientFactory: () => Promise<FilesAiClient> = openAiFilesAiClient,
+  /** Limits the poll to these Files rows. Tests use it so they never touch real runs. */
+  onlyFileIds?: string[],
 ): Promise<number> {
+  const scope = onlyFileIds ? { file_id: { in: onlyFileIds } } : {};
   // A run whose submitter died between creating the run and submitting it has
   // no batch to wait for: give up on it so the Files AI step can settle.
   const stuck = await prisma.filesAiBatchRun.findMany({
     where: {
+      ...scope,
       status: "claiming",
       created_at: { lt: new Date(Date.now() - STALE_RUN_MS) },
     },
@@ -35,6 +39,7 @@ export async function pollFilesAiRuns(
 
   const runs = await prisma.filesAiBatchRun.findMany({
     where: {
+      ...scope,
       status: { in: ["submitted", "processing"] },
       openai_batch_id: { not: null },
     },

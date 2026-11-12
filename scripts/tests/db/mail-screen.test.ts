@@ -365,7 +365,13 @@ describe("Mail screening before Render", () => {
     ]);
     const client = new FakeClient();
     await startMailScreen(id, 0, client);
+    // The first failure is resubmitted once; only a second one sends the
+    // attachment to a person.
     client.statuses.set(client.batches[0], { status: "failed" });
+    await pollFilesAiBatches(id, client);
+    assert.equal(client.batches.length, 2, "resubmitted once");
+    assert.deepEqual(await settleMailScreens(), [], "still waiting");
+    client.statuses.set(client.batches[1], { status: "failed" });
     await pollFilesAiBatches(id, client);
     await settleMailScreens();
 

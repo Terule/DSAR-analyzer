@@ -228,6 +228,9 @@ model FilesAiBatchRun {
   status         String   @default("submitted")
   request_count  Int      @default(0)
   estimated_tokens Int    @default(0)
+  // 1 = first submission; 2 = the one automatic resubmission of a batch OpenAI
+  // failed, expired or cancelled.
+  attempt        Int      @default(1)
   error          String?
   created_at     DateTime @default(now())
   submitted_at   DateTime?
