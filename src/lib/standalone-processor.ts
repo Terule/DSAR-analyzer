@@ -73,7 +73,7 @@ export async function copyUnconvertedStandaloneFiles(input: {
   /**
    * The subject's search terms. When given, a large workbook that cannot mention
    * the subject is not delivered, exactly as the normal conversion would have
-   * dropped it; omit for client cases, which keep everything.
+   * dropped it (every case type).
    */
   criteria?: string[];
 }): Promise<UnconvertedFilesResult> {
@@ -1245,14 +1245,14 @@ export async function runStandaloneBatch(
         // what the conversion would have dropped, in seconds. When the scan
         // cannot tell, the normal conversion runs.
         if (
-          !bypassFilters &&
+          criteria.length > 0 &&
           shouldPrescreenSpreadsheet(
             ext,
             fs.statSync(filePath).size,
             prescreenThresholdMb(),
           )
         ) {
-          const scan = await scanXlsxForMentions(filePath, renderingCriteria);
+          const scan = await scanXlsxForMentions(filePath, criteria);
           if (scan.status === "not-mentioned") {
             console.log(
               `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: the subject is not mentioned anywhere in this large workbook (streamed scan).`,
@@ -1261,11 +1261,16 @@ export async function runStandaloneBatch(
             continue;
           }
         }
+        // Spreadsheets are filtered by the subject in every case type, client
+        // included: only the rows that mention the subject are delivered (whole
+        // rows), and a workbook that never mentions it is dropped. Client cases
+        // still skip the privileged-keyword exclusion (`bypassFilters`): the AI
+        // screening decides on confidentiality there.
         const outcome = await convertOfficeInWorker(
           "excel",
           filePath,
           pdfOutputPath,
-          renderingCriteria,
+          criteria,
           seqName,
           bypassFilters,
         );

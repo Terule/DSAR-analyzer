@@ -419,19 +419,14 @@ export async function runPhaseJob(
     }
     // A file that could not be converted is delivered as-is for review, except a
     // large workbook that cannot mention the subject, which the normal
-    // conversion would have dropped. Client cases keep everything.
-    const fallbackRequest = row.case_request_id
-      ? await prisma.caseRequest.findUnique({
-          where: { id: row.case_request_id },
-          select: { case: { select: { case_type: true } } },
-        })
-      : null;
-    const fallbackCriteria =
-      fallbackRequest?.case.case_type === "client"
-        ? undefined
-        : [subjectName, subjectPersonalEmail || "", ...aliases(subjectAliases)]
-            .map((term) => term.trim().toLowerCase())
-            .filter(Boolean);
+    // conversion would have dropped (client cases included).
+    const fallbackCriteria = [
+      subjectName,
+      subjectPersonalEmail || "",
+      ...aliases(subjectAliases),
+    ]
+      .map((term) => term.trim().toLowerCase())
+      .filter(Boolean);
     const fallback = await copyUnconvertedStandaloneFiles({
       filePaths: batchPaths,
       messagesDir: path.join(outputBase, requestPath, "Messages"),
