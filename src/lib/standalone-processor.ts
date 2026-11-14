@@ -1631,28 +1631,25 @@ export async function runStandaloneBatch(
         }
       }
 
-      // Client images and formats the renderer cannot handle are still
-      // deliverables: deduplication is the only client-case exclusion.
+      // Formats the renderer cannot handle (video, images, audio...) are
+      // never delivered, in any case type.
       else {
-        if (!bypassFilters) {
-          console.log(
-            `[Standalone Engine] Skipping unsupported format: ${file}`,
-          );
-          continue;
-        }
-        const destination = path.join(
-          deliverablesDirDocuments,
-          `Document ${fileHash.slice(0, 16)}${ext}`,
-        );
-        await fs.promises.copyFile(filePath, destination);
-        success = true;
-        producedPath = destination;
+        console.log(`[Standalone Engine] Skipping unsupported format: ${file}`);
+        skippedCount++;
+        continue;
       }
 
       // A client case must still deliver a unique source that cannot be
       // rendered (for example a malformed message). Password-protected files never
       // get here: they are discarded up front in every case type.
       // Keep it in its natural output category with a collision-safe name.
+      // A spreadsheet is never delivered as an original: when it renders
+      // nothing, the subject is not in it (or it duplicates another), so it is
+      // dropped.
+      if (!success && (ext === ".xlsx" || ext === ".xls" || ext === ".csv")) {
+        skippedCount++;
+        continue;
+      }
       if (bypassFilters && !success) {
         const fallbackPath = path.join(targetDir, `${seqName}${ext}`);
         await fs.promises.copyFile(filePath, fallbackPath);
