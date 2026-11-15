@@ -2,6 +2,10 @@ import crypto from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { runtimeCredentials } from "./credentials";
+import {
+  isOneTrustDeliverablePath,
+  renumberDeliverables,
+} from "./deliverable-sequence";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
@@ -366,8 +370,18 @@ async function collectFiles(root: string) {
         continue;
       const localPath = path.join(directory, entry.name);
       const relativePath = path.join(relative, entry.name);
-      if (entry.isDirectory()) await visit(localPath, relativePath);
-      else if (entry.isFile()) {
+      // Allowlist: only Emails/, Messages/ and Documents/ are ever sent, never
+      // Discarded/, For Human Review/, Unconverted/ or hidden folders.
+      if (entry.isDirectory()) {
+        const top = relativePath.split(path.sep)[0];
+        if (
+          !["Emails", "Messages", "Documents"].includes(top) ||
+          entry.name.startsWith(".") ||
+          entry.name === "Unconverted"
+        )
+          continue;
+        await visit(localPath, relativePath);
+      } else if (entry.isFile() && isOneTrustDeliverablePath(relativePath)) {
         const stat = await fs.stat(localPath);
         output.push({
           localPath,
@@ -627,6 +641,17 @@ export async function sendCaseToOneTrust(caseId: string) {
       .catch(() => undefined);
   }, CLAIM_HEARTBEAT_MS);
   try {
+    // Names must be a gapless sequence after manual additions or deletions.
+    // Renaming files OneTrust already holds would upload them a second time
+    // under their new names, so it only happens before the first upload.
+    const alreadySent = await prisma.oneTrustUploadArtifact.count({
+      where: {
+        case_id: caseId,
+        OR: [{ status: "completed" }, { remote_file_id: { not: null } }],
+      },
+    });
+    if (alreadySent === 0)
+      renumberDeliverables(item.requests[0].deliverable_path);
     const files = await collectFiles(item.requests[0].deliverable_path);
     const names = attachmentNames(files, item.requests[0].name);
     for (const [index, file] of files.entries()) {
