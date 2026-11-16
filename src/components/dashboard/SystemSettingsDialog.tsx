@@ -557,8 +557,8 @@ export function SystemSettingsDialog({
                     </div>,
                   )}
                   {section(
-                    "Client request defaults",
-                    "AIDA uses these saved values for every Client case sent to OneTrust.",
+                    "Client web forms",
+                    "Each web form carries its own field mapping, Results Summary label, language and user type. AIDA uses the form chosen for each Client case sent to OneTrust.",
                     <div className="grid gap-x-5 gap-y-6 lg:grid-cols-12">
                       <div className="lg:col-span-12">
                         <p className="mb-3 text-sm font-semibold text-slate-200">
@@ -566,40 +566,6 @@ export function SystemSettingsDialog({
                         </p>
                         <OneTrustForms />
                       </div>
-                      {input(
-                        "oneTrustPublicWebFormUrl",
-                        "Published web-form URL",
-                        {
-                          type: "url",
-                          hint: "Any published form of the portal. AIDA swaps in the chosen form's ID.",
-                          className: "lg:col-span-6",
-                        },
-                      )}
-                      {input(
-                        "oneTrustDateRaisedFieldKey",
-                        "Date Raised field key",
-                        {
-                          hint: "AIDA sends today's date to this required field.",
-                          className: "lg:col-span-6",
-                        },
-                      )}
-                      {input("oneTrustSystemLabel", "Results Summary label", {
-                        hint: "The source name shown for uploaded deliverables.",
-                        className: "lg:col-span-6",
-                      })}
-                      {input("oneTrustLanguage", "Language", {
-                        hint: "Default language sent with the request.",
-                        className: "lg:col-span-4",
-                      })}
-                      {input("oneTrustRequestType", "Request type", {
-                        hint: "AIDA creates DSAR requests only.",
-                        className: "lg:col-span-4",
-                        disabled: true,
-                      })}
-                      {input("oneTrustSubjectType", "Client user type key", {
-                        hint: "Customer = SubjectType3.",
-                        className: "lg:col-span-4",
-                      })}
                       <div className="lg:col-span-12">
                         <p className="text-sm font-semibold text-slate-200">
                           Required fields sent from the case
@@ -617,7 +583,7 @@ export function SystemSettingsDialog({
                             ["Email", "Configured subject email"],
                             [
                               "Date Raised",
-                              "Today's date, sent through the field key above",
+                              "Today's date, sent through the form's Date Raised field key",
                             ],
                           ].map(([label, detail]) => (
                             <div

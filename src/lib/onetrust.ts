@@ -23,13 +23,11 @@ type Settings = Awaited<ReturnType<typeof getAiBatchSettings>>;
 function requiredSettings(settings: Settings) {
   if (
     !settings.oneTrustTenantUrl ||
-    !settings.oneTrustPublicWebFormUrl ||
-    !settings.oneTrustDateRaisedFieldKey ||
     !settings.hasOneTrustClientId ||
     !settings.hasOneTrustClientSecret
   ) {
     throw new Error(
-      "Configure OneTrust tenant, OAuth credentials, template, and Date Raised field key in System Settings.",
+      "Configure the OneTrust tenant URL and OAuth credentials in System Settings.",
     );
   }
 }
@@ -119,45 +117,62 @@ interface OneTrustFormConfig {
   id: string;
   templateId: string;
   apiToken: string;
-  publicUrl: string;
 }
 
-/** The web form picked for a case: its saved template ID and API token. */
-async function loadForm(
-  settings: Settings,
-  formId?: string,
-): Promise<OneTrustFormConfig> {
+type OneTrustFormRow = Awaited<
+  ReturnType<typeof prisma.oneTrustForm.findMany>
+>[number];
+
+/** The saved form for a case: the chosen one, or the only one there is. */
+async function findForm(formId?: string | null) {
   const forms = await prisma.oneTrustForm.findMany({
     orderBy: { created_at: "asc" },
   });
-  if (!forms.length) {
-    throw new Error(
-      "Add a OneTrust web form (name, ID and API token) in System Settings first.",
-    );
-  }
-  const form = formId
-    ? forms.find((candidate) => candidate.id === formId)
-    : forms.length === 1
-      ? forms[0]
-      : undefined;
+  if (formId) return forms.find((candidate) => candidate.id === formId);
+  return forms.length === 1 ? forms[0] : undefined;
+}
+
+/** Each web form carries its own mapping, label, language and user type. */
+function withFormSettings(
+  settings: Settings,
+  form: OneTrustFormRow | undefined,
+): Settings {
+  if (!form) return settings;
+  return {
+    ...settings,
+    oneTrustDateRaisedFieldKey: form.date_raised_field_key,
+    oneTrustSystemLabel: form.system_label,
+    oneTrustLanguage: form.language,
+    oneTrustSubjectType: form.subject_type,
+  };
+}
+
+/**
+ * The privacy portal lives next to the tenant: `acme.my.onetrust.com` serves
+ * its request API at `acme-privacy.my.onetrust.com`.
+ */
+function portalOrigin(settings: Settings): string {
+  const tenant = new URL(settings.oneTrustTenantUrl);
+  const [first, ...rest] = tenant.hostname.split(".");
+  return `${tenant.protocol}//${[`${first}-privacy`, ...rest].join(".")}`;
+}
+
+async function loadForm(formId?: string | null): Promise<OneTrustFormConfig> {
+  const form = await findForm(formId);
   if (!form) {
+    const count = await prisma.oneTrustForm.count();
     throw new Error(
-      formId
-        ? "The selected OneTrust web form no longer exists."
-        : "Choose which OneTrust web form to use.",
+      count === 0
+        ? "Add a OneTrust web form (name, ID and API token) in System Settings first."
+        : formId
+          ? "The selected OneTrust web form no longer exists."
+          : "Choose which OneTrust web form to use.",
     );
   }
-  // The portal path is shared by every form; only the last segment, the
-  // template ID, changes.
-  const publicUrl = new URL(settings.oneTrustPublicWebFormUrl);
-  const segments = publicUrl.pathname.split("/").filter(Boolean);
-  segments[segments.length - 1] = form.template_id;
-  publicUrl.pathname = `/${segments.join("/")}`;
   return {
     id: form.id,
     templateId: form.template_id,
     apiToken: await decryptSetting(form.api_token_encrypted),
-    publicUrl: publicUrl.toString(),
   };
 }
 
@@ -172,9 +187,8 @@ async function createRequest(
   const { firstName, lastName } = nameParts(item.subject_name);
   if (!item.subject_email.trim())
     throw new Error("The client case needs a subject email.");
-  const formConfig = await loadForm(settings, formId);
-  const form = await publishedWebForm(formConfig);
-  await createFormRequest(formConfig, {
+  const formConfig = await loadForm(formId);
+  await createFormRequest(settings, formConfig, {
     firstName,
     lastName,
     email: item.subject_email,
@@ -203,8 +217,6 @@ async function createRequest(
     attachments: null,
     identityTokens: {},
     requestTraceId: crypto.randomUUID(),
-    webformConfig: form,
-    jwtToken: String(form.jwtToken || ""),
   });
   // The public web form accepts the DSR before the authenticated API exposes
   // its reference ID and UUID. Persist that state, then poll before starting
@@ -313,64 +325,19 @@ async function waitForPublicRequestIdentity(
   return null;
 }
 
-async function publishedWebForm(
-  formConfig: OneTrustFormConfig,
-): Promise<Record<string, unknown>> {
-  const response = await fetch(formConfig.publicUrl, {
-    headers: { Accept: "text/html" },
-    cache: "no-store",
-  });
-  const html = await response.text();
-  if (!response.ok) {
-    throw new Error(
-      `Unable to load the published OneTrust web form (${response.status}).`,
-    );
-  }
-  const state = html.match(
-    /<script id="dsar-components-state" type="application\/json">([\s\S]*?)<\/script>/,
-  )?.[1];
-  if (!state) {
-    throw new Error(
-      "The published OneTrust web form did not provide its request configuration.",
-    );
-  }
-  let parsed: Record<string, { body?: Record<string, unknown> }>;
-  try {
-    parsed = JSON.parse(
-      state
-        .replaceAll("&q;", '"')
-        .replaceAll("&a;", "&")
-        .replaceAll("&l;", "<")
-        .replaceAll("&g;", ">"),
-    );
-  } catch {
-    throw new Error(
-      "The published OneTrust web form returned an invalid request configuration.",
-    );
-  }
-  const entry = Object.entries(parsed).find(([key]) =>
-    key.includes(`/webform/${formConfig.templateId}/publish?`),
-  )?.[1];
-  if (!entry?.body?.jwtToken) {
-    throw new Error(
-      "The published OneTrust web form did not provide a usable request token.",
-    );
-  }
-  return entry.body;
-}
-
 /**
  * Creates the DSR through the web form's asynchronous request-creation API
  * (Integrate > API tab), authenticated with the form's JWT in the `accessToken`
  * header. Unlike the public form endpoint it does not require a captcha.
  */
 async function createFormRequest(
+  settings: Settings,
   formConfig: OneTrustFormConfig,
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const endpoint = new URL(
     `/request/v1/createv2request/${encodeURIComponent(formConfig.templateId)}`,
-    formConfig.publicUrl,
+    portalOrigin(settings),
   );
   const response = await fetch(endpoint, {
     method: "POST",
@@ -574,7 +541,11 @@ export async function sendCaseToOneTrust(caseId: string, formId?: string) {
       "Complete the client case's single request before sending it to OneTrust.",
     );
   }
-  const settings = await getAiBatchSettings();
+  const effectiveFormId = item.onetrust_form_id || formId;
+  const settings = withFormSettings(
+    await getAiBatchSettings(),
+    await findForm(effectiveFormId),
+  );
   requiredSettings(settings);
   const token = await accessToken(settings);
   const staleBefore = new Date(Date.now() - CLAIM_STALE_MS);
@@ -646,7 +617,7 @@ export async function sendCaseToOneTrust(caseId: string, formId?: string) {
     }
     let identity: OneTrustRequestIdentity;
     try {
-      identity = await createRequest(caseId, settings, token, formId);
+      identity = await createRequest(caseId, settings, token, effectiveFormId);
     } catch (error) {
       const message =
         error instanceof Error

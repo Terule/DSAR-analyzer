@@ -381,6 +381,10 @@ model OneTrustForm {
   name                String
   template_id         String
   api_token_encrypted String
+  date_raised_field_key String @default("formField81")
+  system_label        String   @default("AIDA")
+  language            String   @default("en-gb")
+  subject_type        String   @default("SubjectType3")
   created_at          DateTime @default(now())
   updated_at          DateTime @updatedAt
 

@@ -9,6 +9,10 @@ interface FormSummary {
   id: string;
   name: string;
   templateId: string;
+  dateRaisedFieldKey: string;
+  systemLabel: string;
+  language: string;
+  subjectType: string;
 }
 
 interface Draft {
@@ -16,7 +20,24 @@ interface Draft {
   name: string;
   templateId: string;
   apiToken: string;
+  dateRaisedFieldKey: string;
+  systemLabel: string;
+  language: string;
+  subjectType: string;
 }
+
+const EMPTY_DRAFT: Draft = {
+  id: null,
+  name: "",
+  templateId: "",
+  apiToken: "",
+  dateRaisedFieldKey: "formField81",
+  systemLabel: "AIDA",
+  language: "en-gb",
+  subjectType: "SubjectType3",
+};
+
+type DraftKey = Exclude<keyof Draft, "id">;
 
 const fieldClass =
   "w-full min-w-0 rounded-xl border border-slate-600 bg-slate-950/80 px-3 py-2.5 text-sm text-slate-100 outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/30";
@@ -56,11 +77,7 @@ export function OneTrustForms() {
         {
           method: draft.id ? "PUT" : "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            name: draft.name,
-            templateId: draft.templateId,
-            apiToken: draft.apiToken,
-          }),
+          body: JSON.stringify({ ...draft, id: undefined }),
         },
       );
       const body = (await response.json().catch(() => ({}))) as {
@@ -97,8 +114,8 @@ export function OneTrustForms() {
 
   const field = (
     label: string,
-    key: "name" | "templateId" | "apiToken",
-    options: { secret?: boolean; placeholder?: string } = {},
+    key: DraftKey,
+    options: { secret?: boolean; placeholder?: string; hint?: string } = {},
   ) => (
     <label className="grid min-w-0 content-start gap-2">
       <span className="text-sm font-semibold text-slate-200">{label}</span>
@@ -116,6 +133,9 @@ export function OneTrustForms() {
         }
         className={fieldClass}
       />
+      {options.hint && (
+        <span className="text-xs leading-5 text-slate-500">{options.hint}</span>
+      )}
     </label>
   );
 
@@ -133,14 +153,7 @@ export function OneTrustForms() {
               aria-label={`Edit ${form.name}`}
               title="Edit"
               className="rounded-lg p-1.5 text-slate-400 transition hover:bg-slate-700 hover:text-white"
-              onClick={() =>
-                setDraft({
-                  id: form.id,
-                  name: form.name,
-                  templateId: form.templateId,
-                  apiToken: "",
-                })
-              }
+              onClick={() => setDraft({ ...form, apiToken: "" })}
             >
               <Pencil className="size-4" />
             </button>
@@ -152,9 +165,7 @@ export function OneTrustForms() {
             variant="outline"
             aria-label="Add web form"
             title="Add web form"
-            onClick={() =>
-              setDraft({ id: null, name: "", templateId: "", apiToken: "" })
-            }
+            onClick={() => setDraft({ ...EMPTY_DRAFT })}
           >
             <Plus data-icon="inline-start" />
             Add
@@ -175,6 +186,18 @@ export function OneTrustForms() {
             {field("Token", "apiToken", {
               secret: true,
               placeholder: draft.id ? "•••••••• (unchanged)" : undefined,
+            })}
+          </div>
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            {field("Date Raised field key", "dateRaisedFieldKey", {
+              hint: "Receives today's date.",
+            })}
+            {field("Results Summary label", "systemLabel", {
+              hint: "Source name for uploaded files.",
+            })}
+            {field("Language", "language")}
+            {field("Client user type key", "subjectType", {
+              hint: "Customer = SubjectType3.",
             })}
           </div>
           <div className="flex flex-wrap items-center gap-2">

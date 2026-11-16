@@ -1,5 +1,10 @@
 import { NextResponse } from "next/server";
 import { encryptSetting } from "@/lib/credentials";
+import {
+  formColumns,
+  type OneTrustFormInput,
+  publicForm,
+} from "@/lib/onetrust-forms";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -10,15 +15,10 @@ export async function PUT(
   context: { params: Promise<{ formId: string }> },
 ) {
   const { formId } = await context.params;
-  const body = (await request.json().catch(() => ({}))) as {
-    name?: string;
-    templateId?: string;
-    apiToken?: string;
-  };
-  const name = body.name?.trim();
-  const templateId = body.templateId?.trim();
+  const body = (await request.json().catch(() => ({}))) as OneTrustFormInput;
+  const columns = formColumns(body);
   const apiToken = body.apiToken?.trim();
-  if (!name || !templateId) {
+  if (!columns.name || !columns.template_id) {
     return NextResponse.json(
       { error: "Name and ID are required." },
       { status: 400 },
@@ -27,8 +27,7 @@ export async function PUT(
   const result = await prisma.oneTrustForm.updateMany({
     where: { id: formId },
     data: {
-      name,
-      template_id: templateId,
+      ...columns,
       ...(apiToken
         ? { api_token_encrypted: await encryptSetting(apiToken) }
         : {}),
@@ -37,7 +36,8 @@ export async function PUT(
   if (result.count === 0) {
     return NextResponse.json({ error: "Form not found." }, { status: 404 });
   }
-  return NextResponse.json({ form: { id: formId, name, templateId } });
+  const form = await prisma.oneTrustForm.findUnique({ where: { id: formId } });
+  return NextResponse.json({ form: form ? publicForm(form) : null });
 }
 
 export async function DELETE(
