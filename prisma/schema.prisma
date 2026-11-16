@@ -385,7 +385,7 @@ model OneTrustForm {
   date_raised_field_key String @default("formField81")
   system_label        String   @default("AIDA")
   language            String   @default("en-gb")
-  subject_type        String   @default("SubjectType3")
+  subject_type        String   @default("Customer")
   created_at          DateTime @default(now())
   updated_at          DateTime @updatedAt
 
