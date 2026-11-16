@@ -123,6 +123,7 @@ export async function configureManagedCase(
     subjectEmail: string;
     personalEmail?: string;
     aliases?: string[];
+    matterNumbers?: string;
   },
 ) {
   if (!input.subjectName.trim() || !input.subjectEmail.trim()) {
@@ -143,6 +144,13 @@ export async function configureManagedCase(
       subject_name: input.subjectName.trim(),
       subject_email: input.subjectEmail.trim(),
       subject_personal_email: input.personalEmail?.trim() || null,
+      // Free text for OneTrust's Matter Number field only; AIDA never reads it.
+      matter_numbers:
+        (input.matterNumbers || "")
+          .split(",")
+          .map((item) => item.trim())
+          .filter(Boolean)
+          .join(", ") || null,
       subject_aliases:
         (input.aliases || [])
           .map((item) => item.trim())

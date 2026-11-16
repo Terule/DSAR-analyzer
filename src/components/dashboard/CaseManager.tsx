@@ -109,6 +109,7 @@ const initialConfiguration = {
   subjectEmail: "",
   personalEmail: "",
   aliases: "",
+  matterNumbers: "",
 };
 const scopeOptions: { value: Scope; label: string; description: string }[] = [
   { value: "mail", label: "Mail", description: "PST and Emails" },
@@ -1545,6 +1546,21 @@ export function CaseManager() {
                       setConfiguration({
                         ...configuration,
                         personalEmail: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label className="grid gap-1.5 text-sm font-semibold text-slate-200 sm:col-span-2">
+                  Matter numbers{" "}
+                  <span className="font-normal text-slate-500">Optional</span>
+                  <input
+                    className="rounded-xl border border-slate-600 bg-slate-950/80 px-3 py-2.5 font-normal outline-none transition focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/30"
+                    placeholder="Comma-separated; only sent to OneTrust"
+                    value={configuration.matterNumbers}
+                    onChange={(event) =>
+                      setConfiguration({
+                        ...configuration,
+                        matterNumbers: event.target.value,
                       })
                     }
                   />

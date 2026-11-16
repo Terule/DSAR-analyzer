@@ -18,7 +18,10 @@ const REQUEST_VISIBILITY_POLL_INTERVAL_MS = 2_000;
 const CLAIM_HEARTBEAT_MS = 30_000;
 const CLAIM_STALE_MS = 5 * 60_000;
 /** Display name of the request type AIDA creates, as the form API expects. */
-const OT_REQUEST_TYPE = "Info Request";
+const OT_REQUEST_TYPE = "DSAR";
+/** The form asks for these in AIDA-created requests; the user cannot pick them. */
+const OT_COUNTRY = "United Kingdom";
+const OT_ON_CF_GR = "No";
 // OneTrust creates requests asynchronously. A request it accepted may take a
 // while to show up, so for this long a saved trace ID counts as "created, not
 // visible yet" and no second request is made.
@@ -54,7 +57,13 @@ function nameParts(fullName: string) {
       "The client case needs both the subject's first name and surname.",
     );
   }
-  return { firstName: parts[0], lastName: parts.slice(1).join(" ") };
+  // Two words are first name and surname; with more, the words in between are
+  // the middle name(s).
+  return {
+    firstName: parts[0],
+    middleNames: parts.slice(1, -1).join(" "),
+    lastName: parts[parts.length - 1],
+  };
 }
 
 function currentDate(): string {
@@ -198,7 +207,7 @@ async function createRequest(
 ): Promise<OneTrustRequestIdentity> {
   const item = await prisma.managedCase.findUnique({ where: { id: caseId } });
   if (!item) throw new Error("Case not found.");
-  const { firstName, lastName } = nameParts(item.subject_name);
+  const { firstName, middleNames, lastName } = nameParts(item.subject_name);
   if (!item.subject_email.trim())
     throw new Error("The client case needs a subject email.");
   const formConfig = await loadForm(formId);
@@ -213,10 +222,13 @@ async function createRequest(
     subjectTypes: [settings.oneTrustSubjectType],
     language: settings.oneTrustLanguage,
     additionalData: {
+      country: OT_COUNTRY,
       [settings.oneTrustDateRaisedFieldKey]: currentDate(),
+      ...(middleNames ? { formField78: middleNames } : {}),
+      ...(item.matter_numbers ? { loyaltyId: item.matter_numbers } : {}),
       requestDetails: "No additional request details provided.",
     },
-    multiselectFields: {},
+    multiselectFields: { formField80: [OT_ON_CF_GR] },
     requestTraceId,
   });
   // Keep OneTrust's own trace ID (or ours) before anything else: it proves the
