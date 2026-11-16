@@ -361,6 +361,10 @@ async function creationState(
     };
     const status = String(body.creationstatus || body.creationStatus || "");
     const detail = String(body.exceptionDescription || "").trim();
+    // OneTrust words "not finished yet" as an exceptionDescription too
+    // ("Request creation is either under progress or it is not processed").
+    if (/under progress|not processed|in progress|pending/i.test(detail))
+      return { state: "pending" };
     if (/fail|error/i.test(status) || (detail && !/success/i.test(status))) {
       return {
         state: "failed",
