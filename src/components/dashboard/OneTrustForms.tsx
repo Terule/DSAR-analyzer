@@ -34,7 +34,7 @@ const EMPTY_DRAFT: Draft = {
   dateRaisedFieldKey: "formField81",
   systemLabel: "AIDA",
   language: "en-gb",
-  subjectType: "SubjectType3",
+  subjectType: "Customer",
 };
 
 type DraftKey = Exclude<keyof Draft, "id">;
@@ -196,8 +196,8 @@ export function OneTrustForms() {
               hint: "Source name for uploaded files.",
             })}
             {field("Language", "language")}
-            {field("Client user type key", "subjectType", {
-              hint: "Customer = SubjectType3.",
+            {field("Client user type", "subjectType", {
+              hint: "Name as in OneTrust, e.g. Customer.",
             })}
           </div>
           <div className="flex flex-wrap items-center gap-2">

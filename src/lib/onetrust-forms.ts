@@ -12,7 +12,7 @@ export const ONETRUST_FORM_DEFAULTS = {
   dateRaisedFieldKey: "formField81",
   systemLabel: "AIDA",
   language: "en-gb",
-  subjectType: "SubjectType3",
+  subjectType: "Customer",
 } as const;
 
 /** Form fields as stored, with blanks replaced by the defaults. */

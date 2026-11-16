@@ -17,6 +17,8 @@ const REQUEST_VISIBILITY_POLL_INTERVAL_MS = 2_000;
 // belongs to a process that died and may be taken over.
 const CLAIM_HEARTBEAT_MS = 30_000;
 const CLAIM_STALE_MS = 5 * 60_000;
+/** Display name of the request type AIDA creates, as the form API expects. */
+const OT_REQUEST_TYPE = "Info Request";
 // OneTrust creates requests asynchronously. A request it accepted may take a
 // while to show up, so for this long a saved trace ID counts as "created, not
 // visible yet" and no second request is made.
@@ -201,34 +203,20 @@ async function createRequest(
     throw new Error("The client case needs a subject email.");
   const formConfig = await loadForm(formId);
   const requestTraceId = crypto.randomUUID();
+  // Body shape from the web form's Integrate > API "Expected Payload": request
+  // and user types go by display name, and no value may be null.
   const accepted = await createFormRequest(settings, formConfig, {
     firstName,
     lastName,
     email: item.subject_email,
-    requestTypes: ["RequestType3"],
+    requestTypes: [OT_REQUEST_TYPE],
     subjectTypes: [settings.oneTrustSubjectType],
+    language: settings.oneTrustLanguage,
     additionalData: {
-      formField78: "",
-      loyaltyId: "",
-      infoRequestHelpText: "",
-      howWeUseHelpText: "",
-      vendorId: "",
-      employeeId: "",
-      moreDetailsHelpText: "",
       [settings.oneTrustDateRaisedFieldKey]: currentDate(),
       requestDetails: "No additional request details provided.",
     },
     multiselectFields: {},
-    daysToRespond: "",
-    language: settings.oneTrustLanguage,
-    botDetectCaptcha: false,
-    googleRecaptcha: false,
-    captchaId: "",
-    captchaCode: "",
-    dataLocalizationEnabled: false,
-    published: true,
-    attachments: null,
-    identityTokens: {},
     requestTraceId,
   });
   // Keep OneTrust's own trace ID (or ours) before anything else: it proves the
@@ -254,6 +242,7 @@ async function createRequest(
     firstName,
     lastName,
     item.subject_email,
+    { caseId, traceId },
   );
   if (!identity)
     throw new RequestPendingError(
@@ -324,15 +313,85 @@ async function resolvePublicRequestIdentity(
   };
 }
 
+type CreationState =
+  | { state: "pending" }
+  | { state: "success" }
+  | { state: "failed"; detail: string };
+
+/**
+ * Asks OneTrust how the asynchronous creation went
+ * (GET /api/datasubject/v2/requestqueues/status/{requestTraceId}). Status
+ * values are not documented, so only an explicit failure or an
+ * `exceptionDescription` counts as failed; anything unclear stays pending.
+ */
+async function creationState(
+  settings: Settings,
+  token: string,
+  traceId: string,
+): Promise<CreationState> {
+  if (!/^[0-9a-f-]{36}$/i.test(traceId)) return { state: "pending" };
+  try {
+    const response = await fetch(
+      `${settings.oneTrustTenantUrl}/api/datasubject/v2/requestqueues/status/${encodeURIComponent(traceId)}`,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/json",
+        },
+        cache: "no-store",
+      },
+    );
+    if (!response.ok) return { state: "pending" };
+    const body = (await response.json().catch(() => ({}))) as {
+      creationstatus?: string;
+      creationStatus?: string;
+      exceptionDescription?: string;
+    };
+    const status = String(body.creationstatus || body.creationStatus || "");
+    const detail = String(body.exceptionDescription || "").trim();
+    if (/fail|error/i.test(status) || (detail && !/success/i.test(status))) {
+      return {
+        state: "failed",
+        detail: detail || `OneTrust reported creation status ${status}.`,
+      };
+    }
+    return /success/i.test(status)
+      ? { state: "success" }
+      : { state: "pending" };
+  } catch {
+    return { state: "pending" };
+  }
+}
+
+/** A creation OneTrust rejected after accepting it: clear the trace so the next click may retry. */
+async function failCreation(caseId: string, detail: string): Promise<never> {
+  const message = `OneTrust could not create the request: ${detail}`;
+  await prisma.managedCase.update({
+    where: { id: caseId },
+    data: {
+      onetrust_status: "failed",
+      onetrust_error: message,
+      onetrust_trace_id: null,
+    },
+  });
+  throw new Error(message);
+}
+
 async function waitForPublicRequestIdentity(
   settings: Settings,
   token: string,
   firstName: string,
   lastName: string,
   email: string,
+  creation?: { caseId: string; traceId: string },
 ): Promise<OneTrustRequestIdentity | null> {
   const deadline = Date.now() + REQUEST_VISIBILITY_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    if (creation) {
+      const state = await creationState(settings, token, creation.traceId);
+      if (state.state === "failed")
+        return failCreation(creation.caseId, state.detail);
+    }
     const identity = await resolvePublicRequestIdentity(
       settings,
       token,
@@ -595,6 +654,9 @@ export async function sendCaseToOneTrust(caseId: string, formId?: string) {
           nameParts(item.subject_name).firstName,
           nameParts(item.subject_name).lastName,
           item.subject_email,
+          item.onetrust_trace_id
+            ? { caseId, traceId: item.onetrust_trace_id }
+            : undefined,
         )
       : await resolvePublicRequestIdentity(
           settings,
