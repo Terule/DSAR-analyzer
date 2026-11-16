@@ -17,6 +17,18 @@ const REQUEST_VISIBILITY_POLL_INTERVAL_MS = 2_000;
 // belongs to a process that died and may be taken over.
 const CLAIM_HEARTBEAT_MS = 30_000;
 const CLAIM_STALE_MS = 5 * 60_000;
+// OneTrust creates requests asynchronously. A request it accepted may take a
+// while to show up, so for this long a saved trace ID counts as "created, not
+// visible yet" and no second request is made.
+const ACCEPTED_REQUEST_WINDOW_MS = 60 * 60_000;
+
+/** OneTrust accepted the request but has not exposed it yet. Retry-safe. */
+export class RequestPendingError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RequestPendingError";
+  }
+}
 
 type Settings = Awaited<ReturnType<typeof getAiBatchSettings>>;
 
@@ -188,7 +200,8 @@ async function createRequest(
   if (!item.subject_email.trim())
     throw new Error("The client case needs a subject email.");
   const formConfig = await loadForm(formId);
-  await createFormRequest(settings, formConfig, {
+  const requestTraceId = crypto.randomUUID();
+  const accepted = await createFormRequest(settings, formConfig, {
     firstName,
     lastName,
     email: item.subject_email,
@@ -216,14 +229,24 @@ async function createRequest(
     published: true,
     attachments: null,
     identityTokens: {},
-    requestTraceId: crypto.randomUUID(),
+    requestTraceId,
   });
+  // Keep OneTrust's own trace ID (or ours) before anything else: it proves the
+  // request was accepted, so a later click never creates a second one.
+  const traceId = String(
+    accepted.traceId || accepted.requestTraceId || requestTraceId,
+  );
   // The public web form accepts the DSR before the authenticated API exposes
   // its reference ID and UUID. Persist that state, then poll before starting
   // delivery so the first click does not need a manual retry.
   await prisma.managedCase.update({
     where: { id: caseId },
-    data: { onetrust_status: "awaiting_request", onetrust_error: null },
+    data: {
+      onetrust_status: "awaiting_request",
+      onetrust_error: null,
+      onetrust_trace_id: traceId,
+      onetrust_form_id: formConfig.id,
+    },
   });
   const identity = await waitForPublicRequestIdentity(
     settings,
@@ -233,7 +256,7 @@ async function createRequest(
     item.subject_email,
   );
   if (!identity)
-    throw new Error(
+    throw new RequestPendingError(
       "OneTrust accepted the request but did not expose it within 90 seconds. Try Send to OneTrust again shortly; AIDA will reuse the same request.",
     );
   await prisma.managedCase.update({
@@ -554,26 +577,32 @@ export async function sendCaseToOneTrust(caseId: string, formId?: string) {
       item.onetrust_status === "uploading") &&
     item.updated_at < staleBefore;
   const currentStatus = claimIsStale ? "idle" : item.onetrust_status;
+  const acceptedRecently =
+    Boolean(item.onetrust_trace_id) &&
+    item.updated_at.getTime() > Date.now() - ACCEPTED_REQUEST_WINDOW_MS;
+  const awaitingRequest =
+    currentStatus === "creating" ||
+    currentStatus === "awaiting_request" ||
+    acceptedRecently;
   let requestId = item.onetrust_request_id;
   let requestQueueId = item.onetrust_request_queue_id;
   let resolvedExistingRequest = false;
   if (!requestId || !requestQueueId) {
-    const identity =
-      currentStatus === "creating" || currentStatus === "awaiting_request"
-        ? await waitForPublicRequestIdentity(
-            settings,
-            token,
-            nameParts(item.subject_name).firstName,
-            nameParts(item.subject_name).lastName,
-            item.subject_email,
-          )
-        : await resolvePublicRequestIdentity(
-            settings,
-            token,
-            nameParts(item.subject_name).firstName,
-            nameParts(item.subject_name).lastName,
-            item.subject_email,
-          );
+    const identity = awaitingRequest
+      ? await waitForPublicRequestIdentity(
+          settings,
+          token,
+          nameParts(item.subject_name).firstName,
+          nameParts(item.subject_name).lastName,
+          item.subject_email,
+        )
+      : await resolvePublicRequestIdentity(
+          settings,
+          token,
+          nameParts(item.subject_name).firstName,
+          nameParts(item.subject_name).lastName,
+          item.subject_email,
+        );
     requestId = identity?.requestId || requestId;
     requestQueueId = identity?.requestQueueId || requestQueueId;
     resolvedExistingRequest = Boolean(identity);
@@ -590,12 +619,12 @@ export async function sendCaseToOneTrust(caseId: string, formId?: string) {
     });
   }
   if (!requestId) {
-    if (currentStatus === "creating" || currentStatus === "awaiting_request") {
+    if (awaitingRequest) {
       await prisma.managedCase.update({
         where: { id: caseId },
         data: { onetrust_status: "awaiting_request", onetrust_error: null },
       });
-      throw new Error(
+      throw new RequestPendingError(
         "OneTrust has accepted this request but has not exposed it for delivery yet. Try Send to OneTrust again shortly; AIDA will reuse the same request.",
       );
     }
@@ -623,7 +652,7 @@ export async function sendCaseToOneTrust(caseId: string, formId?: string) {
         error instanceof Error
           ? error.message
           : "OneTrust request creation failed.";
-      if (!message.startsWith("OneTrust accepted the request")) {
+      if (!(error instanceof RequestPendingError)) {
         await prisma.managedCase.update({
           where: { id: caseId },
           data: { onetrust_status: "failed", onetrust_error: message },

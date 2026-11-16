@@ -81,6 +81,7 @@ model ManagedCase {
   onetrust_request_id   String?
   onetrust_request_queue_id String?
   onetrust_form_id    String?
+  onetrust_trace_id   String?
   onetrust_status       String        @default("idle")
   onetrust_error        String?
   status                String        @default("active")

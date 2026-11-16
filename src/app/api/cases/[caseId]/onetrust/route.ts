@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { sendCaseToOneTrust } from "@/lib/onetrust";
+import { RequestPendingError, sendCaseToOneTrust } from "@/lib/onetrust";
 import { prisma } from "@/lib/prisma";
 
 export const dynamic = "force-dynamic";
@@ -30,7 +30,7 @@ export async function POST(
     // not a failed submission, and must remain retry-safe.
     // Concurrency-guard rejections must not touch the status: the in-flight
     // run owns it, and overwriting it would release the lock.
-    const isPending = message.startsWith("OneTrust accepted the request");
+    const isPending = error instanceof RequestPendingError;
     const isGuard =
       message.includes("already in progress") ||
       message.includes("already being created");
