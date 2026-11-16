@@ -23,6 +23,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import * as api from "@/lib/api";
+import { OneTrustForms } from "./OneTrustForms";
 
 type Tab = "AI" | "Azure / SharePoint" | "OneTrust" | "Storage" | "System";
 type Values = Record<string, string | number | boolean | undefined>;
@@ -559,16 +560,18 @@ export function SystemSettingsDialog({
                     "Client request defaults",
                     "AIDA uses these saved values for every Client case sent to OneTrust.",
                     <div className="grid gap-x-5 gap-y-6 lg:grid-cols-12">
-                      {input("oneTrustTemplateId", "Web-form template ID", {
-                        hint: "The OneTrust template that creates the request.",
-                        className: "lg:col-span-6",
-                      })}
+                      <div className="lg:col-span-12">
+                        <p className="mb-3 text-sm font-semibold text-slate-200">
+                          Web forms
+                        </p>
+                        <OneTrustForms />
+                      </div>
                       {input(
                         "oneTrustPublicWebFormUrl",
                         "Published web-form URL",
                         {
                           type: "url",
-                          hint: "Used to obtain a fresh public request configuration.",
+                          hint: "Any published form of the portal. AIDA swaps in the chosen form's ID.",
                           className: "lg:col-span-6",
                         },
                       )}

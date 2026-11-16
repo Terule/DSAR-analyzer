@@ -532,6 +532,12 @@ export function CaseManager() {
   const [cases, setCases] = useState<CaseItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
+  const [oneTrustForms, setOneTrustForms] = useState<
+    Array<{ id: string; name: string }>
+  >([]);
+  const [oneTrustFormChoice, setOneTrustFormChoice] = useState<
+    Record<string, string>
+  >({});
   const [createOpen, setCreateOpen] = useState(false);
   const [caseName, setCaseName] = useState("");
   const [caseType, setCaseType] = useState<"employee" | "client">("employee");
@@ -588,6 +594,14 @@ export function CaseManager() {
     [tab],
   );
 
+  useEffect(() => {
+    fetch("/api/onetrust-forms", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((body: { forms?: Array<{ id: string; name: string }> }) =>
+        setOneTrustForms(body.forms ?? []),
+      )
+      .catch(() => undefined);
+  }, []);
   useEffect(() => {
     void refresh();
   }, [refresh]);
@@ -732,7 +746,10 @@ export function CaseManager() {
     const result = await call(
       `onetrust-${item.id}`,
       `/api/cases/${item.id}/onetrust`,
-      { method: "POST" },
+      {
+        method: "POST",
+        body: JSON.stringify({ formId: oneTrustFormChoice[item.id] }),
+      },
     );
     if (result) {
       const parts = [
@@ -966,6 +983,28 @@ export function CaseManager() {
                                 : "Add request"
                               : "Add first request"}
                           </Button>
+                          {item.case_type === "client" &&
+                            oneTrustForms.length > 1 &&
+                            !item.onetrust_request_id && (
+                              <select
+                                aria-label="OneTrust web form"
+                                value={oneTrustFormChoice[item.id] ?? ""}
+                                onChange={(event) =>
+                                  setOneTrustFormChoice((current) => ({
+                                    ...current,
+                                    [item.id]: event.target.value,
+                                  }))
+                                }
+                                className="rounded-md border border-sky-400/45 bg-slate-900 px-2 text-sm text-sky-100"
+                              >
+                                <option value="">Choose web form…</option>
+                                {oneTrustForms.map((form) => (
+                                  <option key={form.id} value={form.id}>
+                                    {form.name}
+                                  </option>
+                                ))}
+                              </select>
+                            )}
                           {item.case_type === "client" && (
                             <Button
                               type="button"

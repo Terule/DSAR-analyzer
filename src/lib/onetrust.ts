@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
-import { runtimeCredentials } from "./credentials";
+import { decryptSetting, runtimeCredentials } from "./credentials";
 import {
   isOneTrustDeliverablePath,
   renumberDeliverables,
@@ -23,7 +23,6 @@ type Settings = Awaited<ReturnType<typeof getAiBatchSettings>>;
 function requiredSettings(settings: Settings) {
   if (
     !settings.oneTrustTenantUrl ||
-    !settings.oneTrustTemplateId ||
     !settings.oneTrustPublicWebFormUrl ||
     !settings.oneTrustDateRaisedFieldKey ||
     !settings.hasOneTrustClientId ||
@@ -116,18 +115,66 @@ async function oneTrustJson<T>(
   return body as T;
 }
 
+interface OneTrustFormConfig {
+  id: string;
+  templateId: string;
+  apiToken: string;
+  publicUrl: string;
+}
+
+/** The web form picked for a case: its saved template ID and API token. */
+async function loadForm(
+  settings: Settings,
+  formId?: string,
+): Promise<OneTrustFormConfig> {
+  const forms = await prisma.oneTrustForm.findMany({
+    orderBy: { created_at: "asc" },
+  });
+  if (!forms.length) {
+    throw new Error(
+      "Add a OneTrust web form (name, ID and API token) in System Settings first.",
+    );
+  }
+  const form = formId
+    ? forms.find((candidate) => candidate.id === formId)
+    : forms.length === 1
+      ? forms[0]
+      : undefined;
+  if (!form) {
+    throw new Error(
+      formId
+        ? "The selected OneTrust web form no longer exists."
+        : "Choose which OneTrust web form to use.",
+    );
+  }
+  // The portal path is shared by every form; only the last segment, the
+  // template ID, changes.
+  const publicUrl = new URL(settings.oneTrustPublicWebFormUrl);
+  const segments = publicUrl.pathname.split("/").filter(Boolean);
+  segments[segments.length - 1] = form.template_id;
+  publicUrl.pathname = `/${segments.join("/")}`;
+  return {
+    id: form.id,
+    templateId: form.template_id,
+    apiToken: await decryptSetting(form.api_token_encrypted),
+    publicUrl: publicUrl.toString(),
+  };
+}
+
 async function createRequest(
   caseId: string,
   settings: Settings,
   token: string,
+  formId?: string,
 ): Promise<OneTrustRequestIdentity> {
   const item = await prisma.managedCase.findUnique({ where: { id: caseId } });
   if (!item) throw new Error("Case not found.");
   const { firstName, lastName } = nameParts(item.subject_name);
   if (!item.subject_email.trim())
     throw new Error("The client case needs a subject email.");
-  const form = await publishedWebForm(settings);
-  await publicRequest(settings, {
+  const formConfig = await loadForm(settings, formId);
+  const form = await publishedWebForm(formConfig);
+  await createFormRequest(formConfig, {
     firstName,
     lastName,
     email: item.subject_email,
@@ -182,6 +229,7 @@ async function createRequest(
     data: {
       onetrust_request_id: identity.requestId,
       onetrust_request_queue_id: identity.requestQueueId,
+      onetrust_form_id: formConfig.id,
       onetrust_status: "created",
       onetrust_error: null,
     },
@@ -266,9 +314,9 @@ async function waitForPublicRequestIdentity(
 }
 
 async function publishedWebForm(
-  settings: Settings,
+  formConfig: OneTrustFormConfig,
 ): Promise<Record<string, unknown>> {
-  const response = await fetch(settings.oneTrustPublicWebFormUrl, {
+  const response = await fetch(formConfig.publicUrl, {
     headers: { Accept: "text/html" },
     cache: "no-store",
   });
@@ -301,7 +349,7 @@ async function publishedWebForm(
     );
   }
   const entry = Object.entries(parsed).find(([key]) =>
-    key.includes(`/webform/${settings.oneTrustTemplateId}/publish?`),
+    key.includes(`/webform/${formConfig.templateId}/publish?`),
   )?.[1];
   if (!entry?.body?.jwtToken) {
     throw new Error(
@@ -311,21 +359,25 @@ async function publishedWebForm(
   return entry.body;
 }
 
-async function publicRequest(
-  settings: Settings,
+/**
+ * Creates the DSR through the web form's asynchronous request-creation API
+ * (Integrate > API tab), authenticated with the form's JWT in the `accessToken`
+ * header. Unlike the public form endpoint it does not require a captcha.
+ */
+async function createFormRequest(
+  formConfig: OneTrustFormConfig,
   body: Record<string, unknown>,
 ): Promise<Record<string, unknown>> {
   const endpoint = new URL(
-    "/request/v1/dsarrequestqueue",
-    settings.oneTrustPublicWebFormUrl,
+    `/request/v1/createv2request/${encodeURIComponent(formConfig.templateId)}`,
+    formConfig.publicUrl,
   );
   const response = await fetch(endpoint, {
     method: "POST",
     headers: {
       Accept: "application/json",
       "Content-Type": "application/json",
-      Origin: endpoint.origin,
-      Referer: settings.oneTrustPublicWebFormUrl,
+      accessToken: formConfig.apiToken,
     },
     body: JSON.stringify(body),
     cache: "no-store",
@@ -335,7 +387,7 @@ async function publicRequest(
   try {
     parsed = raw ? JSON.parse(raw) : {};
   } catch {
-    // The raw response is returned below when OneTrust does not provide JSON.
+    // The raw response is used below when OneTrust does not provide JSON.
   }
   if (!response.ok) {
     throw new Error(
@@ -508,7 +560,7 @@ async function attachToResultSummary(
   );
 }
 
-export async function sendCaseToOneTrust(caseId: string) {
+export async function sendCaseToOneTrust(caseId: string, formId?: string) {
   const item = await prisma.managedCase.findUnique({
     where: { id: caseId },
     include: { requests: true },
@@ -594,7 +646,7 @@ export async function sendCaseToOneTrust(caseId: string) {
     }
     let identity: OneTrustRequestIdentity;
     try {
-      identity = await createRequest(caseId, settings, token);
+      identity = await createRequest(caseId, settings, token, formId);
     } catch (error) {
       const message =
         error instanceof Error

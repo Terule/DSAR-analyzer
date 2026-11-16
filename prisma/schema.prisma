@@ -80,6 +80,7 @@ model ManagedCase {
   case_type             String        @default("employee")
   onetrust_request_id   String?
   onetrust_request_queue_id String?
+  onetrust_form_id    String?
   onetrust_status       String        @default("idle")
   onetrust_error        String?
   status                String        @default("active")
@@ -373,4 +374,15 @@ model CaseHistory {
 
   @@unique([case_key, state_signature])
   @@map("case_history")
+}
+
+model OneTrustForm {
+  id                  String   @id @default(uuid())
+  name                String
+  template_id         String
+  api_token_encrypted String
+  created_at          DateTime @default(now())
+  updated_at          DateTime @updatedAt
+
+  @@map("onetrust_forms")
 }

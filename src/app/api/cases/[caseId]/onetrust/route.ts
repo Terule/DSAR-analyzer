@@ -5,14 +5,19 @@ import { prisma } from "@/lib/prisma";
 export const dynamic = "force-dynamic";
 
 export async function POST(
-  _request: Request,
+  request: Request,
   context: { params: Promise<{ caseId: string }> },
 ) {
   try {
     const { caseId } = await context.params;
+    const body = (await request.json().catch(() => ({}))) as {
+      formId?: unknown;
+    };
+    const formId =
+      typeof body.formId === "string" && body.formId ? body.formId : undefined;
     return NextResponse.json({
       success: true,
-      ...(await sendCaseToOneTrust(caseId)),
+      ...(await sendCaseToOneTrust(caseId, formId)),
     });
   } catch (error) {
     const { caseId } = await context.params;
