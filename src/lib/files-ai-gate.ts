@@ -9,7 +9,6 @@ import {
   type FilesAiClient,
   getFilesAiState,
   isFilesAiSettled,
-  openAiFilesAiClient,
   prepareFilesAi,
   reviewUnsubmittedFiles,
   sendCandidatesToReview,
@@ -22,6 +21,7 @@ import {
   writeVerdictsCsv,
 } from "./files-ai-apply";
 import type { FilesAiCriteria } from "./files-ai-prompt";
+import { configuredFilesAiClient } from "./files-ai-provider";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
@@ -96,7 +96,7 @@ export async function runFilesAiPrepare(input: {
 }): Promise<Record<string, unknown>> {
   const client =
     input.client === undefined
-      ? await openAiFilesAiClient().catch(() => null)
+      ? await configuredFilesAiClient().catch(() => null)
       : input.client;
   if (!client) {
     console.warn(

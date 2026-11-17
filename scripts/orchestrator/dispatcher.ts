@@ -155,6 +155,12 @@ const workerEnvironment = [
   "ORCHESTRATOR_QUEUE_NAME",
   "PDF_FONT_DIR",
   "OFFICE_WORKER_HEAP_MB",
+  "AWS_SHARED_CREDENTIALS_FILE",
+  "AWS_CONFIG_FILE",
+  "AWS_REGION",
+  "BEDROCK_BATCH_BUCKET",
+  "BEDROCK_BATCH_ROLE_ARN",
+  "BEDROCK_CONVERSE_CONCURRENCY",
 ].flatMap((name) => {
   const value = process.env[name];
   return value === undefined ? [] : [`${name}=${value}`];

@@ -5,6 +5,7 @@ import { encryptSetting } from "@/lib/credentials";
 import {
   AI_BATCH_SETTINGS_LIMITS,
   getAiBatchSettings,
+  normalizeAiProvider,
   updateAiBatchSettings,
 } from "@/lib/pipeline-settings";
 import { prisma } from "@/lib/prisma";
@@ -41,6 +42,7 @@ export async function PATCH(request: Request) {
       deleteSourcePsts?: boolean;
       filesConcurrency?: number | string;
       filesAiEnabled?: boolean;
+      aiProvider?: string;
     };
     const current = await getAiBatchSettings();
     const settings = await updateAiBatchSettings({
@@ -65,6 +67,10 @@ export async function PATCH(request: Request) {
         body.oneTrustSystemLabel ?? current.oneTrustSystemLabel,
       deleteSourcePsts: body.deleteSourcePsts ?? current.deleteSourcePsts,
       filesAiEnabled: body.filesAiEnabled ?? current.filesAiEnabled,
+      aiProvider:
+        body.aiProvider === undefined
+          ? current.aiProvider
+          : normalizeAiProvider(body.aiProvider),
       filesConcurrency:
         body.filesConcurrency === undefined || body.filesConcurrency === ""
           ? current.filesConcurrency

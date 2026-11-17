@@ -1,9 +1,9 @@
 import {
   type FilesAiClient,
   failFilesAiRun,
-  openAiFilesAiClient,
   pollFilesAiBatches,
 } from "./files-ai";
+import { configuredFilesAiClient } from "./files-ai-provider";
 import { prisma } from "./prisma";
 
 /** Without an OpenAI client for this long, a submitted run is given up on (its files are kept). */
@@ -15,7 +15,7 @@ const STALE_RUN_MS = 30 * 60_000;
  * files. Returns how many Files rows were polled or given up on.
  */
 export async function pollFilesAiRuns(
-  clientFactory: () => Promise<FilesAiClient> = openAiFilesAiClient,
+  clientFactory: () => Promise<FilesAiClient> = configuredFilesAiClient,
   /** Limits the poll to these Files rows. Tests use it so they never touch real runs. */
   onlyFileIds?: string[],
 ): Promise<number> {

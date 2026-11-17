@@ -30,6 +30,7 @@
     "@aws-sdk/client-bedrock": "^3.1170.0",
     "@aws-sdk/client-bedrock-runtime": "^3.1170.0",
     "@aws-sdk/client-s3": "^3.1170.0",
+    "@aws-sdk/credential-provider-node": "^3.972.97",
     "@base-ui/react": "^1.6.0",
     "@hugeicons/core-free-icons": "^4.2.2",
     "@hugeicons/react": "^1.1.9",

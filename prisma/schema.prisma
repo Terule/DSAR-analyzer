@@ -301,6 +301,7 @@ model PipelineSettings {
   delete_source_psts          Boolean  @default(true)
   files_concurrency           Int      @default(6)
   files_ai_enabled            Boolean  @default(true)
+  ai_provider                 String   @default("openai")
   updated_at                  DateTime @updatedAt
 
   @@map("pipeline_settings")

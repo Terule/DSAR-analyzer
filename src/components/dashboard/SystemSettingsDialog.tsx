@@ -660,6 +660,22 @@ export function SystemSettingsDialog({
                     </label>,
                   )}
                   {section(
+                    "AI provider",
+                    "Which service screens files and mail. Amazon Bedrock sends runs over 100 items to Bedrock Batch (Claude Haiku 4.5) and smaller runs to Converse (Claude Haiku 5.5); it needs AWS credentials and the batch bucket configured on the server.",
+                    <select
+                      value={
+                        values.aiProvider === "bedrock" ? "bedrock" : "openai"
+                      }
+                      onChange={(event) =>
+                        update("aiProvider", event.target.value)
+                      }
+                      className="w-full rounded-xl border border-slate-600 bg-slate-950/80 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/30"
+                    >
+                      <option value="openai">OpenAI Batch</option>
+                      <option value="bedrock">Amazon Bedrock (EU)</option>
+                    </select>,
+                  )}
+                  {section(
                     "AI screening",
                     "Let the AI screen files, email bodies and attachments for confidential content, and judge file relevance.",
                     <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-slate-700 bg-slate-950/45 p-4">

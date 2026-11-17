@@ -23,8 +23,8 @@ import {
   BATCH_THRESHOLD,
   BEDROCK_REGION,
   batchSettings,
-  CONVERSE_CONCURRENCY,
   CONVERSE_MODEL,
+  converseConcurrency,
 } from "./config";
 import {
   type ParsedRequest,
@@ -263,7 +263,7 @@ export function bedrockFilesAiClient(
         const requests = readLines(filePath).map(parseRequestLine);
         const out = await mapLimit(
           requests,
-          CONVERSE_CONCURRENCY,
+          converseConcurrency(),
           async (r) => {
             let input: unknown;
             try {

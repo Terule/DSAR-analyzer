@@ -185,7 +185,8 @@ async function main() {
     }),
   );
 
-  if (process.env.DUMP_ROWS) fs.writeFileSync(process.env.DUMP_ROWS, JSON.stringify(rows));
+  if (process.env.DUMP_ROWS)
+    fs.writeFileSync(process.env.DUMP_ROWS, JSON.stringify(rows));
   // Per item.
   console.log("item        expect   correct  avgConf(right) avgConf(wrong)");
   const ids = [...new Set(rows.map((r) => r.id))].sort();

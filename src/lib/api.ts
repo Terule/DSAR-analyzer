@@ -104,6 +104,7 @@ export interface AiBatchSettings {
   deleteSourcePsts?: boolean;
   filesConcurrency?: number;
   filesAiEnabled?: boolean;
+  aiProvider?: "openai" | "bedrock";
   oneTrustClientId?: string;
   oneTrustClientSecret?: string;
 }

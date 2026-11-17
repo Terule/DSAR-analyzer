@@ -11,11 +11,11 @@ import {
   isFilesAiSettled,
   isMailItem,
   MAIL_ITEM_PREFIX,
-  openAiFilesAiClient,
   prepareFilesAi,
   sendItemsToReview,
 } from "./files-ai";
 import { type FilesAiCandidate, readPdfSample } from "./files-ai-extract";
+import { configuredFilesAiClient } from "./files-ai-provider";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
@@ -215,7 +215,7 @@ async function submitScreen(
 ): Promise<void> {
   const client =
     injected === undefined
-      ? await openAiFilesAiClient().catch(() => null)
+      ? await configuredFilesAiClient().catch(() => null)
       : injected;
   if (!client) {
     await sendItemsToReview(

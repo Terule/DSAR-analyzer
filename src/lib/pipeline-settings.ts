@@ -20,6 +20,12 @@ export const AI_BATCH_SETTINGS_LIMITS = {
   maxQueuedTokens: 20_000_000,
 } as const;
 
+export type AiProvider = "openai" | "bedrock";
+
+export function normalizeAiProvider(value: unknown): AiProvider {
+  return value === "bedrock" ? "bedrock" : "openai";
+}
+
 export interface AiBatchSettings {
   maxTokensPerBatch: number;
   maxConcurrentBatches: number;
@@ -45,6 +51,8 @@ export interface AiBatchSettings {
   deleteSourcePsts?: boolean;
   filesConcurrency?: number;
   filesAiEnabled?: boolean;
+  /** Which provider screens files and mail: OpenAI Batch (default) or Amazon Bedrock. */
+  aiProvider?: AiProvider;
 }
 
 function normalizeOptionalUrl(value: string): string {
@@ -155,6 +163,7 @@ export function validateAiBatchSettings(
     deleteSourcePsts: input.deleteSourcePsts ?? true,
     filesConcurrency,
     filesAiEnabled: input.filesAiEnabled ?? true,
+    aiProvider: normalizeAiProvider(input.aiProvider),
   };
 }
 
@@ -194,6 +203,7 @@ export async function getAiBatchSettings(): Promise<AiBatchSettings> {
     deleteSourcePsts: row.delete_source_psts,
     filesConcurrency: row.files_concurrency,
     filesAiEnabled: row.files_ai_enabled,
+    aiProvider: normalizeAiProvider(row.ai_provider),
   };
 }
 
@@ -224,6 +234,7 @@ export async function updateAiBatchSettings(
       delete_source_psts: settings.deleteSourcePsts ?? true,
       files_concurrency: settings.filesConcurrency,
       files_ai_enabled: settings.filesAiEnabled ?? true,
+      ai_provider: normalizeAiProvider(settings.aiProvider),
     },
     update: {
       ai_max_tokens_per_batch: settings.maxTokensPerBatch,
@@ -245,6 +256,7 @@ export async function updateAiBatchSettings(
       delete_source_psts: settings.deleteSourcePsts ?? true,
       files_concurrency: settings.filesConcurrency,
       files_ai_enabled: settings.filesAiEnabled ?? true,
+      ai_provider: normalizeAiProvider(settings.aiProvider),
     },
   });
   return {
@@ -273,5 +285,6 @@ export async function updateAiBatchSettings(
     deleteSourcePsts: row.delete_source_psts,
     filesConcurrency: row.files_concurrency,
     filesAiEnabled: row.files_ai_enabled,
+    aiProvider: normalizeAiProvider(row.ai_provider),
   };
 }

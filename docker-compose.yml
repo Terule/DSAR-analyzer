@@ -9,6 +9,10 @@ services:
       AWS_SHARED_CREDENTIALS_FILE: /run/aws/credentials
       AWS_CONFIG_FILE: /run/aws/config
       AWS_REGION: eu-central-1
+      # Set in .env (not committed): the dev batch bucket and its service role.
+      BEDROCK_BATCH_BUCKET: ${BEDROCK_BATCH_BUCKET:-}
+      BEDROCK_BATCH_ROLE_ARN: ${BEDROCK_BATCH_ROLE_ARN:-}
+      BEDROCK_CONVERSE_CONCURRENCY: ${BEDROCK_CONVERSE_CONCURRENCY:-8}
       STAGING_PATH: /data/Staging
       EXTRACTED_PATH: /data/Results
       # The app must use the same durable AI submission path as the dispatcher.
@@ -58,6 +62,10 @@ services:
       AWS_SHARED_CREDENTIALS_FILE: /run/aws/credentials
       AWS_CONFIG_FILE: /run/aws/config
       AWS_REGION: eu-central-1
+      # Set in .env (not committed): the dev batch bucket and its service role.
+      BEDROCK_BATCH_BUCKET: ${BEDROCK_BATCH_BUCKET:-}
+      BEDROCK_BATCH_ROLE_ARN: ${BEDROCK_BATCH_ROLE_ARN:-}
+      BEDROCK_CONVERSE_CONCURRENCY: ${BEDROCK_CONVERSE_CONCURRENCY:-8}
       STAGING_PATH: /data/Staging
       EXTRACTED_PATH: /data/Results
       CONTROL_PLANE_PIPELINE_ENABLED: "true"

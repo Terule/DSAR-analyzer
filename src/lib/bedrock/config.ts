@@ -11,8 +11,11 @@ export const CONVERSE_MODEL = "eu.anthropic.claude-haiku-5-5";
 
 /** More than this many records in a run go to Batch; this many or fewer to Converse. */
 export const BATCH_THRESHOLD = 100;
-/** Parallel Converse calls. */
-export const CONVERSE_CONCURRENCY = 4;
+/** Parallel Converse calls (env BEDROCK_CONVERSE_CONCURRENCY, 1-64, default 8). */
+export function converseConcurrency(): number {
+  const value = Math.floor(Number(process.env.BEDROCK_CONVERSE_CONCURRENCY));
+  return Number.isFinite(value) && value >= 1 ? Math.min(value, 64) : 8;
+}
 /** Output budget; the decision JSON is small but `reason` can reach 240 characters. */
 export const MIN_OUTPUT_TOKENS = 300;
 
