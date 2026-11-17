@@ -312,6 +312,8 @@ model PipelineSettings {
   files_concurrency           Int      @default(6)
   files_ai_enabled            Boolean  @default(true)
   ai_provider                 String   @default("openai")
+  rereview_min_p_keep         Int      @default(8)
+  rereview_sample_percent     Float    @default(2)
   updated_at                  DateTime @updatedAt
 
   @@map("pipeline_settings")

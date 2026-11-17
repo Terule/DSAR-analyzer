@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { rereviewMinPKeep, rereviewSampleRate } from "./config";
 
 /** Categories Haiku 4.5 is known to over-apply to the subject's own material. */
 const DOUBTFUL_CATEGORIES = [
@@ -29,10 +28,7 @@ export function shouldRereview(
     sensitivity: string | null;
     subjectInvolved: boolean;
   },
-  config: { minPKeep: number; sampleRate: number } = {
-    minPKeep: rereviewMinPKeep(),
-    sampleRate: rereviewSampleRate(),
-  },
+  config: { minPKeep: number; sampleRate: number },
 ): boolean {
   if (input.pKeep === null || input.pKeep === undefined) return true;
   if (input.pKeep >= config.minPKeep) return true;

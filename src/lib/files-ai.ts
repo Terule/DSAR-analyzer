@@ -7,6 +7,8 @@ import { AI_TOKENIZER_MODEL } from "./ai-model";
 import {
   BEDROCK_BATCH_PREFIX,
   BEDROCK_CONVERSE_PREFIX,
+  REREVIEW_DEFAULT_MIN_P_KEEP,
+  REREVIEW_DEFAULT_SAMPLE_PERCENT,
 } from "./bedrock/config";
 import { shouldRereview } from "./bedrock/rereview-gate";
 import { runtimeCredentials } from "./credentials";
@@ -450,6 +452,12 @@ export async function pollFilesAiBatches(
   batchDir?: string,
 ): Promise<void> {
   const mode = await filesAiModeFor(fileId);
+  const settings = await getAiBatchSettings();
+  const rereviewConfig = {
+    minPKeep: settings.rereviewMinPKeep ?? REREVIEW_DEFAULT_MIN_P_KEEP,
+    sampleRate:
+      (settings.rereviewSamplePercent ?? REREVIEW_DEFAULT_SAMPLE_PERCENT) / 100,
+  };
   const runs = await prisma.filesAiBatchRun.findMany({
     where: {
       file_id: fileId,
@@ -510,12 +518,15 @@ export async function pollFilesAiBatches(
       if (
         fromBatch45 &&
         decision.verdict === "discard" &&
-        shouldRereview({
-          id: parsed.custom_id,
-          pKeep: judgement.confidence,
-          sensitivity: judgement.sensitivity,
-          subjectInvolved: row.subject_involved,
-        })
+        shouldRereview(
+          {
+            id: parsed.custom_id,
+            pKeep: judgement.confidence,
+            sensitivity: judgement.sensitivity,
+            subjectInvolved: row.subject_involved,
+          },
+          rereviewConfig,
+        )
       ) {
         await prisma.filesAiVerdict.updateMany({
           where: { id: parsed.custom_id, verdict: null },

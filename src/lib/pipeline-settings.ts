@@ -1,4 +1,8 @@
 import {
+  REREVIEW_DEFAULT_MIN_P_KEEP,
+  REREVIEW_DEFAULT_SAMPLE_PERCENT,
+} from "./bedrock/config";
+import {
   FILES_CONCURRENCY_LIMITS,
   isValidFilesConcurrency,
 } from "./files-concurrency";
@@ -53,6 +57,10 @@ export interface AiBatchSettings {
   filesAiEnabled?: boolean;
   /** Which provider screens files and mail: OpenAI Batch (default) or Amazon Bedrock. */
   aiProvider?: AiProvider;
+  /** A Haiku 4.5 discard with at least this p_keep (0-100) gets a second opinion from Haiku 5.5. */
+  rereviewMinPKeep?: number;
+  /** Percent (0-100) of the other, confident discards that are also judged again as a control. */
+  rereviewSamplePercent?: number;
 }
 
 function normalizeOptionalUrl(value: string): string {
@@ -130,6 +138,28 @@ export function validateAiBatchSettings(
     );
   }
 
+  const rereviewMinPKeep =
+    input.rereviewMinPKeep ?? REREVIEW_DEFAULT_MIN_P_KEEP;
+  if (
+    !Number.isInteger(rereviewMinPKeep) ||
+    rereviewMinPKeep < 0 ||
+    rereviewMinPKeep > 100
+  ) {
+    throw new Error(
+      "Second-review threshold must be a whole number from 0 to 100.",
+    );
+  }
+  const rereviewSamplePercent =
+    input.rereviewSamplePercent ?? REREVIEW_DEFAULT_SAMPLE_PERCENT;
+  if (
+    !Number.isFinite(rereviewSamplePercent) ||
+    rereviewSamplePercent < 0 ||
+    rereviewSamplePercent > 100
+  ) {
+    throw new Error(
+      "Second-review control sample must be from 0 to 100 percent.",
+    );
+  }
   const filesConcurrency =
     input.filesConcurrency ?? FILES_CONCURRENCY_LIMITS.default;
   if (!isValidFilesConcurrency(filesConcurrency)) {
@@ -164,6 +194,8 @@ export function validateAiBatchSettings(
     filesConcurrency,
     filesAiEnabled: input.filesAiEnabled ?? true,
     aiProvider: normalizeAiProvider(input.aiProvider),
+    rereviewMinPKeep,
+    rereviewSamplePercent,
   };
 }
 
@@ -204,6 +236,8 @@ export async function getAiBatchSettings(): Promise<AiBatchSettings> {
     filesConcurrency: row.files_concurrency,
     filesAiEnabled: row.files_ai_enabled,
     aiProvider: normalizeAiProvider(row.ai_provider),
+    rereviewMinPKeep: row.rereview_min_p_keep,
+    rereviewSamplePercent: row.rereview_sample_percent,
   };
 }
 
@@ -235,6 +269,8 @@ export async function updateAiBatchSettings(
       files_concurrency: settings.filesConcurrency,
       files_ai_enabled: settings.filesAiEnabled ?? true,
       ai_provider: normalizeAiProvider(settings.aiProvider),
+      rereview_min_p_keep: settings.rereviewMinPKeep,
+      rereview_sample_percent: settings.rereviewSamplePercent,
     },
     update: {
       ai_max_tokens_per_batch: settings.maxTokensPerBatch,
@@ -257,6 +293,8 @@ export async function updateAiBatchSettings(
       files_concurrency: settings.filesConcurrency,
       files_ai_enabled: settings.filesAiEnabled ?? true,
       ai_provider: normalizeAiProvider(settings.aiProvider),
+      rereview_min_p_keep: settings.rereviewMinPKeep,
+      rereview_sample_percent: settings.rereviewSamplePercent,
     },
   });
   return {
@@ -286,5 +324,7 @@ export async function updateAiBatchSettings(
     filesConcurrency: row.files_concurrency,
     filesAiEnabled: row.files_ai_enabled,
     aiProvider: normalizeAiProvider(row.ai_provider),
+    rereviewMinPKeep: row.rereview_min_p_keep,
+    rereviewSamplePercent: row.rereview_sample_percent,
   };
 }

@@ -43,14 +43,6 @@ export function batchSettings(): { bucket: string; roleArn: string } {
   return { bucket, roleArn };
 }
 
-/** Discards from the Haiku 4.5 batch with at least this p_keep are judged again (env, default 8). */
-export function rereviewMinPKeep(): number {
-  const value = Number(process.env.BEDROCK_REREVIEW_MIN_P_KEEP);
-  return Number.isFinite(value) && value >= 0 && value <= 100 ? value : 8;
-}
-
-/** Share of the remaining, confident discards also judged again as a control (env, default 2%). */
-export function rereviewSampleRate(): number {
-  const value = Number(process.env.BEDROCK_REREVIEW_SAMPLE_RATE);
-  return Number.isFinite(value) && value >= 0 && value <= 1 ? value : 0.02;
-}
+/** Defaults for the second-review filter; both are editable in System settings. */
+export const REREVIEW_DEFAULT_MIN_P_KEEP = 8;
+export const REREVIEW_DEFAULT_SAMPLE_PERCENT = 2;

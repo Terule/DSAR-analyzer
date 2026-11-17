@@ -105,6 +105,8 @@ export interface AiBatchSettings {
   filesConcurrency?: number;
   filesAiEnabled?: boolean;
   aiProvider?: "openai" | "bedrock";
+  rereviewMinPKeep?: number;
+  rereviewSamplePercent?: number;
   oneTrustClientId?: string;
   oneTrustClientSecret?: string;
 }

@@ -675,6 +675,25 @@ export function SystemSettingsDialog({
                       <option value="bedrock">Amazon Bedrock (EU)</option>
                     </select>,
                   )}
+                  {values.aiProvider === "bedrock" &&
+                    section(
+                      "Second review",
+                      "The Haiku 4.5 batch discards the obvious cases; Haiku 5.5 judges the doubtful discards again. A file kept on second review is delivered.",
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {input("rereviewMinPKeep", "Doubt threshold (0-100)", {
+                          type: "number",
+                          min: 0,
+                          max: 100,
+                          hint: "A discard whose keep estimate is at or above this is judged again. Lower means more second reviews and more cost. Default 8.",
+                        })}
+                        {input("rereviewSamplePercent", "Control sample (%)", {
+                          type: "number",
+                          min: 0,
+                          max: 100,
+                          hint: "Share of the remaining, confident discards also judged again, to measure what the threshold lets through. Default 2.",
+                        })}
+                      </div>,
+                    )}
                   {section(
                     "AI screening",
                     "Let the AI screen files, email bodies and attachments for confidential content, and judge file relevance.",

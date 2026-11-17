@@ -43,6 +43,8 @@ export async function PATCH(request: Request) {
       filesConcurrency?: number | string;
       filesAiEnabled?: boolean;
       aiProvider?: string;
+      rereviewMinPKeep?: number | string;
+      rereviewSamplePercent?: number | string;
     };
     const current = await getAiBatchSettings();
     const settings = await updateAiBatchSettings({
@@ -67,6 +69,15 @@ export async function PATCH(request: Request) {
         body.oneTrustSystemLabel ?? current.oneTrustSystemLabel,
       deleteSourcePsts: body.deleteSourcePsts ?? current.deleteSourcePsts,
       filesAiEnabled: body.filesAiEnabled ?? current.filesAiEnabled,
+      rereviewMinPKeep:
+        body.rereviewMinPKeep === undefined || body.rereviewMinPKeep === ""
+          ? current.rereviewMinPKeep
+          : Number(body.rereviewMinPKeep),
+      rereviewSamplePercent:
+        body.rereviewSamplePercent === undefined ||
+        body.rereviewSamplePercent === ""
+          ? current.rereviewSamplePercent
+          : Number(body.rereviewSamplePercent),
       aiProvider:
         body.aiProvider === undefined
           ? current.aiProvider
