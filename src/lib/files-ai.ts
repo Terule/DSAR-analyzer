@@ -305,6 +305,21 @@ export function runJsonlPath(runId: string, batchDir?: string): string {
   );
 }
 
+/**
+ * Removes a run's request file and every artifact a provider keeps beside it
+ * (`files-ai-<runId>.*`, e.g. the Bedrock record map and cached output).
+ */
+export function removeRunFiles(runId: string, batchDir?: string): void {
+  const jsonl = runJsonlPath(runId, batchDir);
+  const dir = path.dirname(jsonl);
+  const prefix = `${path.basename(jsonl, ".jsonl")}.`;
+  if (!fs.existsSync(dir)) return;
+  for (const name of fs.readdirSync(dir)) {
+    if (name.startsWith(prefix))
+      fs.rmSync(path.join(dir, name), { force: true });
+  }
+}
+
 /** A batch OpenAI failed, expired or cancelled is resubmitted this many runs in. */
 const MAX_RUN_ATTEMPTS = 2;
 
@@ -402,6 +417,7 @@ export async function failFilesAiRun(
     data: { status: "failed", error, completed_at: new Date() },
   });
   fs.rmSync(runJsonlPath(runId), { force: true });
+  removeRunFiles(runId);
 }
 
 /**
@@ -506,6 +522,7 @@ export async function pollFilesAiBatches(
       data: { status: "completed", completed_at: new Date() },
     });
     fs.rmSync(runJsonlPath(run.id, batchDir), { force: true });
+    removeRunFiles(run.id, batchDir);
   }
 }
 
