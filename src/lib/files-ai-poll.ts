@@ -15,7 +15,8 @@ const STALE_RUN_MS = 30 * 60_000;
  * files. Returns how many Files rows were polled or given up on.
  */
 export async function pollFilesAiRuns(
-  clientFactory: () => Promise<FilesAiClient> = configuredFilesAiClient,
+  clientFactory: () => Promise<FilesAiClient> = () =>
+    configuredFilesAiClient({ forPolling: true }),
   /** Limits the poll to these Files rows. Tests use it so they never touch real runs. */
   onlyFileIds?: string[],
 ): Promise<number> {
