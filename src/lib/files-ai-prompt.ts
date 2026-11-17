@@ -44,7 +44,7 @@ export const FILES_AI_RESPONSE_FORMAT = {
 
 export const SENSITIVITY_RULES = `Sensitivity (confidential content that must never be delivered):
 - "payroll_compensation": salary, bonus, pay, benefits or compensation data, especially a table or list covering several people.
-- "legal_privileged": legal advice, attorney-client or litigation material.
+- "legal_privileged": legal advice, attorney-client or litigation material (including court orders and filings) that is not the data subject's own. A document that belongs to the subject is "none": it was written to them, sent by them or made on their behalf, such as their retainer or engagement letter or their claim letter. Court orders, internal legal analysis and advice that was never sent to the subject stay "legal_privileged".
 - "hr_investigation_or_discipline": investigations, grievances, performance reviews or disciplinary records about people.
 - "third_party_personal_data": personal data of other people (ID numbers, health, bank details) that is not the subject's own.
 - "other_confidential": anything else clearly confidential, restricted, or marked as such.
