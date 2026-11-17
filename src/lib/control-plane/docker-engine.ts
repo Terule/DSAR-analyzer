@@ -162,6 +162,7 @@ export async function safeDispatcherBinds(
         [
           "/data",
           "/run/aida-secrets",
+          "/run/aws",
           "/workspace/logs",
           "/workspace/batches",
         ].includes(mount.Destination),

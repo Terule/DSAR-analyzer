@@ -6,6 +6,9 @@ services:
       dockerfile: Dockerfile
     init: true
     environment:
+      AWS_SHARED_CREDENTIALS_FILE: /run/aws/credentials
+      AWS_CONFIG_FILE: /run/aws/config
+      AWS_REGION: eu-central-1
       STAGING_PATH: /data/Staging
       EXTRACTED_PATH: /data/Results
       # The app must use the same durable AI submission path as the dispatcher.
@@ -27,6 +30,8 @@ services:
       - aida_secrets:/run/aida-secrets
       - ./logs:/workspace/logs
       - ./batches:/workspace/batches
+      # Bedrock credentials: read-only, never copied into Settings or the database.
+      - ${HOME}/.aws:/run/aws:ro
     depends_on:
       postgres:
         condition: service_healthy
@@ -50,6 +55,9 @@ services:
     image: aida:local
     init: true
     environment:
+      AWS_SHARED_CREDENTIALS_FILE: /run/aws/credentials
+      AWS_CONFIG_FILE: /run/aws/config
+      AWS_REGION: eu-central-1
       STAGING_PATH: /data/Staging
       EXTRACTED_PATH: /data/Results
       CONTROL_PLANE_PIPELINE_ENABLED: "true"
@@ -79,6 +87,8 @@ services:
       - aida_secrets:/run/aida-secrets
       - ./logs:/workspace/logs
       - ./batches:/workspace/batches
+      # Bedrock credentials: read-only, never copied into Settings or the database.
+      - ${HOME}/.aws:/run/aws:ro
       - /var/run/docker.sock:/var/run/docker.sock
     depends_on:
       postgres:
