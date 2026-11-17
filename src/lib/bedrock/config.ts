@@ -46,3 +46,10 @@ export function batchSettings(): { bucket: string; roleArn: string } {
 /** Defaults for the second-review filter; both are editable in System settings. */
 export const REREVIEW_DEFAULT_MIN_P_KEEP = 8;
 export const REREVIEW_DEFAULT_SAMPLE_PERCENT = 2;
+
+/**
+ * Whether the employee email audit may run on Bedrock when it is the provider.
+ * Off until the second review of Haiku 4.5 discards exists for emails: without
+ * it, over-discards from the batch model would be final.
+ */
+export const EMAIL_AUDIT_ON_BEDROCK = false;

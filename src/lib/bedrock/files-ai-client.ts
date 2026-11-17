@@ -4,6 +4,7 @@ import {
   BedrockClient,
   CreateModelInvocationJobCommand,
   GetModelInvocationJobCommand,
+  StopModelInvocationJobCommand,
 } from "@aws-sdk/client-bedrock";
 import {
   BedrockRuntimeClient,
@@ -61,6 +62,7 @@ export interface BedrockDeps {
     outputUri: string;
   }): Promise<string>;
   getJob(jobArn: string): Promise<{ status: string; message?: string }>;
+  stopJob(jobArn: string): Promise<void>;
 }
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -162,6 +164,11 @@ export function awsBedrockDeps(): BedrockDeps {
         new GetModelInvocationJobCommand({ jobIdentifier: jobArn }),
       );
       return { status: job.status ?? "", message: job.message };
+    },
+    async stopJob(jobArn) {
+      await bedrock.send(
+        new StopModelInvocationJobCommand({ jobIdentifier: jobArn }),
+      );
     },
   };
 }
@@ -355,4 +362,53 @@ export function bedrockFilesAiClient(
       return `${lines.join("\n")}\n`;
     },
   };
+}
+
+/** Local files a Bedrock run keeps (record map, cached output) next to its request file. */
+function artifactsOf(id: string): string[] {
+  if (id.startsWith(BEDROCK_BATCH_PREFIX)) {
+    const state = id.slice(BEDROCK_BATCH_PREFIX.length);
+    const base = state.replace(/\.bedrock\.json$/, "");
+    return [state, converseOutPath(base)];
+  }
+  if (id.startsWith(BEDROCK_CONVERSE_PREFIX)) {
+    const base = artifactBase(id.slice(BEDROCK_CONVERSE_PREFIX.length));
+    return [converseOutPath(base)];
+  }
+  return [];
+}
+
+/** Removes a finished run's local Bedrock files. Callers that own the request file use this. */
+export function removeBedrockArtifacts(id: string): void {
+  for (const file of artifactsOf(id)) fs.rmSync(file, { force: true });
+}
+
+/**
+ * Best-effort cancel of a Bedrock run before its case is deleted: stops the
+ * batch job, deletes its S3 objects and the local files. Never throws.
+ */
+export async function cancelBedrockRun(
+  id: string,
+  deps: BedrockDeps = awsBedrockDeps(),
+): Promise<void> {
+  try {
+    if (id.startsWith(BEDROCK_BATCH_PREFIX)) {
+      const file = id.slice(BEDROCK_BATCH_PREFIX.length);
+      if (fs.existsSync(file)) {
+        const state = JSON.parse(fs.readFileSync(file, "utf8")) as BatchState;
+        if (state.jobArn)
+          await deps.stopJob(state.jobArn).catch(() => undefined);
+        const keys = [
+          state.inputKey,
+          ...(await deps.listObjects(state.bucket, state.outputPrefix)),
+        ];
+        for (const key of keys) {
+          await deps.deleteObject(state.bucket, key).catch(() => undefined);
+        }
+      }
+    }
+  } catch (error) {
+    console.error("[Bedrock] Could not cancel run:", (error as Error).name);
+  }
+  removeBedrockArtifacts(id);
 }

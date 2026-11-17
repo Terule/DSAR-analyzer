@@ -24,7 +24,7 @@
     "lint": "biome check",
     "format": "biome format --write",
     "test": "node --import tsx --test scripts/tests/unit/*.test.ts",
-    "test:db": "node --import tsx --test --test-concurrency=1 scripts/tests/db/*.test.ts"
+    "test:db": "node --import tsx --test --test-force-exit --test-concurrency=1 scripts/tests/db/*.test.ts"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock": "^3.1170.0",

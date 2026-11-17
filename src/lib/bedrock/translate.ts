@@ -39,7 +39,7 @@ export function parseRequestLine(line: string): ParsedRequest {
 /** Added to Haiku 4.5 batch requests so its discards can be triaged for a second look. */
 export const CONFIDENCE_INSTRUCTION = `
 
-Also report "confidence": an integer from 0 to 100 giving the probability that this file SHOULD BE KEPT (delivered). 0 = certainly discard, 100 = certainly keep. Use the whole range: pick a middle value when the rules do not clearly decide.`;
+Also report "confidence": an integer from 0 to 100 giving the probability that this file or email SHOULD BE KEPT (delivered). 0 = certainly discard, 100 = certainly keep. Use the whole range: pick a middle value when the rules do not clearly decide.`;
 
 function withConfidence(
   schema: Record<string, unknown>,

@@ -4,6 +4,9 @@ import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
 import { AI_MODEL, AI_REASONING_EFFORT, AI_TOKENIZER_MODEL } from "./ai-model";
+import { EMAIL_AUDIT_ON_BEDROCK } from "./bedrock/config";
+import { cancelBedrockRun, isBedrockId } from "./bedrock/files-ai-client";
+import type { ParsedRequest } from "./bedrock/translate";
 import { getCasePstFileIds } from "./case-utils";
 import { runtimeCredentials } from "./credentials";
 import {
@@ -11,6 +14,8 @@ import {
   SENSITIVITY_SCHEMA,
 } from "./email-audit";
 import { stripEmailSignature } from "./email-content";
+import type { FilesAiClient } from "./files-ai";
+import { configuredFilesAiClient } from "./files-ai-provider";
 import { startMailScreen } from "./mail-screen";
 import {
   DEFAULT_AI_BATCH_SETTINGS,
@@ -42,13 +47,12 @@ export async function cancelOpenAiBatchesForFiles(fileIds: string[]) {
   });
   if (batches.length === 0) return;
   const client = await getOpenAi().catch(() => null);
-  if (!client) return;
   await Promise.all(
-    batches.map(({ batch_id }) =>
-      batch_id
-        ? client.batches.cancel(batch_id).catch(() => undefined)
-        : undefined,
-    ),
+    batches.map(({ batch_id }) => {
+      if (!batch_id) return undefined;
+      if (isBedrockId(batch_id)) return cancelBedrockRun(batch_id);
+      return client?.batches.cancel(batch_id).catch(() => undefined);
+    }),
   );
 }
 const TOKENIZER = encodingForModel(AI_TOKENIZER_MODEL);
@@ -154,6 +158,21 @@ function buildSubjectSearchTokens(criteria: {
   return Array.from(tokens).filter(Boolean);
 }
 
+/** Tests inject a fake Bedrock client here; production never sets it. */
+export const emailAiTestOverride: {
+  client?: FilesAiClient;
+  converse?: (request: ParsedRequest, modelId: string) => Promise<unknown>;
+} = {};
+
+/** Bedrock runs the email audit only when it is the provider and the audit may use it. */
+async function useBedrockForEmails(injected?: FilesAiClient): Promise<boolean> {
+  if (injected || emailAiTestOverride.client) return true;
+  return (
+    EMAIL_AUDIT_ON_BEDROCK &&
+    (await getAiBatchSettings()).aiProvider === "bedrock"
+  );
+}
+
 /** The employee-case email audit prompt. Exported so spikes and tests use the exact text. */
 export function buildEmailAuditSystemPrompt(criteria: {
   name: string;
@@ -214,7 +233,7 @@ export async function generateBatchFile(
     personalEmail?: string;
     aliases: string[];
   },
-  options?: { maxTokensPerBatch?: number },
+  options?: { maxTokensPerBatch?: number; client?: FilesAiClient },
 ) {
   const configuredSettings = options?.maxTokensPerBatch
     ? null
@@ -447,23 +466,35 @@ export async function generateBatchFile(
   );
 
   try {
-    const client = await getOpenAi();
-    const fileUpload = await client.files.create({
-      file: fs.createReadStream(batchFilePath),
-      purpose: "batch",
-    });
-
-    const batch = await client.batches.create({
-      input_file_id: fileUpload.id,
-      endpoint: "/v1/chat/completions",
-      completion_window: "24h",
-    });
+    let externalBatchId: string;
+    if (await useBedrockForEmails(options?.client)) {
+      // Bedrock: Batch (Haiku 4.5) over 100 records, Converse (Haiku 5.5) below.
+      const bedrock =
+        options?.client ??
+        emailAiTestOverride.client ??
+        (await configuredFilesAiClient());
+      externalBatchId = await bedrock.createBatch(
+        await bedrock.uploadBatchFile(batchFilePath),
+      );
+    } else {
+      const client = await getOpenAi();
+      const fileUpload = await client.files.create({
+        file: fs.createReadStream(batchFilePath),
+        purpose: "batch",
+      });
+      const batch = await client.batches.create({
+        input_file_id: fileUpload.id,
+        endpoint: "/v1/chat/completions",
+        completion_window: "24h",
+      });
+      externalBatchId = batch.id;
+    }
 
     await prisma.$transaction([
       prisma.aiBatchRun.update({
         where: { id: batchRunId },
         data: {
-          openai_batch_id: batch.id,
+          openai_batch_id: externalBatchId,
           status: "submitted",
           request_count: addedCount,
           estimated_tokens: currentTokenCount,
@@ -475,7 +506,7 @@ export async function generateBatchFile(
       prisma.processedFile.update({
         where: { id: fileId },
         data: {
-          batch_id: batch.id,
+          batch_id: externalBatchId,
           ai_status: "batch_ready",
           ai_batches_total: { increment: 1 },
         },
@@ -506,7 +537,11 @@ export async function fillAiBatchSlots(
     personalEmail?: string;
     aliases: string[];
   },
-  options?: { maxTokensPerBatch?: number; maxConcurrentBatches?: number },
+  options?: {
+    maxTokensPerBatch?: number;
+    maxConcurrentBatches?: number;
+    client?: FilesAiClient;
+  },
 ): Promise<void> {
   const configuredSettings =
     options?.maxTokensPerBatch && options?.maxConcurrentBatches
@@ -532,6 +567,7 @@ export async function fillAiBatchSlots(
   for (let index = 0; index < slots; index++) {
     const result = await generateBatchFile(fileId, subjectCriteria, {
       maxTokensPerBatch,
+      client: options?.client,
     });
     if (result !== "submitted") break;
   }

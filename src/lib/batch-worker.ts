@@ -1,8 +1,18 @@
 import fs from "node:fs";
 import path from "node:path";
 import OpenAI from "openai";
-import { DEFAULT_MAX_TOKENS_PER_BATCH, fillAiBatchSlots } from "./ai";
+import {
+  DEFAULT_MAX_TOKENS_PER_BATCH,
+  emailAiTestOverride,
+  fillAiBatchSlots,
+} from "./ai";
 import { AI_MODEL, AI_REASONING_EFFORT } from "./ai-model";
+import { CONVERSE_MODEL } from "./bedrock/config";
+import {
+  awsBedrockDeps,
+  isBedrockId,
+  removeBedrockArtifacts,
+} from "./bedrock/files-ai-client";
 import {
   getCasePstFileIds,
   isCaseAiSettled,
@@ -11,6 +21,7 @@ import {
 import { enqueueFilePhase } from "./control-plane/pipeline";
 import { runtimeCredentials } from "./credentials";
 import { applyConfidentiality } from "./email-audit";
+import { configuredFilesAiClient } from "./files-ai-provider";
 import { startMailScreen } from "./mail-screen";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
@@ -260,6 +271,7 @@ function hasStrongSubjectSignal(
 async function runDiscardSecondPass(
   payload: AiPayload,
   criteria: SubjectCriteria,
+  viaBedrock = false,
 ): Promise<{ decision: "keep" | "discard"; reason: string }> {
   const attachmentCount =
     payload.meta?.attachment_count ?? payload.attachments?.length ?? 0;
@@ -278,29 +290,57 @@ Rules:
 
 Return JSON only: {"decision":"keep"|"discard","reason":"brief"}`;
 
-  const response = await (await getOpenAi()).chat.completions.create({
-    model: AI_MODEL,
-    temperature: 0.0,
-    reasoning_effort: AI_REASONING_EFFORT,
-    max_completion_tokens: 80,
-    messages: [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: JSON.stringify({
-          target: {
-            name: criteria.name || "",
-            email: criteria.email || "",
-            aliases: criteria.aliases || [],
-          },
-          payload,
-        }),
-      },
-    ],
+  const userContent = JSON.stringify({
+    target: {
+      name: criteria.name || "",
+      email: criteria.email || "",
+      aliases: criteria.aliases || [],
+    },
+    payload,
   });
 
-  const raw = response.choices[0]?.message?.content?.trim() || "";
-  const clean = raw.replace(/^```json\s*/i, "").replace(/\s*```$/i, "");
+  let clean: string;
+  if (viaBedrock) {
+    // Haiku 5.5 through Converse, answering with a forced tool.
+    const converse = emailAiTestOverride.converse ?? awsBedrockDeps().converse;
+    try {
+      const input = await converse(
+        {
+          customId: "second-pass",
+          system: systemPrompt,
+          user: userContent,
+          toolName: "second_pass_decision",
+          schema: {
+            type: "object",
+            additionalProperties: false,
+            required: ["decision", "reason"],
+            properties: {
+              decision: { type: "string", enum: ["keep", "discard"] },
+              reason: { type: "string", maxLength: 200 },
+            },
+          },
+          maxTokens: 300,
+        },
+        CONVERSE_MODEL,
+      );
+      clean = input === undefined ? "" : JSON.stringify(input);
+    } catch (_err) {
+      return { decision: "discard", reason: "Second-pass call failed." };
+    }
+  } else {
+    const response = await (await getOpenAi()).chat.completions.create({
+      model: AI_MODEL,
+      temperature: 0.0,
+      reasoning_effort: AI_REASONING_EFFORT,
+      max_completion_tokens: 80,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent },
+      ],
+    });
+    const raw = response.choices[0]?.message?.content?.trim() || "";
+    clean = raw.replace(/^```json\s*/i, "").replace(/\s*```$/i, "");
+  }
 
   try {
     const parsed = JSON.parse(clean) as {
@@ -401,7 +441,29 @@ async function pollSingleBatchStatus(
   fs.mkdirSync(discardedFolder, { recursive: true });
 
   console.log(`[Batch Worker] Checking status of batch: ${batchId}...`);
-  const batch = await (await getOpenAi()).batches.retrieve(batchId);
+  // A Bedrock run is read through the Files AI client seam; its status is
+  // mapped onto the few fields of an OpenAI batch this function looks at.
+  const bedrockClient = isBedrockId(batchId)
+    ? (emailAiTestOverride.client ??
+      (await configuredFilesAiClient({ forPolling: true })))
+    : undefined;
+  let batch: OpenAI.Batches.Batch;
+  if (bedrockClient) {
+    const state = await bedrockClient.retrieveBatch(batchId);
+    batch = {
+      id: batchId,
+      status: state.status,
+      output_file_id: state.outputFileId ?? null,
+      error_file_id: null,
+      errors: null,
+      completed_at: null,
+    } as unknown as OpenAI.Batches.Batch;
+    if (["failed", "expired", "cancelled"].includes(state.status)) {
+      removeBedrockArtifacts(batchId);
+    }
+  } else {
+    batch = await (await getOpenAi()).batches.retrieve(batchId);
+  }
   console.log(`[Batch Worker] Status returned from OpenAI: ${batch.status}`);
 
   if (batch.status === "completed") {
@@ -454,10 +516,11 @@ async function pollSingleBatchStatus(
     console.log(
       `[Batch Worker] Downloading results from file ${batch.output_file_id}...`,
     );
-    const fileResponse = await (await getOpenAi()).files.content(
-      batch.output_file_id,
-    );
-    const content = await fileResponse.text();
+    const content = bedrockClient
+      ? await bedrockClient.readFile(batch.output_file_id)
+      : await (
+          await (await getOpenAi()).files.content(batch.output_file_id)
+        ).text();
     const lines = content.trim().split("\n");
 
     let keepCount = 0;
@@ -568,7 +631,11 @@ async function pollSingleBatchStatus(
         payload
       ) {
         auditStats.secondPassExecuted++;
-        const secondPass = await runDiscardSecondPass(payload, subjectCriteria);
+        const secondPass = await runDiscardSecondPass(
+          payload,
+          subjectCriteria,
+          !!bedrockClient,
+        );
         if (secondPass.decision === "keep") {
           decision = "keep";
           reason = `Second Pass: ${secondPass.reason}`;
@@ -619,6 +686,9 @@ async function pollSingleBatchStatus(
         data: { status: "completed", completed_at: new Date() },
       }),
     ]);
+
+    // The decisions are durable: the run's local Bedrock files are no longer needed.
+    if (bedrockClient) removeBedrockArtifacts(batchId);
 
     // Once a keep decision is durable, the EML has been moved to selected/ and
     // no later AI step needs its JSON payload. Remove it immediately instead of

@@ -98,6 +98,10 @@ class FakeDeps implements BedrockDeps {
   async getJob() {
     return { status: this.jobStatus };
   }
+  stopped: string[] = [];
+  async stopJob(jobArn: string) {
+    this.stopped.push(jobArn);
+  }
 }
 
 describe("model guard", () => {
