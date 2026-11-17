@@ -64,7 +64,7 @@ export const DEFAULT_MAX_CONCURRENT_AI_BATCHES =
 const MAX_COMPLETION_TOKENS_PER_REQUEST = 150;
 const CHAT_MESSAGE_OVERHEAD_TOKENS = 12;
 const REQUEST_OVERHEAD_TOKENS = 24;
-const RESPONSE_FORMAT = {
+export const RESPONSE_FORMAT = {
   type: "json_schema",
   json_schema: {
     name: "dsar_audit_decision",
@@ -154,6 +154,58 @@ function buildSubjectSearchTokens(criteria: {
   return Array.from(tokens).filter(Boolean);
 }
 
+/** The employee-case email audit prompt. Exported so spikes and tests use the exact text. */
+export function buildEmailAuditSystemPrompt(criteria: {
+  name: string;
+  email: string;
+  personalEmail?: string;
+  aliases: string[];
+}): string {
+  return `You are an expert Legal AI performing a Data Subject Access Request (DSAR) compliance audit.
+Target Data Subject: ${criteria.name}
+Primary Email (work): ${criteria.email}${criteria.personalEmail ? `\nPersonal Email: ${criteria.personalEmail}` : ""}
+Aliases: ${criteria.aliases.join(", ")}
+
+INSTRUCTIONS:
+You are receiving a JSON payload with these sections:
+- first_email: { from, to, subject, body }
+- second_email: { from, to, subject, body } | null
+- rest_of_chain: { text }
+- meta: { attachment_count, to_recipient_count }
+- attachments: [{ filename, content_type, size_bytes }]
+
+  Your PRIMARY objective is precision: avoid false positives.
+  If uncertain, choose "discard".
+
+Apply these HARD rules in order and evaluate mainly using first_email:
+
+  1. [IMMEDIATE DISCARD]
+If first_email.subject contains the full token words "Confidential", "Confidentiality", "Privileged", "CRO", or "CROs" -> discard.
+Important: token boundary match only. Do NOT treat substrings like "MICROSOFT" as CRO.
+
+  2. [STRONG KEEP SIGNALS]
+The payload comes from a PDF whose chain runs from most recent (first_email) to oldest. first_email is the most recent email of the chain. Keep ONLY if at least one strong signal exists:
+- Subject's primary or personal email appears in first_email.from.
+- Subject's primary or personal email appears in first_email.to AND first_email has only one recipient.
+- Subject name/alias/initials appear in first_email.body and the email is ABOUT the subject (the subject is the topic). Do NOT keep when the subject is only mentioned as the person doing some work (for example "John prepared the report").
+- second_email.from is the subject, ONLY when (a) the subject's email was forwarded to someone else (the subject wrote to A, A forwarded it to B: first_email is A's forward and second_email is the subject's message), or (b) second_email is the subject's message and first_email is a direct reply in a thread with only two participants.
+- Personal data about the subject, such as performance reviews, feedback or appraisals, is kept.
+
+  3. [WEAK SIGNALS -> DISCARD]
+  Do NOT keep when evidence is only weak/ambiguous, including:
+  - Name appears once in disclaimer/signature/footer/contact list.
+  - Partial name/substrings only (token boundary mismatch).
+  - Generic references without clear linkage to the target subject.
+- Subject appears only in rest_of_chain.text (deep in the chain), or only in a reply in a conversation with more than two participants, without a strong signal in first_email.
+
+  4. [DEFAULT]
+  If no strong signal is present -> discard.
+
+${EMAIL_CONFIDENTIALITY_PROMPT}
+
+Set needs_second_pass = true only when decision is "discard" and attachments may still contain relevant evidence (especially attached emails/documents).`;
+}
+
 export async function generateBatchFile(
   fileId: string,
   subjectCriteria: {
@@ -232,49 +284,7 @@ export async function generateBatchFile(
     unprocessedRecords.map((r) => r.email_hash),
   );
 
-  const systemPrompt = `You are an expert Legal AI performing a Data Subject Access Request (DSAR) compliance audit.
-Target Data Subject: ${subjectCriteria.name}
-Primary Email (work): ${subjectCriteria.email}${subjectCriteria.personalEmail ? `\nPersonal Email: ${subjectCriteria.personalEmail}` : ""}
-Aliases: ${subjectCriteria.aliases.join(", ")}
-
-INSTRUCTIONS:
-You are receiving a JSON payload with these sections:
-- first_email: { from, to, subject, body }
-- second_email: { from, to, subject, body } | null
-- rest_of_chain: { text }
-- meta: { attachment_count, to_recipient_count }
-- attachments: [{ filename, content_type, size_bytes }]
-
-  Your PRIMARY objective is precision: avoid false positives.
-  If uncertain, choose "discard".
-
-Apply these HARD rules in order and evaluate mainly using first_email:
-
-  1. [IMMEDIATE DISCARD]
-If first_email.subject contains the full token words "Confidential", "Confidentiality", "Privileged", "CRO", or "CROs" -> discard.
-Important: token boundary match only. Do NOT treat substrings like "MICROSOFT" as CRO.
-
-  2. [STRONG KEEP SIGNALS]
-The payload comes from a PDF whose chain runs from most recent (first_email) to oldest. first_email is the most recent email of the chain. Keep ONLY if at least one strong signal exists:
-- Subject's primary or personal email appears in first_email.from.
-- Subject's primary or personal email appears in first_email.to AND first_email has only one recipient.
-- Subject name/alias/initials appear in first_email.body and the email is ABOUT the subject (the subject is the topic). Do NOT keep when the subject is only mentioned as the person doing some work (for example "John prepared the report").
-- second_email.from is the subject, ONLY when (a) the subject's email was forwarded to someone else (the subject wrote to A, A forwarded it to B: first_email is A's forward and second_email is the subject's message), or (b) second_email is the subject's message and first_email is a direct reply in a thread with only two participants.
-- Personal data about the subject, such as performance reviews, feedback or appraisals, is kept.
-
-  3. [WEAK SIGNALS -> DISCARD]
-  Do NOT keep when evidence is only weak/ambiguous, including:
-  - Name appears once in disclaimer/signature/footer/contact list.
-  - Partial name/substrings only (token boundary mismatch).
-  - Generic references without clear linkage to the target subject.
-- Subject appears only in rest_of_chain.text (deep in the chain), or only in a reply in a conversation with more than two participants, without a strong signal in first_email.
-
-  4. [DEFAULT]
-  If no strong signal is present -> discard.
-
-${EMAIL_CONFIDENTIALITY_PROMPT}
-
-Set needs_second_pass = true only when decision is "discard" and attachments may still contain relevant evidence (especially attached emails/documents).`;
+  const systemPrompt = buildEmailAuditSystemPrompt(subjectCriteria);
 
   // Precompute the constant per-request token overhead ONCE (previously the
   // system prompt was re-encoded for every email) and the subject mention
