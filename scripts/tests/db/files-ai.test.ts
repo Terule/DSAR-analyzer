@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+import { encodingForModel } from "js-tiktoken";
+import { AI_TOKENIZER_MODEL } from "../../../src/lib/ai-model";
 import {
   type FilesAiClient,
   getFilesAiState,
@@ -11,6 +13,7 @@ import {
   pollFilesAiBatches,
   prepareFilesAi,
 } from "../../../src/lib/files-ai";
+import { buildFilesAiSystemPrompt } from "../../../src/lib/files-ai-prompt";
 import { prisma } from "../../../src/lib/prisma";
 
 const tag = crypto.randomUUID().slice(0, 8);
@@ -312,7 +315,11 @@ describe("Files AI", () => {
       client,
       readText: longText,
       batchDir,
-      maxTokensPerBatch: 800,
+      // One request fits, two do not: sized from the prompt so it survives prompt edits.
+      maxTokensPerBatch:
+        encodingForModel(AI_TOKENIZER_MODEL).encode(
+          buildFilesAiSystemPrompt(criteria, "employee"),
+        ).length + 400,
     });
     assert.ok(
       result.submittedBatches >= 2,
