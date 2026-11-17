@@ -26,12 +26,7 @@ import {
 import { buildSample, subjectMentionTokens } from "../../src/lib/files-ai-text";
 
 const REGION = process.env.AWS_REGION || "eu-central-1";
-const DEFAULT_MODELS = [
-  "eu.anthropic.claude-haiku-5-5",
-  "eu.anthropic.claude-sonnet-5-5",
-];
-/** Models that reject a forced toolChoice (tool/any); they get `auto`. */
-const NO_FORCED_TOOL = ["sonnet-5-5"];
+const DEFAULT_MODELS = ["eu.anthropic.claude-haiku-5-5"];
 const TOOL_NAME = "files_screening_decision";
 
 interface Item {
@@ -189,13 +184,7 @@ async function main() {
       while (next < prepared.length) {
         const index = next++;
         const { item, user } = prepared[index];
-        const outcome = await converse(
-          client,
-          modelId,
-          system,
-          user,
-          !NO_FORCED_TOOL.some((m) => modelId.includes(m)),
-        );
+        const outcome = await converse(client, modelId, system, user, true);
         const judgement = parseFilesAiJudgement(outcome.raw);
         if (judgement.relevance === null) invalid++;
         const verdict = decideFilesAi({
