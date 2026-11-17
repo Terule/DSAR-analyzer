@@ -49,7 +49,7 @@ export const SENSITIVITY_RULES = `Sensitivity (confidential content that must ne
 - "third_party_personal_data": personal data of other people (ID numbers, health, bank details) that is not the subject's own.
 - "other_confidential": anything else clearly confidential, restricted, or marked as such.
 - "none": nothing of the above.
-A file is NOT sensitive merely because it names the data subject. The subject's own data about themselves (their own payslip, contract or offer letter) is "none". A file that holds other people's compensation or personal data is sensitive even when it also mentions the subject. A draft or earlier version of a file that is normally protected is judged by its content, not by whether it carries a password.`;
+A file is NOT sensitive merely because it names the data subject. Payroll and compensation data is always "payroll_compensation", even when it is the subject's own payslip or pay data. Otherwise the subject's own data about themselves (their own contract or offer letter) is "none". A file that holds other people's compensation or personal data is sensitive even when it also mentions the subject. A draft or earlier version of a file that is normally protected is judged by its content, not by whether it carries a password.`;
 
 export function buildFilesAiSystemPrompt(
   criteria: FilesAiCriteria,
