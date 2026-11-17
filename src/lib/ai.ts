@@ -255,18 +255,19 @@ If first_email.subject contains the full token words "Confidential", "Confidenti
 Important: token boundary match only. Do NOT treat substrings like "MICROSOFT" as CRO.
 
   2. [STRONG KEEP SIGNALS]
-  Keep ONLY if at least one strong signal exists:
+The payload comes from a PDF whose chain runs from most recent (first_email) to oldest. first_email is the most recent email of the chain. Keep ONLY if at least one strong signal exists:
 - Subject's primary or personal email appears in first_email.from.
 - Subject's primary or personal email appears in first_email.to AND first_email has only one recipient.
-- Subject name/alias/initials appear in first_email.body with clear substantive relation.
-- second_email.from is the subject (forwarded chain from subject).
+- Subject name/alias/initials appear in first_email.body and the email is ABOUT the subject (the subject is the topic). Do NOT keep when the subject is only mentioned as the person doing some work (for example "John prepared the report").
+- second_email.from is the subject, ONLY when (a) the subject's email was forwarded to someone else (the subject wrote to A, A forwarded it to B: first_email is A's forward and second_email is the subject's message), or (b) second_email is the subject's message and first_email is a direct reply in a thread with only two participants.
+- Personal data about the subject, such as performance reviews, feedback or appraisals, is kept.
 
   3. [WEAK SIGNALS -> DISCARD]
   Do NOT keep when evidence is only weak/ambiguous, including:
   - Name appears once in disclaimer/signature/footer/contact list.
   - Partial name/substrings only (token boundary mismatch).
   - Generic references without clear linkage to the target subject.
-- Subject appears only in rest_of_chain.text without strong first/second email evidence.
+- Subject appears only in rest_of_chain.text (deep in the chain), or only in a reply in a conversation with more than two participants, without a strong signal in first_email.
 
   4. [DEFAULT]
   If no strong signal is present -> discard.

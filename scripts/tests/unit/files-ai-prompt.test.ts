@@ -193,13 +193,14 @@ describe("batch request", () => {
     assert.match(buildFilesAiSystemPrompt(criteria), /clearly/i);
   });
 
-  it("asks about confidentiality in both modes and about relevance only for employees", () => {
+  it("asks about confidentiality in both modes, names the subject in both, and asks about relevance only for employees", () => {
     const employee = buildFilesAiSystemPrompt(criteria, "employee");
     const client = buildFilesAiSystemPrompt(criteria, "client");
     assert.match(employee, /payroll_compensation/);
     assert.match(client, /payroll_compensation/);
     assert.ok(employee.includes("Jonathan Wheeler"));
-    assert.ok(!client.includes("Jonathan Wheeler"));
+    // Client screening names the subject too: "the subject's own file" needs it.
+    assert.ok(client.includes("Jonathan Wheeler"));
     assert.match(client, /always answer "relevant"/);
   });
 

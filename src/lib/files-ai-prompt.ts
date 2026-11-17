@@ -44,12 +44,12 @@ export const FILES_AI_RESPONSE_FORMAT = {
 
 export const SENSITIVITY_RULES = `Sensitivity (confidential content that must never be delivered):
 - "payroll_compensation": salary, bonus, pay, benefits or compensation data, especially a table or list covering several people.
-- "legal_privileged": legal advice, attorney-client or litigation material (including court orders and filings) that is not the data subject's own. A document that belongs to the subject is "none": it was written to them, sent by them or made on their behalf, such as their retainer or engagement letter, their claim letter or legal advice addressed to them. Court orders, internal legal analysis and advice that was never sent to the subject stay "legal_privileged".
-- "hr_investigation_or_discipline": investigations, grievances, performance reviews or disciplinary records about people.
-- "third_party_personal_data": personal data of other people (ID numbers, health, bank details) that is not the subject's own.
+- "legal_privileged": legal advice, attorney-client or litigation material (including court orders and filings) that is not the data subject's own. A document that belongs to the subject is "none": it was written to them, sent by them or made on their behalf, such as their retainer or engagement letter, their claim letter or legal advice addressed to them. Court orders, ring orders and confidentiality orders that merely name the subject, internal legal analysis and advice that was never sent to the subject stay "legal_privileged".
+- "hr_investigation_or_discipline": investigations, grievances, performance reviews, feedback or disciplinary records about OTHER people. Disciplinary, performance, feedback and investigation records about the data subject are the subject's own personal data: answer "none" for them, even though they are HR material.
+- "third_party_personal_data": personal data of other people (ID numbers, health, bank details) in a file that is not about the data subject, for example another client's retainer or a list of other people's bank details. Other people's names or details inside a file that is about the subject are "none": they are redacted later.
 - "other_confidential": anything else clearly confidential, restricted, or marked as such.
 - "none": nothing of the above.
-A file is NOT sensitive merely because it names the data subject. Payroll and compensation data is always "payroll_compensation", even when it is the subject's own payslip or pay data. Otherwise the subject's own data about themselves (their own contract or offer letter) is "none". A file that holds other people's compensation or personal data is sensitive even when it also mentions the subject. A draft or earlier version of a file that is normally protected is judged by its content, not by whether it carries a password.`;
+Confidentiality rules apply to files that are not ABOUT the data subject: a court order or ring order that merely names the subject is not the subject's own file. A file is NOT sensitive merely because it names the data subject. Payroll and compensation data is always "payroll_compensation", even when it is the subject's own payslip or pay data. Otherwise the subject's own data about themselves (their own contract or offer letter) is "none". A file that holds other people's compensation is sensitive even when it also mentions the subject. A draft or earlier version of a file that is normally protected is judged by its content, not by whether it carries a password.`;
 
 export function buildFilesAiSystemPrompt(
   criteria: FilesAiCriteria,
@@ -57,6 +57,8 @@ export function buildFilesAiSystemPrompt(
 ): string {
   if (mode !== "employee") {
     return `You are an expert Legal AI screening documents, emails and chat messages before they are delivered.
+Target Data Subject: ${criteria.name}${criteria.email ? `\nPrimary Email: ${criteria.email}` : ""}${criteria.personalEmail ? `\nPersonal Email: ${criteria.personalEmail}` : ""}${criteria.aliases.length ? `\nAliases: ${criteria.aliases.join(", ")}` : ""}
+"The data subject" and "the subject" below always mean this person, never anyone else named in a file.
 Decide only whether the file contains confidential data that must not be delivered.
 
 ${SENSITIVITY_RULES}
