@@ -7,7 +7,7 @@ import {
 /** Added to the email audit prompt: confidential mail is never delivered. */
 export const EMAIL_CONFIDENTIALITY_PROMPT = `
   5. [CONFIDENTIALITY - overrides everything above]
-Also judge whether the email (first_email, second_email and rest_of_chain) contains confidential material that must never be delivered, and report it in "sensitivity". A confidential email is always "discard", even when the subject is plainly involved, and needs_second_pass must be false.
+Also judge whether the email (first_email, second_email and rest_of_chain) contains confidential material that must never be delivered, and report it in "sensitivity". A confidential email is always "discard", even when the subject is plainly involved, and needs_second_pass must be false. The exception: confidential material that is ABOUT the data subject themselves (their grievance and its outcome, appraisal, discipline, health or HR matters) is the subject's own personal data, so report sensitivity "none" and keep it. Confidentiality applies to material that is not about the subject.
 
 ${SENSITIVITY_RULES}`;
 

@@ -187,7 +187,7 @@ Important: token boundary match only. Do NOT treat substrings like "MICROSOFT" a
 The payload comes from a PDF whose chain runs from most recent (first_email) to oldest. first_email is the most recent email of the chain. Keep ONLY if at least one strong signal exists:
 - Subject's primary or personal email appears in first_email.from.
 - Subject's primary or personal email appears in first_email.to AND first_email has only one recipient.
-- Subject name/alias/initials appear in first_email.body and the email is ABOUT the subject (the subject is the topic). Do NOT keep when the subject is only mentioned as the person doing some work (for example "John prepared the report").
+- Subject name/alias/initials appear in first_email.body and the email is ABOUT the subject as a person: their own personal matters such as leave or time off, pay, health, a request, complaint or grievance, appraisal, feedback, discipline or employment status. Keep these even when the email only uses the first name. Do NOT keep when the subject is only mentioned in connection with a task or responsibility (for example "John prepared the report", "Maria will be responsible for the budget", "please contact Maria", an action item or an assignment).
 - second_email.from is the subject, ONLY when (a) the subject's email was forwarded to someone else (the subject wrote to A, A forwarded it to B: first_email is A's forward and second_email is the subject's message), or (b) second_email is the subject's message and first_email is a direct reply in a thread with only two participants.
 - Personal data about the subject, such as performance reviews, feedback or appraisals, is kept.
 
