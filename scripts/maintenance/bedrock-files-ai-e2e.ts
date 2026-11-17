@@ -24,6 +24,7 @@ import {
 } from "../../src/lib/files-ai";
 import type { FilesAiCandidate } from "../../src/lib/files-ai-extract";
 import { configuredFilesAiClient } from "../../src/lib/files-ai-provider";
+import { rereviewFilesAiDiscards } from "../../src/lib/files-ai-rereview";
 import { prisma } from "../../src/lib/prisma";
 
 async function main() {
@@ -102,6 +103,7 @@ async function main() {
     const deadline = Date.now() + 40 * 60_000;
     while (!(await isFilesAiSettled(fileId)) && Date.now() < deadline) {
       await pollFilesAiBatches(fileId, client, batchDir);
+      await rereviewFilesAiDiscards({ fileId, batchDir });
       if (await isFilesAiSettled(fileId)) break;
       await new Promise((r) => setTimeout(r, 20_000));
     }
@@ -109,8 +111,35 @@ async function main() {
 
     const verdicts = await prisma.filesAiVerdict.findMany({
       where: { file_id: fileId },
-      select: { rel_path: true, verdict: true },
+      select: {
+        rel_path: true,
+        verdict: true,
+        p_keep: true,
+        first_reason: true,
+        reviewed_by_model: true,
+      },
     });
+    // Discards Haiku 4.5 made that went to Haiku 5.5 (first_reason is set only for those).
+    const reviewed = verdicts.filter((v) => v.first_reason !== null);
+    const outcome: Record<string, number> = {};
+    for (const v of reviewed) {
+      outcome[v.verdict ?? "none"] = (outcome[v.verdict ?? "none"] ?? 0) + 1;
+    }
+    console.log(
+      `second review: ${reviewed.length} of ${verdicts.length} sent to Haiku 5.5, outcomes ${JSON.stringify(outcome)}`,
+    );
+    const finalByModel: Record<string, number> = {};
+    for (const v of verdicts) {
+      const key = `${v.reviewed_by_model ?? "?"}:${v.verdict}`;
+      finalByModel[key] = (finalByModel[key] ?? 0) + 1;
+    }
+    console.log(`final by model: ${JSON.stringify(finalByModel)}`);
+    const discards45 = verdicts.filter(
+      (v) => v.reviewed_by_model === "haiku-4.5" && v.verdict === "discard",
+    ).length;
+    console.log(
+      `discards left final from Haiku 4.5 without a second look: ${discards45}`,
+    );
     const counts: Record<string, number> = {};
     let wrong = 0;
     let wrongKept = 0;
