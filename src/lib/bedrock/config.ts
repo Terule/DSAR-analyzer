@@ -19,6 +19,10 @@ export function converseConcurrency(): number {
 /** Output budget; the decision JSON is small but `reason` can reach 240 characters. */
 export const MIN_OUTPUT_TOKENS = 300;
 
+/** Id prefixes: they tell a later poll which backend owns a run (and keep ids unique). */
+export const BEDROCK_BATCH_PREFIX = "bedrock-batch:";
+export const BEDROCK_CONVERSE_PREFIX = "bedrock-converse:";
+
 const ALLOWED_MODELS = [BATCH_MODEL, CONVERSE_MODEL];
 
 /** Refuses any model that is not on the allowlist or not an `eu.` inference profile. */
@@ -37,4 +41,16 @@ export function batchSettings(): { bucket: string; roleArn: string } {
     );
   }
   return { bucket, roleArn };
+}
+
+/** Discards from the Haiku 4.5 batch with at least this p_keep are judged again (env, default 8). */
+export function rereviewMinPKeep(): number {
+  const value = Number(process.env.BEDROCK_REREVIEW_MIN_P_KEEP);
+  return Number.isFinite(value) && value >= 0 && value <= 100 ? value : 8;
+}
+
+/** Share of the remaining, confident discards also judged again as a control (env, default 2%). */
+export function rereviewSampleRate(): number {
+  const value = Number(process.env.BEDROCK_REREVIEW_SAMPLE_RATE);
+  return Number.isFinite(value) && value >= 0 && value <= 1 ? value : 0.02;
 }

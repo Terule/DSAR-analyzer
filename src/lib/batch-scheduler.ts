@@ -16,6 +16,7 @@ import {
   isControlPlanePipelineEnabled,
 } from "./control-plane/pipeline";
 import { filesAiWorkRemains, pollFilesAiRuns } from "./files-ai-poll";
+import { rereviewFilesAiDiscards } from "./files-ai-rereview";
 import { settleMailScreens } from "./mail-screen";
 import { prisma } from "./prisma";
 
@@ -183,6 +184,10 @@ export async function runBatchSweep(): Promise<SweepResult> {
   // Files AI relevance batches are polled alongside the email batches.
   await pollFilesAiRuns().catch((err) =>
     console.error("[Batch Scheduler] Files AI poll failed:", err),
+  );
+  // Discards from the Haiku 4.5 batch that show doubt get a second opinion.
+  await rereviewFilesAiDiscards().catch((err) =>
+    console.error("[Batch Scheduler] Files AI second review failed:", err),
   );
 
   // Cases whose attachment screening has been fully read complete their AI

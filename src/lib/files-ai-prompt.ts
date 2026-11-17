@@ -118,6 +118,8 @@ export interface FilesAiJudgement {
   relevance: "relevant" | "irrelevant" | null;
   sensitivity: Sensitivity | null;
   reason: string;
+  /** The model's own 0-100 estimate that the file should be kept (Bedrock Batch only). */
+  confidence?: number | null;
 }
 
 /** Anything that is not a well-formed answer has no judgement: a person decides. */
@@ -148,6 +150,12 @@ export function parseFilesAiJudgement(raw: unknown): FilesAiJudgement {
       relevance,
       sensitivity: sensitivity as Sensitivity,
       reason: typeof data.reason === "string" ? data.reason.slice(0, 240) : "",
+      confidence:
+        typeof data.confidence === "number" &&
+        data.confidence >= 0 &&
+        data.confidence <= 100
+          ? Math.round(data.confidence)
+          : null,
     };
   } catch {
     return NO_JUDGEMENT;

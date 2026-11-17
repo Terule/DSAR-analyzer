@@ -27,6 +27,7 @@ describe("parseFilesAiJudgement", () => {
       relevance: "relevant",
       sensitivity: "none",
       reason: "ok",
+      confidence: null,
     });
     assert.equal(
       parseFilesAiJudgement(
@@ -34,6 +35,23 @@ describe("parseFilesAiJudgement", () => {
       ).relevance,
       "irrelevant",
     );
+  });
+
+  it("reads the optional 0-100 confidence and ignores anything else", () => {
+    const withConfidence = (value: unknown) =>
+      parseFilesAiJudgement(
+        JSON.stringify({
+          relevance: "relevant",
+          sensitivity: "none",
+          reason: "r",
+          confidence: value,
+        }),
+      ).confidence;
+    assert.equal(withConfidence(12), 12);
+    assert.equal(withConfidence(7.6), 8);
+    assert.equal(withConfidence(101), null);
+    assert.equal(withConfidence(-1), null);
+    assert.equal(withConfidence("high"), null);
   });
 
   for (const bad of [

@@ -36,18 +36,35 @@ export function parseRequestLine(line: string): ParsedRequest {
   };
 }
 
+/** Added to Haiku 4.5 batch requests so its discards can be triaged for a second look. */
+export const CONFIDENCE_INSTRUCTION = `
+
+Also report "confidence": an integer from 0 to 100 giving the probability that this file SHOULD BE KEPT (delivered). 0 = certainly discard, 100 = certainly keep. Use the whole range: pick a middle value when the rules do not clearly decide.`;
+
+function withConfidence(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  const copy = JSON.parse(JSON.stringify(schema)) as {
+    properties: Record<string, unknown>;
+    required: string[];
+  };
+  copy.properties.confidence = { type: "integer", minimum: 0, maximum: 100 };
+  copy.required = [...copy.required, "confidence"];
+  return copy as unknown as Record<string, unknown>;
+}
+
 /** Anthropic Messages body for a Bedrock Batch record, with a forced tool for structured output. */
 export function toBatchModelInput(request: ParsedRequest): object {
   return {
     anthropic_version: "bedrock-2023-05-31",
     max_tokens: request.maxTokens,
-    system: request.system,
+    system: request.system + CONFIDENCE_INSTRUCTION,
     messages: [{ role: "user", content: request.user }],
     tools: [
       {
         name: request.toolName,
         description: "Report the screening decision for this file.",
-        input_schema: request.schema,
+        input_schema: withConfidence(request.schema),
       },
     ],
     tool_choice: { type: "tool", name: request.toolName },

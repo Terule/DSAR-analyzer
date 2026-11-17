@@ -4,6 +4,11 @@ import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
 import OpenAI from "openai";
 import { AI_TOKENIZER_MODEL } from "./ai-model";
+import {
+  BEDROCK_BATCH_PREFIX,
+  BEDROCK_CONVERSE_PREFIX,
+} from "./bedrock/config";
+import { shouldRereview } from "./bedrock/rereview-gate";
 import { runtimeCredentials } from "./credentials";
 import {
   type FilesAiCandidate,
@@ -497,6 +502,35 @@ export async function pollFilesAiBatches(
         largeFile: row.large_file,
         subjectInvolved: row.subject_involved,
       });
+      // A Haiku 4.5 (Bedrock Batch) discard that shows doubt waits for a second
+      // opinion from Haiku 5.5 instead of being final.
+      const fromBatch45 = String(run.openai_batch_id).startsWith(
+        BEDROCK_BATCH_PREFIX,
+      );
+      if (
+        fromBatch45 &&
+        decision.verdict === "discard" &&
+        shouldRereview({
+          id: parsed.custom_id,
+          pKeep: judgement.confidence,
+          sensitivity: judgement.sensitivity,
+          subjectInvolved: row.subject_involved,
+        })
+      ) {
+        await prisma.filesAiVerdict.updateMany({
+          where: { id: parsed.custom_id, verdict: null },
+          data: {
+            rereview_status: "pending",
+            rereview_queued_at: new Date(),
+            p_keep: judgement.confidence ?? null,
+            first_reason: decision.reason,
+            relevance: judgement.relevance,
+            sensitivity: judgement.sensitivity,
+            reviewed_by_model: "haiku-4.5",
+          },
+        });
+        continue;
+      }
       await prisma.filesAiVerdict.updateMany({
         where: { id: parsed.custom_id, verdict: null },
         data: {
@@ -504,13 +538,19 @@ export async function pollFilesAiBatches(
           reason: decision.reason,
           relevance: judgement.relevance,
           sensitivity: judgement.sensitivity,
+          p_keep: judgement.confidence ?? null,
+          reviewed_by_model: fromBatch45
+            ? "haiku-4.5"
+            : String(run.openai_batch_id).startsWith(BEDROCK_CONVERSE_PREFIX)
+              ? "haiku-5.5"
+              : null,
           resolved_at: new Date(),
         },
       });
     }
     // Anything the output did not mention goes to a person.
     await prisma.filesAiVerdict.updateMany({
-      where: { batch_run_id: run.id, verdict: null },
+      where: { batch_run_id: run.id, verdict: null, rereview_status: null },
       data: {
         verdict: "review",
         reason: "No AI result returned; needs human review.",
@@ -521,8 +561,14 @@ export async function pollFilesAiBatches(
       where: { id: run.id },
       data: { status: "completed", completed_at: new Date() },
     });
-    fs.rmSync(runJsonlPath(run.id, batchDir), { force: true });
-    removeRunFiles(run.id, batchDir);
+    // Discards waiting for a second opinion are re-read from this request file.
+    const waiting = await prisma.filesAiVerdict.count({
+      where: { batch_run_id: run.id, rereview_status: { not: null } },
+    });
+    if (waiting === 0) {
+      fs.rmSync(runJsonlPath(run.id, batchDir), { force: true });
+      removeRunFiles(run.id, batchDir);
+    }
   }
 }
 

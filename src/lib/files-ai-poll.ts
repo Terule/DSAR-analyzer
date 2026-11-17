@@ -4,6 +4,7 @@ import {
   pollFilesAiBatches,
 } from "./files-ai";
 import { configuredFilesAiClient } from "./files-ai-provider";
+import { rereviewWorkRemains } from "./files-ai-rereview";
 import { prisma } from "./prisma";
 
 /** Without an OpenAI client for this long, a submitted run is given up on (its files are kept). */
@@ -83,5 +84,5 @@ export async function filesAiWorkRemains(): Promise<boolean> {
     where: { status: { in: ["claiming", "submitted", "processing"] } },
     select: { id: true },
   });
-  return !!active;
+  return !!active || (await rereviewWorkRemains());
 }

@@ -122,7 +122,20 @@ describe("request translation", () => {
       messages: { content: string }[];
       max_tokens: number;
     };
-    assert.equal(input.system, "SYSTEM");
+    assert.ok(input.system.startsWith("SYSTEM"));
+    assert.match(input.system, /"confidence"/);
+    const schema = (
+      input as unknown as {
+        tools: {
+          input_schema: {
+            required: string[];
+            properties: Record<string, unknown>;
+          };
+        }[];
+      }
+    ).tools[0].input_schema;
+    assert.ok(schema.required.includes("confidence"));
+    assert.ok(schema.properties.confidence);
     assert.equal(input.messages[0].content, "USER TEXT");
     assert.equal(input.tool_choice.type, "tool");
     assert.ok(input.max_tokens >= 300);

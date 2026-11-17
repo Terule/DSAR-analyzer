@@ -21,6 +21,8 @@ import {
   assertAllowedModel,
   BATCH_MODEL,
   BATCH_THRESHOLD,
+  BEDROCK_BATCH_PREFIX,
+  BEDROCK_CONVERSE_PREFIX,
   BEDROCK_REGION,
   batchSettings,
   CONVERSE_MODEL,
@@ -34,9 +36,7 @@ import {
   toolInputFromModelOutput,
 } from "./translate";
 
-/** Id prefixes: they tell a later poll which backend owns a run (and keep ids unique). */
-export const BEDROCK_BATCH_PREFIX = "bedrock-batch:";
-export const BEDROCK_CONVERSE_PREFIX = "bedrock-converse:";
+export { BEDROCK_BATCH_PREFIX, BEDROCK_CONVERSE_PREFIX };
 
 export function isBedrockId(id: string): boolean {
   return (
