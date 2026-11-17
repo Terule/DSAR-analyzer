@@ -122,12 +122,14 @@ async function main() {
   const models: string[] = [];
   let limit = 50;
   let concurrency = 4;
+  let expectedPath = "";
   const positional: string[] = [];
   while (args.length > 0) {
     const arg = args.shift() as string;
     if (arg === "--model") models.push(args.shift() ?? "");
     else if (arg === "--limit") limit = Number(args.shift());
     else if (arg === "--concurrency") concurrency = Number(args.shift());
+    else if (arg === "--expected") expectedPath = args.shift() ?? "";
     else positional.push(arg);
   }
   const subject = positional.join(" ").trim();
@@ -137,6 +139,9 @@ async function main() {
     );
     process.exit(2);
   }
+  const expected: Record<string, { expect: string }> = expectedPath
+    ? JSON.parse(fs.readFileSync(expectedPath, "utf8"))
+    : {};
   const modelIds = models.length ? models : DEFAULT_MODELS;
 
   const items = [
@@ -177,6 +182,8 @@ async function main() {
     let latency = 0;
     let retries = 0;
     let invalid = 0;
+    let wrong = 0;
+    let wrongDiscard = 0;
     let next = 0;
     const worker = async () => {
       while (next < prepared.length) {
@@ -197,7 +204,14 @@ async function main() {
           largeFile: false,
           subjectInvolved: true,
         });
+        const want = expected[`${item.kind}/${item.fileName}`]?.expect;
+        const mismatch = want && want !== verdict.verdict;
+        if (mismatch) {
+          wrong++;
+          if (want === "discard") wrongDiscard++;
+        }
         results[index] =
+          `${mismatch ? "MISMATCH want=" + want + " " : ""}` +
           `${item.kind}/${item.fileName}: ${JSON.stringify(verdict)} ` +
           `[${judgement.relevance}/${judgement.sensitivity}]`;
         tokensIn += outcome.input;
@@ -210,7 +224,7 @@ async function main() {
     console.log(`=== ${modelId} ===`);
     for (const line of results) console.log(line);
     console.log(
-      `invalid=${invalid} retries=${retries} avgLatency=${Math.round(latency / Math.max(1, prepared.length))}ms ` +
+      `mismatches=${wrong} (confidential kept: ${wrongDiscard}) invalid=${invalid} retries=${retries} avgLatency=${Math.round(latency / Math.max(1, prepared.length))}ms ` +
         `tokens in=${tokensIn} out=${tokensOut}\n`,
     );
   }
