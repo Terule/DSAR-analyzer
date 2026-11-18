@@ -47,7 +47,7 @@ const doneClient: FilesAiClient = {
   readFile: async () => "",
 };
 const noKey = async () => {
-  throw new Error("Configure the OpenAI API key in Settings.");
+  throw new Error("No AWS credentials for Files AI.");
 };
 
 describe("Files AI poller", () => {
@@ -66,7 +66,7 @@ describe("Files AI poller", () => {
     assert.equal(row.verdict, "review"); // empty output: missing results need a person
   });
 
-  it("leaves a recent run alone when there is no OpenAI key", async () => {
+  it("leaves a recent run alone when there is no AWS credentials", async () => {
     const { fileId, runId } = await makeRun({ ageMinutes: 1, batchId: "b" });
     await pollFilesAiRuns(noKey, fileIds);
     const run = await prisma.filesAiBatchRun.findUniqueOrThrow({

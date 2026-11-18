@@ -196,15 +196,16 @@ describe("batch request", () => {
       custom_id: string;
       method: string;
       url: string;
-      body: { temperature: number; model: string; reasoning_effort: string };
+      body: { messages: { role: string }[]; max_completion_tokens: number };
     };
     assert.equal(req.custom_id, "id1");
     assert.equal(req.method, "POST");
     assert.equal(req.url, "/v1/chat/completions");
-    assert.equal(req.body.temperature, 0);
-    // Luna reasons by default, which rejects temperature 0 and eats the output cap.
-    assert.equal(req.body.model, "gpt-6-luna");
-    assert.equal(req.body.reasoning_effort, "none");
+    assert.deepEqual(
+      req.body.messages.map((m) => m.role),
+      ["system", "user"],
+    );
+    assert.ok(req.body.max_completion_tokens > 0);
   });
 
   it("states that only clearly unrelated files may be discarded", () => {

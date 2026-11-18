@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { cancelOpenAiBatchesForFiles } from "@/lib/ai";
+import { cancelAiBatchesForFiles } from "@/lib/ai";
 import {
   configureManagedCase,
   removeEmptyCaseRoots,
@@ -51,7 +51,7 @@ export async function POST(
     );
     await Promise.all([
       cancelJobsForFiles(fileIds, "Stopped before case deletion"),
-      cancelOpenAiBatchesForFiles(fileIds),
+      cancelAiBatchesForFiles(fileIds),
     ]);
     const pending = await countPendingCancellation(fileIds);
     if (pending > 0) {

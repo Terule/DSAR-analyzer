@@ -258,7 +258,7 @@ export type MailScreenStart = "disabled" | "completed" | "screening";
 export async function startMailScreen(
   coordinatorId: string,
   elapsedMs: number,
-  /** `undefined` opens the real OpenAI client; `null` means no key. Tests inject. */
+  /** `undefined` opens the real client; `null` means no AWS credentials. Tests inject. */
   client?: FilesAiClient | null,
 ): Promise<MailScreenStart> {
   if (!(await getAiBatchSettings()).filesAiEnabled) {

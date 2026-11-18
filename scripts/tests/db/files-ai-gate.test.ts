@@ -421,7 +421,7 @@ describe("Files AI gate", () => {
       aliases: [],
     };
 
-    it("sends every file to human review when there is no OpenAI client", async () => {
+    it("sends every file to human review when there is no AI client", async () => {
       const fileId = await makeFilesRow(employeeCase);
       const root = fs.mkdtempSync(path.join(os.tmpdir(), "fag-nokey-"));
       fs.mkdirSync(path.join(root, "Documents"));

@@ -1,7 +1,7 @@
 /**
  * Read-only dry run of the Files AI screening (relevance and confidentiality). It lists converted PDFs,
  * builds the exact prompts the AI step would send, and prints counts, token
- * and cost estimates. It never calls OpenAI and never touches the database.
+ * and cost estimates. It never calls the AI service and never touches the database.
  *
  *   node --import tsx scripts/maintenance/files-ai-rehearsal.ts <requestOutputDir> \
  *     <subject name> [--alias <name>]... [--limit N] [--include-finalized]
@@ -24,8 +24,9 @@ import {
 } from "../../src/lib/files-ai-prompt";
 import { buildSample, subjectMentionTokens } from "../../src/lib/files-ai-text";
 
-// gpt-6-luna Batch input price per 1M tokens (OpenAI pricing page, Oct 2026).
-const INPUT_USD_PER_MILLION = 0.05;
+// Estimated Bedrock Batch input price per 1M tokens (Claude Haiku 4.5); check the
+// Bedrock pricing page and override with INPUT_USD_PER_MILLION when it changes.
+const INPUT_USD_PER_MILLION = Number(process.env.INPUT_USD_PER_MILLION) || 0.5;
 
 function listAllPdfs(dir: string, kind: "Document" | "Message") {
   if (!fs.existsSync(dir)) return [];

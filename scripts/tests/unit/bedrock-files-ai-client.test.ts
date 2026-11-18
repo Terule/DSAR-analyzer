@@ -117,7 +117,7 @@ describe("model guard", () => {
 });
 
 describe("request translation", () => {
-  it("turns an OpenAI chat line into a forced-tool Anthropic input", () => {
+  it("turns a chat-style line into a forced-tool Anthropic input", () => {
     const parsed = parseRequestLine(requestLine("id-1"));
     assert.equal(parsed.customId, "id-1");
     const input = toBatchModelInput(parsed) as {

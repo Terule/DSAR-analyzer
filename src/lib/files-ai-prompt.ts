@@ -1,13 +1,9 @@
-import { AI_MODEL, AI_REASONING_EFFORT } from "./ai-model";
-
 export interface FilesAiCriteria {
   name: string;
   email: string;
   personalEmail?: string;
   aliases: string[];
 }
-
-export const FILES_AI_MODEL = AI_MODEL;
 
 /** What the model may report as the kind of confidential data a file holds. */
 export const SENSITIVITY_CATEGORIES = [
@@ -101,13 +97,10 @@ export function buildFilesAiBatchRequest(input: {
     method: "POST",
     url: "/v1/chat/completions",
     body: {
-      model: FILES_AI_MODEL,
       messages: [
         { role: "system", content: input.systemPrompt },
         { role: "user", content: input.userContent },
       ],
-      temperature: 0,
-      reasoning_effort: AI_REASONING_EFFORT,
       max_completion_tokens: 120,
       response_format: FILES_AI_RESPONSE_FORMAT,
     },

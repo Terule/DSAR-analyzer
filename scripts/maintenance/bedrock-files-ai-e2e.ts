@@ -1,11 +1,11 @@
 /**
- * End-to-end check of the Files AI flow through the configured provider, on
+ * End-to-end check of the Files AI flow through Bedrock, on
  * SYNTHETIC files only. It creates a throwaway processed_files row, submits
  * copies of the given PDFs with prepareFilesAi, polls like the dispatcher,
  * compares verdicts with an expected manifest, then deletes everything it made.
  *
  *   node --import tsx scripts/maintenance/bedrock-files-ai-e2e.ts \
- *     <dirWithDocuments> <expected.json> <subject name> [--copies N] [--provider bedrock|openai]
+ *     <dirWithDocuments> <expected.json> <subject name> [--copies N]
  *
  * Run it INSIDE the app container (`docker compose cp` the script and the PDFs in,
  * then `docker compose exec app node --import tsx ...`): the Prisma client only
@@ -34,7 +34,6 @@ async function main() {
     return i >= 0 ? args.splice(i, 2)[1] : undefined;
   };
   const copies = Number(opt("--copies") ?? 8);
-  const provider = (opt("--provider") ?? "bedrock") as "bedrock" | "openai";
   const [dir, expectedPath, ...nameParts] = args;
   const subject = nameParts.join(" ");
   if (!dir || !expectedPath || !subject) throw new Error("missing arguments");
@@ -69,16 +68,14 @@ async function main() {
       want.set(`Documents/${name}`, expected[key].expect);
     }
   }
-  console.log(
-    `submitting ${candidates.length} synthetic files via ${provider}`,
-  );
+  console.log(`submitting ${candidates.length} synthetic files via Bedrock`);
 
   const fileId = `t-e2e-${crypto.randomUUID().slice(0, 8)}`;
   await prisma.processedFile.create({
     data: { id: fileId, filename: "Files", kind: "files" },
   });
   try {
-    const client = await configuredFilesAiClient({}, { provider });
+    const client = await configuredFilesAiClient();
     const started = Date.now();
     const prepared = await prepareFilesAi({
       fileId,
@@ -160,7 +157,7 @@ async function main() {
     console.log(
       `batch dir leftovers: ${leftover.length} ${leftover.join(",")}`,
     );
-    if (provider === "bedrock" && process.env.BEDROCK_BATCH_BUCKET) {
+    if (process.env.BEDROCK_BATCH_BUCKET) {
       const s3 = new S3Client({
         region: process.env.AWS_REGION || "eu-central-1",
       });

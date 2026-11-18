@@ -128,11 +128,7 @@ async function main() {
     }
     console.log(`submitting ${want.size} synthetic emails`);
 
-    // The real Bedrock client, injected so the global provider setting stays untouched.
-    emailAiTestOverride.client = await configuredFilesAiClient(
-      {},
-      { provider: "bedrock" },
-    );
+    emailAiTestOverride.client = await configuredFilesAiClient();
     const started = Date.now();
     console.log(
       `generateBatchFile: ${await generateBatchFile(fileId, {

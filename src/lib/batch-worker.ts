@@ -1,12 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import OpenAI from "openai";
-import {
-  DEFAULT_MAX_TOKENS_PER_BATCH,
-  emailAiTestOverride,
-  fillAiBatchSlots,
-} from "./ai";
-import { AI_MODEL, AI_REASONING_EFFORT } from "./ai-model";
+import { emailAiTestOverride, fillAiBatchSlots } from "./ai";
 import {
   BEDROCK_BATCH_PREFIX,
   CONVERSE_MODEL,
@@ -15,7 +9,6 @@ import {
 } from "./bedrock/config";
 import {
   awsBedrockDeps,
-  isBedrockId,
   removeBedrockArtifacts,
 } from "./bedrock/files-ai-client";
 import { shouldRereview } from "./bedrock/rereview-gate";
@@ -25,25 +18,12 @@ import {
   markCaseAiFailed,
 } from "./case-utils";
 import { enqueueFilePhase } from "./control-plane/pipeline";
-import { runtimeCredentials } from "./credentials";
 import { applyConfidentiality } from "./email-audit";
 import { configuredFilesAiClient } from "./files-ai-provider";
 import { startMailScreen } from "./mail-screen";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
-
-let openai: OpenAI | null = null;
-async function getOpenAi(): Promise<OpenAI> {
-  if (openai) return openai;
-  const key = (await runtimeCredentials()).openAiKey;
-  if (!key) throw new Error("Configure the OpenAI API key in Settings.");
-  openai = new OpenAI({ apiKey: key });
-  return openai;
-}
-const adaptiveTokenCapByFile = new Map<string, number>();
-const MIN_RETRY_BATCH_TOKENS = 25_000;
-const TOKEN_BACKOFF_FACTOR = 0.8;
 
 interface AiPayloadSection {
   from?: string;
@@ -95,59 +75,11 @@ function criteriaFromRow(row: {
   };
 }
 
-function getBatchErrorText(batch: OpenAI.Batches.Batch): string {
-  const data = batch.errors?.data;
-  if (!data || data.length === 0) return "";
-
-  return data
-    .map((item) => `${item.code || ""} ${item.message || ""}`.trim())
-    .join(" ")
-    .toLowerCase();
-}
-
-function isExpiredBatchFailure(batch: OpenAI.Batches.Batch): boolean {
-  if (batch.status === "expired") return true;
-  if (batch.status !== "failed") return false;
-
-  const errorText = getBatchErrorText(batch);
-  return /expired|expiration|completion_window/.test(errorText);
-}
-
-function isTokenLimitBatchFailure(batch: OpenAI.Batches.Batch): boolean {
-  if (batch.status !== "failed") return false;
-  const errorText = getBatchErrorText(batch);
-  return /token|enqueued|rate.?limit|max.*tokens|too many tokens/.test(
-    errorText,
-  );
-}
-
-function parseLimitTokens(errorText: string): number | null {
-  const patterns = [
-    /limit[^\d]*(\d[\d,]*)/i,
-    /max(?:imum)?[^\d]*(\d[\d,]*)\s*tokens?/i,
-    /allowed[^\d]*(\d[\d,]*)\s*tokens?/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = errorText.match(pattern);
-    if (!match?.[1]) continue;
-    const parsed = Number(match[1].replaceAll(",", ""));
-    if (Number.isFinite(parsed) && parsed > 0) return parsed;
-  }
-
-  return null;
-}
-
-function nextRetryTokenCap(fileId: string, errorText: string): number {
-  const previousCap =
-    adaptiveTokenCapByFile.get(fileId) || DEFAULT_MAX_TOKENS_PER_BATCH;
-
-  const explicitLimit = parseLimitTokens(errorText);
-  const limitedCap = explicitLimit
-    ? Math.floor(explicitLimit * TOKEN_BACKOFF_FACTOR)
-    : Math.floor(previousCap * TOKEN_BACKOFF_FACTOR);
-
-  return Math.max(MIN_RETRY_BATCH_TOKENS, limitedCap);
+/** What this module reads of a batch: Bedrock's job state mapped onto a few fields. */
+interface BatchState {
+  id: string;
+  status: string;
+  output_file_id: string | null;
 }
 
 function escapeRegExp(value: string): string {
@@ -278,7 +210,6 @@ export function hasStrongSubjectSignal(
 async function runDiscardSecondPass(
   payload: AiPayload,
   criteria: SubjectCriteria,
-  viaBedrock = false,
 ): Promise<{ decision: "keep" | "discard"; reason: string }> {
   const attachmentCount =
     payload.meta?.attachment_count ?? payload.attachments?.length ?? 0;
@@ -306,47 +237,32 @@ Return JSON only: {"decision":"keep"|"discard","reason":"brief"}`;
     payload,
   });
 
+  // Haiku 5.5 through Converse, answering with a forced tool.
+  const converse = emailAiTestOverride.converse ?? awsBedrockDeps().converse;
   let clean: string;
-  if (viaBedrock) {
-    // Haiku 5.5 through Converse, answering with a forced tool.
-    const converse = emailAiTestOverride.converse ?? awsBedrockDeps().converse;
-    try {
-      const input = await converse(
-        {
-          customId: "second-pass",
-          system: systemPrompt,
-          user: userContent,
-          toolName: "second_pass_decision",
-          schema: {
-            type: "object",
-            additionalProperties: false,
-            required: ["decision", "reason"],
-            properties: {
-              decision: { type: "string", enum: ["keep", "discard"] },
-              reason: { type: "string", maxLength: 200 },
-            },
+  try {
+    const input = await converse(
+      {
+        customId: "second-pass",
+        system: systemPrompt,
+        user: userContent,
+        toolName: "second_pass_decision",
+        schema: {
+          type: "object",
+          additionalProperties: false,
+          required: ["decision", "reason"],
+          properties: {
+            decision: { type: "string", enum: ["keep", "discard"] },
+            reason: { type: "string", maxLength: 200 },
           },
-          maxTokens: 300,
         },
-        CONVERSE_MODEL,
-      );
-      clean = input === undefined ? "" : JSON.stringify(input);
-    } catch (_err) {
-      return { decision: "discard", reason: "Second-pass call failed." };
-    }
-  } else {
-    const response = await (await getOpenAi()).chat.completions.create({
-      model: AI_MODEL,
-      temperature: 0.0,
-      reasoning_effort: AI_REASONING_EFFORT,
-      max_completion_tokens: 80,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userContent },
-      ],
-    });
-    const raw = response.choices[0]?.message?.content?.trim() || "";
-    clean = raw.replace(/^```json\s*/i, "").replace(/\s*```$/i, "");
+        maxTokens: 300,
+      },
+      CONVERSE_MODEL,
+    );
+    clean = input === undefined ? "" : JSON.stringify(input);
+  } catch (_err) {
+    return { decision: "discard", reason: "Second-pass call failed." };
   }
 
   try {
@@ -379,15 +295,9 @@ export async function queuePdfWorker(fileId: string): Promise<void> {
   await enqueueFilePhase({ fileId, phase: "render" });
 }
 
-function openAiCompletedAt(batch: OpenAI.Batches.Batch): Date | undefined {
-  return typeof batch.completed_at === "number"
-    ? new Date(batch.completed_at * 1_000)
-    : undefined;
-}
-
 /**
  * AI is parallel, so its useful elapsed time is the wall-clock span from the
- * first upload to OpenAI's final completion event. Local output download or a
+ * first upload to the job's final completion. Local output download or a
  * restarted poller must not inflate this metric.
  */
 async function completedAiElapsedMs(
@@ -445,8 +355,6 @@ export async function completeEmailAudit(fileId: string): Promise<void> {
         : 0,
     ),
   );
-
-  adaptiveTokenCapByFile.delete(fileId);
 
   if (screening === "screening") {
     console.log(
@@ -506,55 +414,33 @@ async function pollSingleBatchStatus(
   fs.mkdirSync(discardedFolder, { recursive: true });
 
   console.log(`[Batch Worker] Checking status of batch: ${batchId}...`);
-  // A Bedrock run is read through the Files AI client seam; its status is
-  // mapped onto the few fields of an OpenAI batch this function looks at.
-  const bedrockClient = isBedrockId(batchId)
-    ? (emailAiTestOverride.client ??
-      (await configuredFilesAiClient({ forPolling: true })))
-    : undefined;
-  let batch: OpenAI.Batches.Batch;
-  if (bedrockClient) {
-    const state = await bedrockClient.retrieveBatch(batchId);
-    batch = {
-      id: batchId,
-      status: state.status,
-      output_file_id: state.outputFileId ?? null,
-      error_file_id: null,
-      errors: null,
-      completed_at: null,
-    } as unknown as OpenAI.Batches.Batch;
-    if (["failed", "expired", "cancelled"].includes(state.status)) {
-      removeBedrockArtifacts(batchId);
-    }
-  } else {
-    batch = await (await getOpenAi()).batches.retrieve(batchId);
+  // The run is read through the Files AI client seam.
+  const client =
+    emailAiTestOverride.client ?? (await configuredFilesAiClient());
+  const state = await client.retrieveBatch(batchId);
+  const batch: BatchState = {
+    id: batchId,
+    status: state.status,
+    output_file_id: state.outputFileId ?? null,
+  };
+  if (["failed", "expired", "cancelled"].includes(state.status)) {
+    removeBedrockArtifacts(batchId);
   }
-  console.log(`[Batch Worker] Status returned from OpenAI: ${batch.status}`);
+  console.log(`[Batch Worker] Status returned from Bedrock: ${batch.status}`);
 
   if (batch.status === "completed") {
     await prisma.aiBatchRun.update({
       where: { id: batchRunId },
       data: {
         status: "processing",
-        openai_completed_at: openAiCompletedAt(batch),
+        openai_completed_at: new Date(),
       },
     });
-    // 🔥 NEW SAFETY CHECK: Catch silent OpenAI validation failures
+    // A completed job without output cannot be read: release its emails for retry.
     if (!batch.output_file_id) {
       console.error(
-        `[Batch Worker] ERROR: Batch ${batch.id} completed but provided NO output_file_id!`,
+        `[Batch Worker] ERROR: Batch ${batch.id} completed but provided NO output!`,
       );
-      if (batch.error_file_id) {
-        try {
-          const errRes = await (await getOpenAi()).files.content(
-            batch.error_file_id,
-          );
-          const errText = await errRes.text();
-          console.error(`[Batch Worker] OpenAI Error Log:\n`, errText);
-        } catch (e) {
-          console.error("Could not download error file", e);
-        }
-      }
       await prisma.$transaction([
         prisma.email.updateMany({
           where: { ai_batch_run_id: batchRunId, ai_decision: null },
@@ -581,11 +467,7 @@ async function pollSingleBatchStatus(
     console.log(
       `[Batch Worker] Downloading results from file ${batch.output_file_id}...`,
     );
-    const content = bedrockClient
-      ? await bedrockClient.readFile(batch.output_file_id)
-      : await (
-          await (await getOpenAi()).files.content(batch.output_file_id)
-        ).text();
+    const content = await client.readFile(batch.output_file_id);
     const lines = content.trim().split("\n");
 
     let keepCount = 0;
@@ -629,8 +511,7 @@ async function pollSingleBatchStatus(
         (settings.rereviewSamplePercent ?? REREVIEW_DEFAULT_SAMPLE_PERCENT) /
         100,
     };
-    const gateRereview =
-      !!bedrockClient && batchId.startsWith(BEDROCK_BATCH_PREFIX);
+    const gateRereview = batchId.startsWith(BEDROCK_BATCH_PREFIX);
     const selectedHashes: string[] = [];
 
     for (const line of lines) {
@@ -699,11 +580,7 @@ async function pollSingleBatchStatus(
         payload
       ) {
         auditStats.secondPassExecuted++;
-        const secondPass = await runDiscardSecondPass(
-          payload,
-          subjectCriteria,
-          !!bedrockClient,
-        );
+        const secondPass = await runDiscardSecondPass(payload, subjectCriteria);
         if (secondPass.decision === "keep") {
           decision = "keep";
           reason = `Second Pass: ${secondPass.reason}`;
@@ -788,7 +665,7 @@ async function pollSingleBatchStatus(
     ]);
 
     // The decisions are durable: the run's local Bedrock files are no longer needed.
-    if (bedrockClient) removeBedrockArtifacts(batchId);
+    removeBedrockArtifacts(batchId);
 
     // Once a keep decision is durable, the EML has been moved to selected/ and
     // no later AI step needs its JSON payload. Remove it immediately instead of
@@ -806,7 +683,7 @@ async function pollSingleBatchStatus(
 
     // Selected/discarded folders are now the canonical AI outputs.
 
-    // One OpenAI batch (chunk) has been fully processed. Advance the batch
+    // One batch (chunk) has been fully processed. Advance the batch
     // counter used for UI progress; keep the total >= done in case the initial
     // estimate was too low.
     const casePstIds = await getCasePstFileIds(fileId);
@@ -874,13 +751,8 @@ async function pollSingleBatchStatus(
         `[Batch Worker] Chunk complete. ${remainingCount} items remaining. Generating next chunk immediately...`,
       );
 
-      const adaptiveCap = adaptiveTokenCapByFile.get(fileId);
       try {
-        await fillAiBatchSlots(
-          fileId,
-          criteriaFromRow(row),
-          adaptiveCap ? { maxTokensPerBatch: adaptiveCap } : undefined,
-        );
+        await fillAiBatchSlots(fileId, criteriaFromRow(row));
       } catch (err) {
         console.error(
           `[Batch Worker] Fatal error generating next chunk for ${fileId}:`,
@@ -904,15 +776,14 @@ async function pollSingleBatchStatus(
         await completeEmailAudit(fileId);
       }
     }
-  } else if (isTokenLimitBatchFailure(batch)) {
-    const errorText = getBatchErrorText(batch);
-    const retryCap = nextRetryTokenCap(fileId, errorText);
-    adaptiveTokenCapByFile.set(fileId, retryCap);
-
+  } else if (
+    batch.status === "failed" ||
+    batch.status === "cancelled" ||
+    batch.status === "expired"
+  ) {
     console.error(
-      `[Batch Worker] Batch ${batch.id} failed due to token limits. Retrying with reduced chunk cap ${retryCap} tokens for file ${fileId}.`,
+      `[Batch Worker] Batch ${batch.id} did not complete. Status: ${batch.status}`,
     );
-
     await prisma.$transaction([
       prisma.email.updateMany({
         where: { ai_batch_run_id: batchRunId, ai_decision: null },
@@ -922,23 +793,19 @@ async function pollSingleBatchStatus(
         where: { id: batchRunId },
         data: {
           status: "retryable",
-          error: errorText.slice(0, 1000),
+          error: batch.status,
           completed_at: new Date(),
         },
       }),
     ]);
-
+    // Resubmit what did not yield a decision; a failure to do so fails the case.
     try {
-      await fillAiBatchSlots(fileId, criteriaFromRow(row), {
-        maxTokensPerBatch: retryCap,
-      });
-      return "retrying_token_limited";
+      await fillAiBatchSlots(fileId, criteriaFromRow(row));
     } catch (err) {
       console.error(
-        `[Batch Worker] Failed to regenerate token-limited batch for ${fileId}:`,
+        `[Batch Worker] Failed to regenerate batch for ${fileId}:`,
         err,
       );
-      adaptiveTokenCapByFile.delete(fileId);
       await markCaseAiFailed(
         fileId,
         typeof aiStartedAtMs === "number"
@@ -947,69 +814,6 @@ async function pollSingleBatchStatus(
       );
       return "failed";
     }
-  } else if (isExpiredBatchFailure(batch)) {
-    console.error(
-      `[Batch Worker] Batch ${batch.id} expired. Re-uploading a fresh batch for file ${fileId}...`,
-    );
-
-    await prisma.$transaction([
-      prisma.email.updateMany({
-        where: { ai_batch_run_id: batchRunId, ai_decision: null },
-        data: { ai_batch_run_id: null },
-      }),
-      prisma.aiBatchRun.update({
-        where: { id: batchRunId },
-        data: {
-          status: "retryable",
-          error: "Batch expired.",
-          completed_at: new Date(),
-        },
-      }),
-    ]);
-
-    try {
-      await fillAiBatchSlots(
-        fileId,
-        criteriaFromRow(row),
-        adaptiveTokenCapByFile.has(fileId)
-          ? { maxTokensPerBatch: adaptiveTokenCapByFile.get(fileId) }
-          : undefined,
-      );
-      return "retrying_expired";
-    } catch (err) {
-      console.error(
-        `[Batch Worker] Failed to regenerate expired batch for ${fileId}:`,
-        err,
-      );
-      adaptiveTokenCapByFile.delete(fileId);
-      await markCaseAiFailed(
-        fileId,
-        typeof aiStartedAtMs === "number"
-          ? Math.max(0, Date.now() - aiStartedAtMs)
-          : 0,
-      );
-      return "failed";
-    }
-  } else if (batch.status === "failed" || batch.status === "cancelled") {
-    console.error(
-      `[Batch Worker] OpenAI batch execution failed/cancelled. Status: ${batch.status}`,
-    );
-    adaptiveTokenCapByFile.delete(fileId);
-    await prisma.$transaction([
-      prisma.email.updateMany({
-        where: { ai_batch_run_id: batchRunId, ai_decision: null },
-        data: { ai_batch_run_id: null },
-      }),
-      prisma.aiBatchRun.update({
-        where: { id: batchRunId },
-        data: {
-          status: "retryable",
-          error: getBatchErrorText(batch).slice(0, 1000) || batch.status,
-          completed_at: new Date(),
-        },
-      }),
-    ]);
-    await fillAiBatchSlots(fileId, criteriaFromRow(row));
   }
 
   return batch.status;

@@ -83,11 +83,9 @@ export interface AiBatchSettings {
   sharePointFolderPath: string;
   stagingRoot?: string;
   deliverablesRoot?: string;
-  hasOpenAiKey?: boolean;
   hasAzureTenantId?: boolean;
   hasAzureClientId?: boolean;
   hasAzureClientSecret?: boolean;
-  openAiKey?: string;
   azureTenantId?: string;
   azureClientId?: string;
   azureClientSecret?: string;
@@ -104,7 +102,6 @@ export interface AiBatchSettings {
   deleteSourcePsts?: boolean;
   filesConcurrency?: number;
   filesAiEnabled?: boolean;
-  aiProvider?: "openai" | "bedrock";
   rereviewMinPKeep?: number;
   rereviewSamplePercent?: number;
   oneTrustClientId?: string;

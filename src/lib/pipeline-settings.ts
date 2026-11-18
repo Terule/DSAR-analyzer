@@ -38,7 +38,6 @@ export interface AiBatchSettings {
   sharePointFolderPath: string;
   stagingRoot?: string;
   deliverablesRoot?: string;
-  hasOpenAiKey?: boolean;
   hasAzureTenantId?: boolean;
   hasAzureClientId?: boolean;
   hasAzureClientSecret?: boolean;
@@ -55,8 +54,6 @@ export interface AiBatchSettings {
   deleteSourcePsts?: boolean;
   filesConcurrency?: number;
   filesAiEnabled?: boolean;
-  /** Which provider screens files and mail: OpenAI Batch (default) or Amazon Bedrock. */
-  aiProvider?: AiProvider;
   /** A Haiku 4.5 discard with at least this p_keep (0-100) gets a second opinion from Haiku 5.5. */
   rereviewMinPKeep?: number;
   /** Percent (0-100) of the other, confident discards that are also judged again as a control. */
@@ -176,7 +173,6 @@ export function validateAiBatchSettings(
     sharePointFolderPath,
     stagingRoot: FIXED_STAGING_ROOT,
     deliverablesRoot: FIXED_DELIVERABLES_ROOT,
-    hasOpenAiKey: input.hasOpenAiKey,
     hasAzureTenantId: input.hasAzureTenantId,
     hasAzureClientId: input.hasAzureClientId,
     hasAzureClientSecret: input.hasAzureClientSecret,
@@ -193,7 +189,6 @@ export function validateAiBatchSettings(
     deleteSourcePsts: input.deleteSourcePsts ?? true,
     filesConcurrency,
     filesAiEnabled: input.filesAiEnabled ?? true,
-    aiProvider: normalizeAiProvider(input.aiProvider),
     rereviewMinPKeep,
     rereviewSamplePercent,
   };
@@ -217,7 +212,6 @@ export async function getAiBatchSettings(): Promise<AiBatchSettings> {
     sharePointFolderPath: row.sharepoint_folder_path || "",
     stagingRoot: FIXED_STAGING_ROOT,
     deliverablesRoot: FIXED_DELIVERABLES_ROOT,
-    hasOpenAiKey: Boolean(row.openai_api_key_encrypted),
     hasAzureTenantId: Boolean(row.azure_tenant_id_encrypted),
     hasAzureClientId: Boolean(row.azure_client_id_encrypted),
     hasAzureClientSecret: Boolean(row.azure_client_secret_encrypted),
@@ -235,7 +229,6 @@ export async function getAiBatchSettings(): Promise<AiBatchSettings> {
     deleteSourcePsts: row.delete_source_psts,
     filesConcurrency: row.files_concurrency,
     filesAiEnabled: row.files_ai_enabled,
-    aiProvider: normalizeAiProvider(row.ai_provider),
     rereviewMinPKeep: row.rereview_min_p_keep,
     rereviewSamplePercent: row.rereview_sample_percent,
   };
@@ -268,7 +261,6 @@ export async function updateAiBatchSettings(
       delete_source_psts: settings.deleteSourcePsts ?? true,
       files_concurrency: settings.filesConcurrency,
       files_ai_enabled: settings.filesAiEnabled ?? true,
-      ai_provider: normalizeAiProvider(settings.aiProvider),
       rereview_min_p_keep: settings.rereviewMinPKeep,
       rereview_sample_percent: settings.rereviewSamplePercent,
     },
@@ -292,7 +284,6 @@ export async function updateAiBatchSettings(
       delete_source_psts: settings.deleteSourcePsts ?? true,
       files_concurrency: settings.filesConcurrency,
       files_ai_enabled: settings.filesAiEnabled ?? true,
-      ai_provider: normalizeAiProvider(settings.aiProvider),
       rereview_min_p_keep: settings.rereviewMinPKeep,
       rereview_sample_percent: settings.rereviewSamplePercent,
     },
@@ -305,7 +296,6 @@ export async function updateAiBatchSettings(
     sharePointFolderPath: row.sharepoint_folder_path || "",
     stagingRoot: FIXED_STAGING_ROOT,
     deliverablesRoot: FIXED_DELIVERABLES_ROOT,
-    hasOpenAiKey: Boolean(row.openai_api_key_encrypted),
     hasAzureTenantId: Boolean(row.azure_tenant_id_encrypted),
     hasAzureClientId: Boolean(row.azure_client_id_encrypted),
     hasAzureClientSecret: Boolean(row.azure_client_secret_encrypted),
@@ -323,7 +313,6 @@ export async function updateAiBatchSettings(
     deleteSourcePsts: row.delete_source_psts,
     filesConcurrency: row.files_concurrency,
     filesAiEnabled: row.files_ai_enabled,
-    aiProvider: normalizeAiProvider(row.ai_provider),
     rereviewMinPKeep: row.rereview_min_p_keep,
     rereviewSamplePercent: row.rereview_sample_percent,
   };

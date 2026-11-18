@@ -2,7 +2,6 @@ import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { encodingForModel } from "js-tiktoken";
-import OpenAI from "openai";
 import { AI_TOKENIZER_MODEL } from "./ai-model";
 import {
   BEDROCK_BATCH_PREFIX,
@@ -11,7 +10,6 @@ import {
   REREVIEW_DEFAULT_SAMPLE_PERCENT,
 } from "./bedrock/config";
 import { shouldRereview } from "./bedrock/rereview-gate";
-import { runtimeCredentials } from "./credentials";
 import {
   type FilesAiCandidate,
   listFilesAiCandidates,
@@ -71,7 +69,7 @@ export function isMailItem(relPath: string): boolean {
 const REQUEST_OVERHEAD_TOKENS = 24;
 const MESSAGE_OVERHEAD_TOKENS = 12;
 
-/** A thin seam over the OpenAI SDK so the batch flow can be tested offline. */
+/** A thin seam over the AI service (Amazon Bedrock) so the batch flow can be tested offline. */
 export interface FilesAiClient {
   uploadBatchFile(filePath: string): Promise<string>;
   createBatch(inputFileId: string): Promise<string>;
@@ -111,7 +109,7 @@ function verdictId(fileId: string, relPath: string): string {
 
 /**
  * Builds a keep/discard request for every converted file of this wave that has
- * no verdict yet and submits them as OpenAI Batch runs. Safe to call again:
+ * no verdict yet and submits them as batch runs. Safe to call again:
  * files that already have a verdict, or are in a submitted run, are skipped;
  * rows left pending and unclaimed by a failed submit are queued again.
  */
@@ -327,7 +325,7 @@ export function removeRunFiles(runId: string, batchDir?: string): void {
   }
 }
 
-/** A batch OpenAI failed, expired or cancelled is resubmitted this many runs in. */
+/** A batch that failed, expired or was cancelled is resubmitted this many runs in. */
 const MAX_RUN_ATTEMPTS = 2;
 
 /**
@@ -468,12 +466,7 @@ export async function pollFilesAiBatches(
   for (const run of runs) {
     const batch = await client.retrieveBatch(run.openai_batch_id as string);
     if (["failed", "expired", "cancelled"].includes(batch.status)) {
-      await retryOrFailRun(
-        run,
-        `OpenAI batch ${batch.status}.`,
-        client,
-        batchDir,
-      );
+      await retryOrFailRun(run, `Batch ${batch.status}.`, client, batchDir);
       continue;
     }
     if (batch.status !== "completed") continue;
@@ -622,38 +615,8 @@ export async function isFilesAiSettled(fileId: string): Promise<boolean> {
   return state.pending === 0 && state.activeRuns === 0;
 }
 
-export async function openAiFilesAiClient(): Promise<FilesAiClient> {
-  const key = (await runtimeCredentials()).openAiKey;
-  if (!key) throw new Error("Configure the OpenAI API key in Settings.");
-  const openai = new OpenAI({ apiKey: key });
-  return {
-    async uploadBatchFile(filePath) {
-      const upload = await openai.files.create({
-        file: fs.createReadStream(filePath),
-        purpose: "batch",
-      });
-      return upload.id;
-    },
-    async createBatch(inputFileId) {
-      const batch = await openai.batches.create({
-        input_file_id: inputFileId,
-        endpoint: "/v1/chat/completions",
-        completion_window: "24h",
-      });
-      return batch.id;
-    },
-    async retrieveBatch(batchId) {
-      const batch = await openai.batches.retrieve(batchId);
-      return { status: batch.status, outputFileId: batch.output_file_id };
-    },
-    async readFile(fileId) {
-      return (await openai.files.content(fileId)).text();
-    },
-  };
-}
-
 /**
- * With no way to screen (no OpenAI key), nothing may be delivered unchecked:
+ * With no way to screen (no AWS credentials), nothing may be delivered unchecked:
  * every converted file of this wave goes to human review instead.
  */
 export async function sendCandidatesToReview(

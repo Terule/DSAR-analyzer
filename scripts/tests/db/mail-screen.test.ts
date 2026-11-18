@@ -394,7 +394,7 @@ describe("Mail screening before Render", () => {
     ]);
   });
 
-  it("sends everything to human review when there is no OpenAI key", async () => {
+  it("sends everything to human review when there is no AWS credentials", async () => {
     const { id } = await setup("employee", [
       {
         hash: "n1",

@@ -1,6 +1,6 @@
 import { MIN_OUTPUT_TOKENS } from "./config";
 
-/** A Files AI request line as `buildFilesAiBatchRequest` writes it (OpenAI chat format). */
+/** A Files AI request line as `buildFilesAiBatchRequest` writes it (chat-style format). */
 export interface ParsedRequest {
   customId: string;
   system: string;
@@ -80,7 +80,7 @@ export function toolInputFromModelOutput(modelOutput: unknown): unknown {
 }
 
 /**
- * One line in the shape the Files AI poller already reads (OpenAI batch output).
+ * One line in the shape the Files AI poller already reads (batch-output shape).
  * A missing tool input produces no content, which the parser turns into review.
  */
 export function toOpenAiOutputLine(

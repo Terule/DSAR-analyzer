@@ -1,7 +1,7 @@
 /**
  * Read-only spike: runs the Files AI confidentiality screening through Amazon
  * Bedrock (Converse + forced tool use) so the verdicts, tokens and latency can
- * be compared with the current OpenAI batch step. It never touches the
+ * be compared with the previous OpenAI batch step. It never touches the
  * database or the files, and it logs file names and verdicts only, never text.
  *
  *   node --import tsx scripts/maintenance/bedrock-spike.ts <requestOutputDir> \

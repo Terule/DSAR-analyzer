@@ -12,7 +12,7 @@ Work is organised per **case/request**, and the case is the unit of processing. 
 
 1. **Parse** — `readpst` extracts emails as `.eml` files (per PST). Each email is parsed, hashed, and **deduplicated across the whole request** (by `message-id` with a content-hash fallback; the hash is scoped to `[case]/[request]`, so the same email in two PST files is kept once for the case but never bleeds into a different case).
 2. **Extract** — Unique emails are normalised into per-email JSON payloads for the AI, and drafts / headerless items are filtered out.
-3. **AI Triage** — Runs **once per case** over all of its PST files' unique emails, in batches to the OpenAI Batch API (`gpt-6-luna`, reasoning off). Cheap rule/system pre-filters run first (privileged-subject keyword, "subject not mentioned anywhere") to avoid API calls; the model then applies hard DSAR rules and returns `keep` / `discard`, followed by a strong-signal override and an attachments-only second pass.
+3. **AI Triage** — Runs **once per case** over all of its PST files' unique emails, in batches to Amazon Bedrock (Batch with Claude Haiku 4.5 over 100 items, Converse with Haiku 5.5 otherwise). Cheap rule/system pre-filters run first (privileged-subject keyword, "subject not mentioned anywhere") to avoid API calls; the model then applies hard DSAR rules and returns `keep` / `discard`, followed by a strong-signal override and an attachments-only second pass.
 4. **Render** — Runs **once per case**. Kept emails and their attachments (DOCX, XLSX, PDF) are rendered to PDF via WeasyPrint and written to the request's `Emails` output folder.
 5. **Files** — Runs **after** Render. The `Files` folder (Teams messages + loose documents) is processed by a background worker: relevance-filtered against the subject, content-deduplicated, and rendered to the `Messages` / `Documents` output folders.
 
@@ -20,11 +20,11 @@ Work is organised per **case/request**, and the case is the unit of processing. 
 
 ### Exclusion / discard order (PST pipeline)
 
-Deduplicate → privileged-subject keyword → draft (missing routing headers) → subject-not-mentioned-anywhere → oversized-payload → GPT `keep`/`discard` → weak-signal override → attachments second-pass rescue. The privileged/confidential keyword list lives in one place (`src/lib/exclusions.ts`) and is shared by both pipelines.
+Deduplicate → privileged-subject keyword → draft (missing routing headers) → subject-not-mentioned-anywhere → oversized-payload → AI `keep`/`discard` override → attachments second-pass rescue. The privileged/confidential keyword list lives in one place (`src/lib/exclusions.ts`) and is shared by both pipelines.
 
 ### AI batch polling
 
-OpenAI batches complete asynchronously. Instead of a separate cron process, an **in-server self-managing poller** (`src/lib/batch-scheduler.ts`) starts automatically when the AI phase begins and **stops itself** once no AI/render work remains. If the server restarts mid-audit, the poller resumes as soon as the dashboard reconnects, and a render orphaned by a dead worker is reclaimed. The `/api/cron` route remains available only as an optional manual trigger.
+Bedrock batches complete asynchronously. Instead of a separate cron process, an **in-server self-managing poller** (`src/lib/batch-scheduler.ts`) starts automatically when the AI phase begins and **stops itself** once no AI/render work remains. If the server restarts mid-audit, the poller resumes as soon as the dashboard reconnects, and a render orphaned by a dead worker is reclaimed. The `/api/cron` route remains available only as an optional manual trigger.
 
 ---
 
@@ -33,7 +33,7 @@ OpenAI batches complete asynchronously. Instead of a separate cron process, an *
 - [Node.js](https://nodejs.org) (runtime, npm package manager)
 - `readpst` (from `libpst`) — must be on `$PATH`
 - WeasyPrint — must be installed for PDF generation
-- An OpenAI API key
+- AWS credentials with Bedrock access (`~/.aws`, mounted read-only into the containers)
 
 ---
 
@@ -42,7 +42,9 @@ OpenAI batches complete asynchronously. Instead of a separate cron process, an *
 Create a `.env.local` file in the project root:
 
 ```env
-OPENAI_API_KEY=sk-...
+AWS_REGION=eu-central-1
+BEDROCK_BATCH_BUCKET=...
+BEDROCK_BATCH_ROLE_ARN=...
 POSTGRES_URL=postgres://pst:pst@localhost:5432/pst_analyser
 STAGING_PATH=/path/to/staging-area
 EXTRACTED_PATH=/path/to/extracted_emails
@@ -160,7 +162,7 @@ This repository includes a Docker-first runtime for daily use:
 2. Set absolute host paths for:
   - `HOST_STAGING_PATH`
   - `HOST_EXTRACTED_PATH`
-3. Set `OPENAI_API_KEY`.
+3. Set `BEDROCK_BATCH_BUCKET` and `BEDROCK_BATCH_ROLE_ARN`, and make sure `~/.aws` has working credentials.
 
 Important:
 
@@ -207,10 +209,10 @@ source of truth. The dispatcher is the only service with Docker-socket access.
 
 Only one case is admitted to the local pipeline at a time. Jobs for that case
 can still run in parallel within their phase limits; jobs from every other case
-remain queued until the active case has fully settled (including OpenAI Batch
+remain queued until the active case has fully settled (including Bedrock Batch
 waiting).
 
-Parse and Extract fan out per PST, AI is globally serialized while OpenAI Batch
+Parse and Extract fan out per PST, AI is globally serialized while Bedrock Batch
 work is pending, and Render/Files run in bounded parallelism across cases.
 
 Set `CONTROL_PLANE_PIPELINE_ENABLED=true` to require this path explicitly. If
@@ -258,7 +260,7 @@ src/
   components/      # React UI components (dashboard cards, phase indicators, metrics)
   hooks/           # useFileStream (SSE), useNotification
   lib/
-    ai.ts                  # OpenAI batch file generation (case-level)
+    ai.ts                  # Bedrock batch file generation (case-level)
     analyzer.ts            # PST extraction and per-request email deduplication
     batch-worker.ts        # Batch result polling and DB updates
     batch-scheduler.ts     # In-server self-stopping AI batch poller
@@ -277,7 +279,7 @@ scripts/orchestrator/dispatcher.ts  # Persistent Docker job dispatcher
 scripts/orchestrator/job-runner.ts  # One-shot phase-job entry point
 scripts/workers/office-worker.ts    # Isolates synchronous DOCX/XLSX parsing
 scripts/maintenance/                # Explicit one-off maintenance utilities
-batches/            # Ephemeral JSONL files for OpenAI batch uploads (gitignored)
+batches/            # Ephemeral JSONL files for Bedrock batch uploads (gitignored)
 ```
 
 ---
@@ -287,7 +289,7 @@ batches/            # Ephemeral JSONL files for OpenAI batch uploads (gitignored
 - **Next.js 16** (App Router, `--webpack`)
 - **Node.js** — runtime
 - **PostgreSQL 16** via **Prisma 7** — database access (see `prisma/schema.prisma`, `prisma.config.ts`)
-- **OpenAI Batch API** — async AI triage at scale
+- **Amazon Bedrock** (Batch + Converse, Claude Haiku) — AI triage at scale
 - **WeasyPrint** — HTML-to-PDF rendering
 - **Tailwind CSS v4**
 - **Biome** — linting and formatting

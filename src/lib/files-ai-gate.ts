@@ -90,7 +90,7 @@ export async function runFilesAiPrepare(input: {
   fileId: string;
   dirs: { messagesDir: string; documentsDir: string };
   criteria: FilesAiCriteria;
-  /** `undefined` opens the real client; `null` means no OpenAI key. */
+  /** `undefined` opens the real client; `null` means no AWS credentials. */
   client?: FilesAiClient | null;
   readText?: (absPath: string) => Promise<string>;
 }): Promise<Record<string, unknown>> {
@@ -100,7 +100,7 @@ export async function runFilesAiPrepare(input: {
       : input.client;
   if (!client) {
     console.warn(
-      "[Files AI] No OpenAI client; sending every file to human review.",
+      "[Files AI] No AI client; sending every file to human review.",
     );
     const reviewed = await sendCandidatesToReview(
       input.fileId,
@@ -254,7 +254,7 @@ export async function applyFilesAiVerdicts(input: {
 /**
  * Forgets one Files row's AI state before its run is retried: its verdicts and
  * batch runs, and the files it moved to `Discarded/` (other waves' discards stay).
- * In-flight OpenAI batches are not cancelled; their results are never read.
+ * In-flight batches are not cancelled; their results are never read.
  */
 export async function clearFilesAiState(input: {
   fileId: string;

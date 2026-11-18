@@ -238,7 +238,7 @@ function CaseCardComponent({
   const aiDone =
     extractDone &&
     pstFiles.every((f) => ["completed", "failed"].includes(f.ai_status || ""));
-  // The coordinator briefly changes state while a completed OpenAI chunk is
+  // The coordinator briefly changes state while a completed AI chunk is
   // being applied and the next one is submitted. Persisted batch counters keep
   // the card in its AI state through that hand-off instead of falling back to
   // the configuration prompt for one SSE refresh.

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   type AiBatchSettings,
-  normalizeAiProvider,
   validateAiBatchSettings,
 } from "../../../src/lib/pipeline-settings";
 
@@ -22,10 +21,9 @@ const base: AiBatchSettings = {
   oneTrustSystemLabel: "AIDA",
 };
 
-describe("AI provider and second-review settings", () => {
-  it("defaults to OpenAI, threshold 8 and a 2% control sample", () => {
+describe("second-review settings", () => {
+  it("defaults to threshold 8 and a 2% control sample", () => {
     const settings = validateAiBatchSettings(base);
-    assert.equal(settings.aiProvider, "openai");
     assert.equal(settings.rereviewMinPKeep, 8);
     assert.equal(settings.rereviewSamplePercent, 2);
   });
@@ -33,11 +31,9 @@ describe("AI provider and second-review settings", () => {
   it("accepts values inside the range", () => {
     const settings = validateAiBatchSettings({
       ...base,
-      aiProvider: "bedrock",
       rereviewMinPKeep: 0,
       rereviewSamplePercent: 0.5,
     });
-    assert.equal(settings.aiProvider, "bedrock");
     assert.equal(settings.rereviewMinPKeep, 0);
     assert.equal(settings.rereviewSamplePercent, 0.5);
   });
@@ -55,13 +51,6 @@ describe("AI provider and second-review settings", () => {
       assert.throws(() =>
         validateAiBatchSettings({ ...base, rereviewSamplePercent }),
       );
-    }
-  });
-
-  it("treats anything but bedrock as OpenAI", () => {
-    assert.equal(normalizeAiProvider("bedrock"), "bedrock");
-    for (const value of ["openai", "", "Bedrock", undefined, 3]) {
-      assert.equal(normalizeAiProvider(value), "openai");
     }
   });
 });

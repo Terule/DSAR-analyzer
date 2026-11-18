@@ -7,17 +7,16 @@ import { configuredFilesAiClient } from "./files-ai-provider";
 import { rereviewWorkRemains } from "./files-ai-rereview";
 import { prisma } from "./prisma";
 
-/** Without an OpenAI client for this long, a submitted run is given up on (its files are kept). */
+/** Without an AI client for this long, a submitted run is given up on (its files are kept). */
 const STALE_RUN_MS = 30 * 60_000;
 
 /**
- * Polls every submitted Files AI batch. A missing OpenAI key must not stall
+ * Polls every submitted Files AI batch. Missing AWS credentials must not stall
  * delivery forever: runs older than STALE_RUN_MS are failed, which keeps their
  * files. Returns how many Files rows were polled or given up on.
  */
 export async function pollFilesAiRuns(
-  clientFactory: () => Promise<FilesAiClient> = () =>
-    configuredFilesAiClient({ forPolling: true }),
+  clientFactory: () => Promise<FilesAiClient> = () => configuredFilesAiClient(),
   /** Limits the poll to these Files rows. Tests use it so they never touch real runs. */
   onlyFileIds?: string[],
 ): Promise<number> {
@@ -53,7 +52,7 @@ export async function pollFilesAiRuns(
   try {
     client = await clientFactory();
   } catch (error) {
-    console.error("[Files AI] No OpenAI client for polling:", error);
+    console.error("[Files AI] No AI client for polling:", error);
   }
 
   const fileIds = [...new Set(runs.map((run) => run.file_id))];
@@ -72,7 +71,10 @@ export async function pollFilesAiRuns(
   for (const run of runs) {
     const startedAt = (run.submitted_at ?? run.created_at).getTime();
     if (startedAt < staleBefore) {
-      await failFilesAiRun(run.id, "No OpenAI key to read the batch result.");
+      await failFilesAiRun(
+        run.id,
+        "No AWS credentials to read the batch result.",
+      );
     }
   }
   return fileIds.length;

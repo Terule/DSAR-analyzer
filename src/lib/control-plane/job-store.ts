@@ -166,7 +166,7 @@ export async function claimNextJob(
 
 /**
  * Return the cases that currently own execution capacity. A case remains active
- * while a worker has a lease and while its OpenAI Batch is awaiting completion.
+ * while a worker has a lease and while its AI batch is awaiting completion.
  * Queued jobs are deliberately excluded: they wait until an active case releases
  * the local pipeline.
  */
@@ -633,7 +633,7 @@ export async function completeJob(
   );
 }
 
-/** AI batch submission has finished, but OpenAI is still processing externally. */
+/** AI batch submission has finished, but the AI batch is still processing externally. */
 export async function markJobAwaitingExternal(
   jobId: string,
   workerId: string,

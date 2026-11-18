@@ -217,7 +217,7 @@ async function mapLimit<T, R>(
 /**
  * Bedrock behind the Files AI client seam. A run with more than BATCH_THRESHOLD
  * records goes to Bedrock Batch (Haiku 4.5); a smaller one is answered at once
- * with Converse (Haiku 5.5). Results come back in the OpenAI batch-output shape
+ * with Converse (Haiku 5.5). Results come back in the batch-output shape
  * the poller already reads, so the rest of the flow does not change.
  */
 export function bedrockFilesAiClient(

@@ -520,7 +520,7 @@ function phaseCards(request: RequestItem) {
               state.screening
             ? "Screening attachments"
             : phase.key === "ai" && state?.status === "batch_ready"
-              ? "Waiting on OpenAI"
+              ? "Waiting on AI"
               : active
                 ? "In progress"
                 : "Waiting",

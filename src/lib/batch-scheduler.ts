@@ -4,7 +4,7 @@
  * A single self-managing interval lives inside the Next.js server. It is
  * started when the AI phase begins (via `ensureBatchPollerRunning`) and stops
  * itself as soon as there is no more AI/render work to sweep — so nothing polls
- * OpenAI while the app is idle, and no separate long-lived cron process is needed.
+ * Bedrock while the app is idle, and no separate long-lived cron process is needed.
  */
 
 import path from "node:path";
@@ -24,7 +24,7 @@ import { rereviewFilesAiDiscards } from "./files-ai-rereview";
 import { settleMailScreens } from "./mail-screen";
 import { prisma } from "./prisma";
 
-// OpenAI batches use a 24h completion window; a 1-minute cadence keeps the UI
+// Bedrock batch jobs take minutes to hours; a 1-minute cadence keeps the UI
 // responsive without hammering the API.
 const POLL_INTERVAL_MS = 60_000;
 // Applying a completed Batch is local work and normally takes seconds. If a
@@ -112,7 +112,7 @@ async function startReadyFilesPhases(): Promise<number> {
 
 /**
  * One sweep pass: triggers the render worker for finished-AI/pending-render
- * files and polls every OpenAI batch awaiting sync. Returns whether any
+ * files and polls every AI batch awaiting sync. Returns whether any
  * AI/render work still remains (used to decide if polling should continue).
  */
 export async function runBatchSweep(): Promise<SweepResult> {

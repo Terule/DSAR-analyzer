@@ -14,7 +14,7 @@
  *   ... --apply
  *       moves every discarded file back, forgets their verdicts, corrects the
  *       counters and runs the Files AI prepare step again. Every file goes to
- *       OpenAI as a Batch run (or to human review if it cannot be read).
+ *       the AI service as a Batch run (or to human review if it cannot be read).
  *
  *   ... --finish
  *       once those batches have completed: queues the normal apply job (moves

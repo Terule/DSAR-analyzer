@@ -26,7 +26,7 @@ class FakeClient implements FilesAiClient {
     return `file-${this.uploaded.length}`;
   }
   async createBatch(_input: string) {
-    if (this.failCreate) throw new Error("OpenAI is down");
+    if (this.failCreate) throw new Error("the service is down");
     const id = `${tag}-new-${this.created.length + 1}`;
     this.created.push(id);
     return id;

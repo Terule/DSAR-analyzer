@@ -191,7 +191,7 @@ export function PipelineSettingsDialog({
             <div>
               <DialogTitle>Pipeline settings</DialogTitle>
               <DialogDescription>
-                Changes affect new AI slots immediately. Existing OpenAI batches
+                Changes affect new AI slots immediately. Existing AI batches
                 continue unchanged.
               </DialogDescription>
             </div>

@@ -23,7 +23,7 @@ const criteria = {
   aliases: [] as string[],
 };
 
-/** Looks like a Bedrock client: ids carry the prefix, output comes back in OpenAI shape. */
+/** Looks like a Bedrock client: ids carry the prefix, output comes back in the batch-output shape. */
 class FakeBedrock implements FilesAiClient {
   uploaded: string[] = [];
   outputs = new Map<string, string>();

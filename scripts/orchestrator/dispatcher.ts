@@ -144,7 +144,6 @@ const dispatcherContainer = process.env.HOSTNAME || "";
 let workerBinds: string[] | null = null;
 const workerEnvironment = [
   "NODE_ENV",
-  "OPENAI_API_KEY",
   "POSTGRES_URL",
   "POSTGRES_URL_DOCKER",
   "REDIS_URL",
@@ -190,7 +189,7 @@ function active(phase: ControlPhase): number {
 async function canStartAi(): Promise<boolean> {
   const activeAi = await prisma.processedFile.findFirst({
     // `processing` is set by the short-lived submitting container itself.
-    // A submitted `batch_ready` coordinator owns the one global OpenAI slot
+    // A submitted `batch_ready` coordinator owns the one global AI slot
     // until the external batch settles.
     where: { kind: "pst", ai_status: "batch_ready" },
     select: { id: true },
@@ -381,7 +380,7 @@ async function settleExternalAi(): Promise<void> {
     });
     if (row?.ai_status === "completed") await completeJob(job.id, workerId);
     if (row?.ai_status === "failed")
-      await failJob(job.id, workerId, "OpenAI Batch processing failed.", false);
+      await failJob(job.id, workerId, "AI batch processing failed.", false);
     if (
       row &&
       row.ai_status !== "batch_ready" &&
@@ -561,7 +560,7 @@ async function reconcileInterruptedWork(): Promise<void> {
   }
 
   // AI submission is case-level. A row with no Batch id was interrupted before
-  // OpenAI accepted the batch, so it is safe to resubmit the coordinator.
+  // the AI batch was accepted, so it is safe to resubmit the coordinator.
   const recoveringAi = pstRows.filter(
     (row) => row.ai_status === "processing" && !row.batch_id,
   );
@@ -609,7 +608,7 @@ async function removeOrphanedWorkerContainers(): Promise<number> {
   return containers.length;
 }
 
-// The loop below ticks every second, but a sweep polls OpenAI once per
+// The loop below ticks every second, but a sweep polls Bedrock once per
 // outstanding Batch. Left unthrottled, ten Batches meant ten API calls a
 // second; the in-app poller uses the same one-minute cadence.
 const BATCH_SWEEP_INTERVAL_MS = 60_000;

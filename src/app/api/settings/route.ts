@@ -5,7 +5,6 @@ import { encryptSetting } from "@/lib/credentials";
 import {
   AI_BATCH_SETTINGS_LIMITS,
   getAiBatchSettings,
-  normalizeAiProvider,
   updateAiBatchSettings,
 } from "@/lib/pipeline-settings";
 import { prisma } from "@/lib/prisma";
@@ -25,7 +24,6 @@ export async function PATCH(request: Request) {
       sharePointSiteUrl?: string;
       sharePointFolderId?: string;
       sharePointFolderPath?: string;
-      openAiKey?: string;
       azureTenantId?: string;
       azureClientId?: string;
       azureClientSecret?: string;
@@ -42,7 +40,6 @@ export async function PATCH(request: Request) {
       deleteSourcePsts?: boolean;
       filesConcurrency?: number | string;
       filesAiEnabled?: boolean;
-      aiProvider?: string;
       rereviewMinPKeep?: number | string;
       rereviewSamplePercent?: number | string;
     };
@@ -78,19 +75,12 @@ export async function PATCH(request: Request) {
         body.rereviewSamplePercent === ""
           ? current.rereviewSamplePercent
           : Number(body.rereviewSamplePercent),
-      aiProvider:
-        body.aiProvider === undefined
-          ? current.aiProvider
-          : normalizeAiProvider(body.aiProvider),
       filesConcurrency:
         body.filesConcurrency === undefined || body.filesConcurrency === ""
           ? current.filesConcurrency
           : Number(body.filesConcurrency),
     });
     const encrypted = await Promise.all([
-      body.openAiKey?.trim()
-        ? encryptSetting(body.openAiKey.trim())
-        : undefined,
       body.azureTenantId?.trim()
         ? encryptSetting(body.azureTenantId.trim())
         : undefined,
@@ -111,17 +101,16 @@ export async function PATCH(request: Request) {
       await prisma.pipelineSettings.update({
         where: { id: "global" },
         data: {
-          ...(encrypted[0] ? { openai_api_key_encrypted: encrypted[0] } : {}),
-          ...(encrypted[1] ? { azure_tenant_id_encrypted: encrypted[1] } : {}),
-          ...(encrypted[2] ? { azure_client_id_encrypted: encrypted[2] } : {}),
+          ...(encrypted[0] ? { azure_tenant_id_encrypted: encrypted[0] } : {}),
+          ...(encrypted[1] ? { azure_client_id_encrypted: encrypted[1] } : {}),
+          ...(encrypted[2]
+            ? { azure_client_secret_encrypted: encrypted[2] }
+            : {}),
           ...(encrypted[3]
-            ? { azure_client_secret_encrypted: encrypted[3] }
+            ? { onetrust_client_id_encrypted: encrypted[3] }
             : {}),
           ...(encrypted[4]
-            ? { onetrust_client_id_encrypted: encrypted[4] }
-            : {}),
-          ...(encrypted[5]
-            ? { onetrust_client_secret_encrypted: encrypted[5] }
+            ? { onetrust_client_secret_encrypted: encrypted[4] }
             : {}),
         },
       });

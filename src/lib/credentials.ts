@@ -48,7 +48,6 @@ export async function runtimeCredentials() {
   const row = await prisma.pipelineSettings.findUnique({
     where: { id: "global" },
     select: {
-      openai_api_key_encrypted: true,
       azure_tenant_id_encrypted: true,
       azure_client_id_encrypted: true,
       azure_client_secret_encrypted: true,
@@ -57,7 +56,6 @@ export async function runtimeCredentials() {
     },
   });
   return {
-    openAiKey: await decryptSetting(row?.openai_api_key_encrypted || null),
     azureTenantId: await decryptSetting(row?.azure_tenant_id_encrypted || null),
     azureClientId: await decryptSetting(row?.azure_client_id_encrypted || null),
     azureClientSecret: await decryptSetting(

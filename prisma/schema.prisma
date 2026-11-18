@@ -205,7 +205,7 @@ model Email {
   @@map("emails")
 }
 
-// Each OpenAI Batch submission has a durable row.  Email rows are claimed by
+// Each Bedrock Batch submission has a durable row.  Email rows are claimed by
 // this row before upload, which makes parallel submission safe and lets us
 // retry only request lines that did not yield a decision.
 model AiBatchRun {
@@ -219,7 +219,7 @@ model AiBatchRun {
   error          String?
   created_at     DateTime @default(now())
   submitted_at   DateTime?
-  // The terminal timestamp reported by OpenAI, distinct from the time this
+  // The terminal timestamp reported by the AI service, distinct from the time this
   // application downloads and applies the output.
   openai_completed_at DateTime?
   completed_at   DateTime?
@@ -232,7 +232,7 @@ model AiBatchRun {
 }
 
 // The Files AI relevance check: one verdict per converted file of a Files row,
-// judged in OpenAI Batch runs. Kept separate from the email AI tables.
+// judged in Bedrock Batch runs. Kept separate from the email AI tables.
 model FilesAiBatchRun {
   id             String   @id
   file_id        String
@@ -240,7 +240,7 @@ model FilesAiBatchRun {
   status         String   @default("submitted")
   request_count  Int      @default(0)
   estimated_tokens Int    @default(0)
-  // 1 = first submission; 2 = the one automatic resubmission of a batch OpenAI
+  // 1 = first submission; 2 = the one automatic resubmission of a batch the service
   // failed, expired or cancelled.
   attempt        Int      @default(1)
   error          String?
@@ -291,7 +291,7 @@ model FilesAiVerdict {
 
 // A single operator-managed row controls live pipeline throughput.  Workers
 // read this before filling slots, so adjustments take effect without restarting
-// already accepted OpenAI Batch jobs.
+// already accepted Batch jobs.
 model PipelineSettings {
   id                          String   @id
   ai_max_tokens_per_batch     Int      @default(2000000)
@@ -303,7 +303,6 @@ model PipelineSettings {
   sharepoint_upload_lease_until BigInt?
   staging_root                  String?
   deliverables_root             String?
-  openai_api_key_encrypted      String?
   azure_tenant_id_encrypted     String?
   azure_client_id_encrypted     String?
   azure_client_secret_encrypted String?
@@ -320,7 +319,6 @@ model PipelineSettings {
   delete_source_psts          Boolean  @default(true)
   files_concurrency           Int      @default(6)
   files_ai_enabled            Boolean  @default(true)
-  ai_provider                 String   @default("openai")
   rereview_min_p_keep         Int      @default(8)
   rereview_sample_percent     Float    @default(2)
   updated_at                  DateTime @updatedAt
