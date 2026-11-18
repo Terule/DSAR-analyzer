@@ -186,6 +186,14 @@ model Email {
   ai_decision       String?
   ai_reason         String?
   ai_batch_run_id   String?
+  // Second review (Bedrock): a Haiku 4.5 discard that shows doubt is stored as a
+  // provisional discard and waits here for Haiku 5.5. `ai_p_keep` is the 4.5
+  // confidence (0-100) that the email should be kept.
+  ai_p_keep               Int?
+  rereview_status         String?
+  rereview_queued_at      DateTime?
+  rereview_started_at     DateTime?
+  rereview_coordinator_id String?
 
   processed_file ProcessedFile? @relation("ProcessedFileEmails", fields: [file_id], references: [id], onDelete: NoAction, onUpdate: NoAction)
   ai_batch_run AiBatchRun? @relation("AiBatchRunEmails", fields: [ai_batch_run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
@@ -193,6 +201,7 @@ model Email {
   @@index([file_id])
   @@index([ai_batch_run_id])
   @@index([message_id])
+  @@index([rereview_status])
   @@map("emails")
 }
 

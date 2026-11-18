@@ -7,12 +7,18 @@ import {
   fillAiBatchSlots,
 } from "./ai";
 import { AI_MODEL, AI_REASONING_EFFORT } from "./ai-model";
-import { CONVERSE_MODEL } from "./bedrock/config";
+import {
+  BEDROCK_BATCH_PREFIX,
+  CONVERSE_MODEL,
+  REREVIEW_DEFAULT_MIN_P_KEEP,
+  REREVIEW_DEFAULT_SAMPLE_PERCENT,
+} from "./bedrock/config";
 import {
   awsBedrockDeps,
   isBedrockId,
   removeBedrockArtifacts,
 } from "./bedrock/files-ai-client";
+import { shouldRereview } from "./bedrock/rereview-gate";
 import {
   getCasePstFileIds,
   isCaseAiSettled,
@@ -23,6 +29,7 @@ import { runtimeCredentials } from "./credentials";
 import { applyConfidentiality } from "./email-audit";
 import { configuredFilesAiClient } from "./files-ai-provider";
 import { startMailScreen } from "./mail-screen";
+import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 
@@ -218,7 +225,7 @@ function moveEmailToBucket(
   if (fs.existsSync(sameBucketPath)) return;
 }
 
-function hasStrongSubjectSignal(
+export function hasStrongSubjectSignal(
   payloadText: string,
   criteria: SubjectCriteria,
 ): boolean {
@@ -398,6 +405,64 @@ async function completedAiElapsedMs(
   return Math.max(0, lastCompleted.getTime() - firstSubmitted.getTime());
 }
 
+/** Emails of these PST rows whose discard still waits for, or is getting, a second review. */
+export async function emailRereviewPending(
+  casePstIds: string[],
+): Promise<boolean> {
+  const waiting = await prisma.email.findFirst({
+    where: { file_id: { in: casePstIds }, rereview_status: { not: null } },
+    select: { email_hash: true },
+  });
+  return !!waiting;
+}
+
+/**
+ * The email audit of a case is fully decided (every chunk applied, every second
+ * review settled). Screens attachments and client bodies, then releases Render.
+ * Called by the poller after the last chunk and by the second-review job after
+ * its last verdict, whichever comes last.
+ */
+export async function completeEmailAudit(fileId: string): Promise<void> {
+  const row = await prisma.processedFile.findUnique({
+    where: { id: fileId },
+    select: { ai_started_at: true },
+  });
+  const aiStartedAtMs =
+    typeof row?.ai_started_at === "bigint" ? Number(row.ai_started_at) : null;
+  console.log(
+    `[Batch Worker] All AI chunks completed successfully for case (coordinator ${fileId}).`,
+  );
+
+  // The audit is done. Before Render, what it never read (attachments, and
+  // client email bodies) is screened for confidential content; the case
+  // completes its AI phase once that settles.
+  const screening = await startMailScreen(
+    fileId,
+    await completedAiElapsedMs(
+      fileId,
+      typeof aiStartedAtMs === "number"
+        ? Math.max(0, Date.now() - aiStartedAtMs)
+        : 0,
+    ),
+  );
+
+  adaptiveTokenCapByFile.delete(fileId);
+
+  if (screening === "screening") {
+    console.log(
+      `[Batch Worker] Email audit done for ${fileId}; screening attachments before Render.`,
+    );
+  } else if (await isCaseAiSettled(fileId)) {
+    // Render is case-level (all PST files in a request share the selected/
+    // folder). The case is now settled, so kick off a single render pass.
+    await queuePdfWorker(fileId);
+  } else {
+    console.log(
+      `[Batch Worker] AI done for ${fileId}; waiting for sibling PST files before rendering the case.`,
+    );
+  }
+}
+
 async function pollSingleBatchStatus(
   fileId: string,
   batchRunId: string,
@@ -529,7 +594,7 @@ async function pollSingleBatchStatus(
       firstPassKeep: 0,
       firstPassDiscard: 0,
       invalidOutput: 0,
-      weakSignalOverrides: 0,
+      rereviewQueued: 0,
       secondPassRequested: 0,
       secondPassExecuted: 0,
       secondPassRescued: 0,
@@ -552,7 +617,20 @@ async function pollSingleBatchStatus(
       emailHash: string;
       decision: "keep" | "discard";
       reason: string;
+      pKeep: number | null;
+      rereview: boolean;
     }> = [];
+    // Haiku 4.5 (Batch) discards that show doubt get a second opinion from
+    // Haiku 5.5; Converse runs are already Haiku 5.5.
+    const settings = await getAiBatchSettings();
+    const rereviewConfig = {
+      minPKeep: settings.rereviewMinPKeep ?? REREVIEW_DEFAULT_MIN_P_KEEP,
+      sampleRate:
+        (settings.rereviewSamplePercent ?? REREVIEW_DEFAULT_SAMPLE_PERCENT) /
+        100,
+    };
+    const gateRereview =
+      !!bedrockClient && batchId.startsWith(BEDROCK_BATCH_PREFIX);
     const selectedHashes: string[] = [];
 
     for (const line of lines) {
@@ -574,6 +652,7 @@ async function pollSingleBatchStatus(
         reason?: string;
         needs_second_pass?: boolean;
         sensitivity?: string;
+        confidence?: number;
       };
 
       try {
@@ -614,17 +693,6 @@ async function pollSingleBatchStatus(
 
       const payloadText = payload ? payloadToText(payload) : "";
 
-      if (decision === "keep") {
-        if (
-          !payloadText ||
-          !hasStrongSubjectSignal(payloadText, subjectCriteria)
-        ) {
-          decision = "discard";
-          reason = "System Override: weak or ambiguous subject signal.";
-          auditStats.weakSignalOverrides++;
-        }
-      }
-
       if (
         decision === "discard" &&
         decisionData.needs_second_pass === true &&
@@ -643,7 +711,31 @@ async function pollSingleBatchStatus(
         }
       }
 
-      pendingUpdates.push({ emailHash, decision, reason });
+      // The audit's own judgement stands: the weak-signal override that used to
+      // flip a keep to a discard here contradicted the prompt rules (an email
+      // about the subject with only a first name is kept).
+      const pKeep =
+        typeof decisionData.confidence === "number" &&
+        Number.isFinite(decisionData.confidence)
+          ? Math.min(100, Math.max(0, Math.round(decisionData.confidence)))
+          : null;
+      const rereview =
+        gateRereview &&
+        decision === "discard" &&
+        shouldRereview(
+          {
+            id: emailHash,
+            pKeep,
+            sensitivity: decisionData.sensitivity ?? null,
+            subjectInvolved:
+              !!payloadText &&
+              hasStrongSubjectSignal(payloadText, subjectCriteria),
+          },
+          rereviewConfig,
+        );
+      if (rereview) auditStats.rereviewQueued++;
+
+      pendingUpdates.push({ emailHash, decision, reason, pKeep, rereview });
 
       moveEmailToBucket(
         emailHash,
@@ -671,6 +763,14 @@ async function pollSingleBatchStatus(
             ai_decision: item.decision,
             ai_reason: item.reason,
             ai_batch_run_id: null,
+            ai_p_keep: item.pKeep,
+            ...(item.rereview
+              ? {
+                  rereview_status: "pending",
+                  rereview_queued_at: new Date(),
+                  rereview_coordinator_id: fileId,
+                }
+              : {}),
           },
         }),
       ),
@@ -751,7 +851,7 @@ async function pollSingleBatchStatus(
     });
 
     console.log(
-      `[AI Audit] file=${fileId} first_pass_keep=${auditStats.firstPassKeep} first_pass_discard=${auditStats.firstPassDiscard} weak_signal_overrides=${auditStats.weakSignalOverrides} second_pass_requested=${auditStats.secondPassRequested} second_pass_executed=${auditStats.secondPassExecuted} second_pass_rescued=${auditStats.secondPassRescued} invalid_outputs=${auditStats.invalidOutput} final_keep=${keepCount} final_discard=${discardCount}`,
+      `[AI Audit] file=${fileId} first_pass_keep=${auditStats.firstPassKeep} first_pass_discard=${auditStats.firstPassDiscard} rereview_queued=${auditStats.rereviewQueued} second_pass_requested=${auditStats.secondPassRequested} second_pass_executed=${auditStats.secondPassExecuted} second_pass_rescued=${auditStats.secondPassRescued} invalid_outputs=${auditStats.invalidOutput} final_keep=${keepCount} final_discard=${discardCount}`,
     );
 
     const remainingCount = await prisma.email.count({
@@ -794,37 +894,14 @@ async function pollSingleBatchStatus(
         );
       }
     } else if (activeBatchCount === 0) {
-      console.log(
-        `[Batch Worker] All AI chunks completed successfully for case (coordinator ${fileId}).`,
-      );
-
-      // The audit is done. Before Render, what it never read (attachments, and
-      // client email bodies) is screened for confidential content; the case
-      // completes its AI phase once that settles.
-      const screening = await startMailScreen(
-        fileId,
-        await completedAiElapsedMs(
-          fileId,
-          typeof aiStartedAtMs === "number"
-            ? Math.max(0, Date.now() - aiStartedAtMs)
-            : 0,
-        ),
-      );
-
-      adaptiveTokenCapByFile.delete(fileId);
-
-      if (screening === "screening") {
+      // Discards waiting for their second opinion hold the phase: Render reads
+      // selected/, which the review may still change.
+      if (await emailRereviewPending(casePstIds)) {
         console.log(
-          `[Batch Worker] Email audit done for ${fileId}; screening attachments before Render.`,
+          `[Batch Worker] Email audit chunks done for ${fileId}; waiting for the second review.`,
         );
-      } else if (await isCaseAiSettled(fileId)) {
-        // Render is case-level (all PST files in a request share the selected/
-        // folder). The case is now settled, so kick off a single render pass.
-        await queuePdfWorker(fileId);
       } else {
-        console.log(
-          `[Batch Worker] AI done for ${fileId}; waiting for sibling PST files before rendering the case.`,
-        );
+        await completeEmailAudit(fileId);
       }
     }
   } else if (isTokenLimitBatchFailure(batch)) {

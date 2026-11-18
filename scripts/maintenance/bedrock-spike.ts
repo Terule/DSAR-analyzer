@@ -200,7 +200,7 @@ async function main() {
           if (want === "discard") wrongDiscard++;
         }
         results[index] =
-          `${mismatch ? "MISMATCH want=" + want + " " : ""}` +
+          `${mismatch ? `MISMATCH want=${want} ` : ""}` +
           `${item.kind}/${item.fileName}: ${JSON.stringify(verdict)} ` +
           `[${judgement.relevance}/${judgement.sensitivity}]`;
         tokensIn += outcome.input;

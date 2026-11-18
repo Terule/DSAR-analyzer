@@ -87,7 +87,7 @@ export const RESPONSE_FORMAT = {
   },
 } as const;
 
-function stripPayloadSignatures(content: Record<string, unknown>): void {
+export function stripPayloadSignatures(content: Record<string, unknown>): void {
   for (const key of ["first_email", "second_email"]) {
     const email = content[key];
     if (email && typeof email === "object" && "body" in email) {
@@ -165,7 +165,9 @@ export const emailAiTestOverride: {
 } = {};
 
 /** Bedrock runs the email audit only when it is the provider and the audit may use it. */
-async function useBedrockForEmails(injected?: FilesAiClient): Promise<boolean> {
+async function bedrockEmailAuditEnabled(
+  injected?: FilesAiClient,
+): Promise<boolean> {
   if (injected || emailAiTestOverride.client) return true;
   return (
     EMAIL_AUDIT_ON_BEDROCK &&
@@ -467,7 +469,7 @@ export async function generateBatchFile(
 
   try {
     let externalBatchId: string;
-    if (await useBedrockForEmails(options?.client)) {
+    if (await bedrockEmailAuditEnabled(options?.client)) {
       // Bedrock: Batch (Haiku 4.5) over 100 records, Converse (Haiku 5.5) below.
       const bedrock =
         options?.client ??

@@ -15,6 +15,10 @@ import {
   enqueueFilePhase,
   isControlPlanePipelineEnabled,
 } from "./control-plane/pipeline";
+import {
+  emailRereviewWorkRemains,
+  rereviewEmailDiscards,
+} from "./email-rereview";
 import { filesAiWorkRemains, pollFilesAiRuns } from "./files-ai-poll";
 import { rereviewFilesAiDiscards } from "./files-ai-rereview";
 import { settleMailScreens } from "./mail-screen";
@@ -190,6 +194,10 @@ export async function runBatchSweep(): Promise<SweepResult> {
     console.error("[Batch Scheduler] Files AI second review failed:", err),
   );
 
+  await rereviewEmailDiscards().catch((err) =>
+    console.error("[Batch Scheduler] Email second review failed:", err),
+  );
+
   // Cases whose attachment screening has been fully read complete their AI
   // phase here, which releases Render.
   for (const coordinatorId of await settleMailScreens().catch((err) => {
@@ -221,7 +229,10 @@ export async function runBatchSweep(): Promise<SweepResult> {
   return {
     polledBatches: pendingRuns.length,
     renderWorkerStarted,
-    workRemains: !!remaining || (await filesAiWorkRemains()),
+    workRemains:
+      !!remaining ||
+      (await filesAiWorkRemains()) ||
+      (await emailRereviewWorkRemains()),
   };
 }
 

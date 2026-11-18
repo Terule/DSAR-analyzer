@@ -49,7 +49,7 @@ export const REREVIEW_DEFAULT_SAMPLE_PERCENT = 2;
 
 /**
  * Whether the employee email audit may run on Bedrock when it is the provider.
- * Off until the second review of Haiku 4.5 discards exists for emails: without
- * it, over-discards from the batch model would be final.
+ * Haiku 4.5 discards that show doubt get a second review (Haiku 5.5) first, so
+ * an over-discard from the batch model is not final.
  */
-export const EMAIL_AUDIT_ON_BEDROCK = false;
+export const EMAIL_AUDIT_ON_BEDROCK = true;

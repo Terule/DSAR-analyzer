@@ -302,6 +302,41 @@ export function SystemSettingsDialog({
               {tab === "AI" && (
                 <>
                   {section(
+                    "AI provider",
+                    "Which service screens files and mail. Amazon Bedrock sends runs over 100 items to Bedrock Batch (Claude Haiku 4.5) and smaller runs to Converse (Claude Haiku 5.5); it needs AWS credentials and the batch bucket configured on the server.",
+                    <select
+                      value={
+                        values.aiProvider === "bedrock" ? "bedrock" : "openai"
+                      }
+                      onChange={(event) =>
+                        update("aiProvider", event.target.value)
+                      }
+                      className="w-full rounded-xl border border-slate-600 bg-slate-950/80 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/30"
+                    >
+                      <option value="openai">OpenAI Batch</option>
+                      <option value="bedrock">Amazon Bedrock (EU)</option>
+                    </select>,
+                  )}
+                  {values.aiProvider === "bedrock" &&
+                    section(
+                      "Second review",
+                      "The Haiku 4.5 batch discards the obvious cases; Haiku 5.5 judges the doubtful discards again. A file kept on second review is delivered.",
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        {input("rereviewMinPKeep", "Doubt threshold (0-100)", {
+                          type: "number",
+                          min: 0,
+                          max: 100,
+                          hint: "A discard whose keep estimate is at or above this is judged again. Lower means more second reviews and more cost. Default 8.",
+                        })}
+                        {input("rereviewSamplePercent", "Control sample (%)", {
+                          type: "number",
+                          min: 0,
+                          max: 100,
+                          hint: "Share of the remaining, confident discards also judged again, to measure what the threshold lets through. Default 2.",
+                        })}
+                      </div>,
+                    )}
+                  {section(
                     "Batch delivery window",
                     "Balance parallel work and batch size while keeping the desired amount of work queued.",
                     <div className="grid gap-6">
@@ -659,41 +694,6 @@ export function SystemSettingsDialog({
                       </span>
                     </label>,
                   )}
-                  {section(
-                    "AI provider",
-                    "Which service screens files and mail. Amazon Bedrock sends runs over 100 items to Bedrock Batch (Claude Haiku 4.5) and smaller runs to Converse (Claude Haiku 5.5); it needs AWS credentials and the batch bucket configured on the server.",
-                    <select
-                      value={
-                        values.aiProvider === "bedrock" ? "bedrock" : "openai"
-                      }
-                      onChange={(event) =>
-                        update("aiProvider", event.target.value)
-                      }
-                      className="w-full rounded-xl border border-slate-600 bg-slate-950/80 px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-400/30"
-                    >
-                      <option value="openai">OpenAI Batch</option>
-                      <option value="bedrock">Amazon Bedrock (EU)</option>
-                    </select>,
-                  )}
-                  {values.aiProvider === "bedrock" &&
-                    section(
-                      "Second review",
-                      "The Haiku 4.5 batch discards the obvious cases; Haiku 5.5 judges the doubtful discards again. A file kept on second review is delivered.",
-                      <div className="grid gap-3 sm:grid-cols-2">
-                        {input("rereviewMinPKeep", "Doubt threshold (0-100)", {
-                          type: "number",
-                          min: 0,
-                          max: 100,
-                          hint: "A discard whose keep estimate is at or above this is judged again. Lower means more second reviews and more cost. Default 8.",
-                        })}
-                        {input("rereviewSamplePercent", "Control sample (%)", {
-                          type: "number",
-                          min: 0,
-                          max: 100,
-                          hint: "Share of the remaining, confident discards also judged again, to measure what the threshold lets through. Default 2.",
-                        })}
-                      </div>,
-                    )}
                   {section(
                     "AI screening",
                     "Let the AI screen files, email bodies and attachments for confidential content, and judge file relevance.",
