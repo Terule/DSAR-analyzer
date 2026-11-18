@@ -1,3 +1,5 @@
+import { stripEmailSignature } from "./email-content";
+
 /**
  * Privileged / confidential keywords that force an immediate discard.
  *
@@ -23,3 +25,15 @@ export const PRIVILEGED_KEYWORDS_RE = new RegExp(
   `(?<![A-Za-z0-9])(${PRIVILEGED_KEYWORDS.join("|")})(?![A-Za-z0-9])`,
   "i",
 );
+
+/**
+ * The ONE keyword rule for every email, wherever it sits (PST or the Files
+ * folder): the privileged keywords are looked up in the subject and the body,
+ * ignoring the signature / confidentiality disclaimer, which says
+ * "confidential" on nearly every corporate email.
+ */
+export function hasPrivilegedKeyword(subject: string, body: string): boolean {
+  return PRIVILEGED_KEYWORDS_RE.test(
+    stripEmailSignature(`${subject}\n${body}`),
+  );
+}

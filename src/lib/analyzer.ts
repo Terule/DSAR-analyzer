@@ -6,7 +6,7 @@ import type { FieldsData } from "@kenjiuno/msgreader";
 import MsgReader from "@kenjiuno/msgreader";
 import { type ParsedMail, simpleParser } from "mailparser";
 import { computeEmailHash, dedupScope, isDuplicateEmail } from "./email-dedup";
-import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
+import { hasPrivilegedKeyword } from "./exclusions";
 import { keepTail } from "./job-log";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
@@ -419,7 +419,7 @@ export async function analyzePstDuplicates(
 
     if (
       !isClientCase &&
-      PRIVILEGED_KEYWORDS_RE.test(subject) &&
+      hasPrivilegedKeyword(subject, bodyRaw) &&
       !sentToSubjectEmail
     ) {
       const emailId = crypto.randomUUID();
@@ -436,7 +436,7 @@ export async function analyzePstDuplicates(
           is_attachment: parentHash ? 1 : 0,
           ai_decision: "discard",
           ai_reason:
-            "Pre-filter: Subject contains privileged/confidential keyword",
+            "Pre-filter: Subject or body contains privileged/confidential keyword",
         },
       });
       await prisma.processedFile.update({

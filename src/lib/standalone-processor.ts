@@ -9,7 +9,7 @@ import MsgReader, { type FieldsData } from "@kenjiuno/msgreader";
 import { simpleParser } from "mailparser";
 import { normalizeHtmlForPdf } from "./converter";
 import { stripEmailSignature } from "./email-content";
-import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
+import { hasPrivilegedKeyword, PRIVILEGED_KEYWORDS_RE } from "./exclusions";
 import {
   isPasswordProtectedFile,
   isPasswordProtectionError,
@@ -1445,7 +1445,7 @@ export async function runStandaloneBatch(
 
         if (
           !bypassFilters &&
-          exclusionsRegex.test(rawText) &&
+          hasPrivilegedKeyword("", rawText) &&
           !sentToSubjectEmail
         ) {
           console.log(

@@ -5,6 +5,8 @@ import { uploadSharePointArtifact } from "../../src/lib/sharepoint";
 import { refreshSharePointUploadProgress } from "../../src/lib/sharepoint-artifact-outbox";
 
 const MAX_ATTEMPTS = 5;
+const MAX_CONFLICT_ATTEMPTS = 8;
+const CONFLICT_RETRY_MS = 60_000;
 const LEASE_MS = 5 * 60_000;
 const IDLE_POLLS = 5;
 const UPLOAD_CONCURRENCY = Math.min(
@@ -71,8 +73,12 @@ async function uploadLoop(): Promise<void> {
     } catch (error) {
       const message =
         error instanceof Error ? error.message.slice(0, 500) : "Upload failed.";
+      // 409 "currently being uploaded" is a stale upload session on the
+      // SharePoint side; it clears after a minute or two, so wait longer and
+      // try more times instead of failing the file.
+      const conflict = /request 409\b/.test(message);
       const retry =
-        next.attempts + 1 < MAX_ATTEMPTS &&
+        next.attempts + 1 < (conflict ? MAX_CONFLICT_ATTEMPTS : MAX_ATTEMPTS) &&
         !/request (400|401|403|404)\b/.test(message);
       await prisma.sharePointUploadArtifact.update({
         where: { id: next.id },
@@ -82,7 +88,13 @@ async function uploadLoop(): Promise<void> {
           heartbeat_at: BigInt(Date.now()),
         },
       });
-      if (retry) await wait(Math.min(60_000, 2 ** (next.attempts + 1) * 1_000));
+      if (retry) {
+        await wait(
+          conflict
+            ? CONFLICT_RETRY_MS
+            : Math.min(60_000, 2 ** (next.attempts + 1) * 1_000),
+        );
+      }
     }
     await refreshSharePointUploadProgress(next.source_file_id);
   }
