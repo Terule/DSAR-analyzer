@@ -37,8 +37,6 @@ describe("clampFilesConcurrency", () => {
 });
 
 const base = {
-  maxTokensPerBatch: 2_000_000,
-  maxConcurrentBatches: 4,
   sharePointSiteUrl: "",
   sharePointFolderId: "",
   sharePointFolderPath: "",

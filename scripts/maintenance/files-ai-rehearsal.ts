@@ -12,8 +12,6 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { encodingForModel } from "js-tiktoken";
-import { AI_TOKENIZER_MODEL } from "../../src/lib/ai-model";
 import {
   listFilesAiCandidates,
   readPdfText,
@@ -79,8 +77,8 @@ async function main() {
   const criteria = { name: subject, email: "", aliases };
   // Employee mode is the longest prompt, so this is a conservative size.
   const systemPrompt = buildFilesAiSystemPrompt(criteria, "employee");
-  const tokenizer = encodingForModel(AI_TOKENIZER_MODEL);
-  const systemTokens = tokenizer.encode(systemPrompt).length;
+  const estimateTokens = (text: string) => Math.ceil(text.length / 4);
+  const systemTokens = estimateTokens(systemPrompt);
   const mentionTokens = subjectMentionTokens(criteria);
 
   let noText = 0;
@@ -101,7 +99,7 @@ async function main() {
       sampled: sample.sampled,
       text: sample.text,
     });
-    tokens += systemTokens + tokenizer.encode(content).length + 60;
+    tokens += systemTokens + estimateTokens(content) + 60;
     if (examples.length < 3) examples.push(content.slice(0, 600));
   }
 

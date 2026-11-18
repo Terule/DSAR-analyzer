@@ -1,8 +1,7 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { encodingForModel } from "js-tiktoken";
-import { AI_TOKENIZER_MODEL } from "./ai-model";
+import { maxConcurrentJobs, maxRecordsPerJob } from "./bedrock/config";
 import { cancelBedrockRun, isBedrockId } from "./bedrock/files-ai-client";
 import type { ParsedRequest } from "./bedrock/translate";
 import { getCasePstFileIds } from "./case-utils";
@@ -14,10 +13,6 @@ import { stripEmailSignature } from "./email-content";
 import type { FilesAiClient } from "./files-ai";
 import { configuredFilesAiClient } from "./files-ai-provider";
 import { startMailScreen } from "./mail-screen";
-import {
-  DEFAULT_AI_BATCH_SETTINGS,
-  getAiBatchSettings,
-} from "./pipeline-settings";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 
@@ -40,19 +35,14 @@ export async function cancelAiBatchesForFiles(fileIds: string[]) {
     ),
   );
 }
-const TOKENIZER = encodingForModel(AI_TOKENIZER_MODEL);
-
-// Parallel batches are intentionally bounded well below the 40M-token Tier 3
-// queue.  A 2M-token chunk keeps retries contained; four in flight gives the
-// API enough work to accelerate without turning a transient failure into a
-// case-wide replay.
-export const DEFAULT_MAX_TOKENS_PER_BATCH =
-  DEFAULT_AI_BATCH_SETTINGS.maxTokensPerBatch;
-export const DEFAULT_MAX_CONCURRENT_AI_BATCHES =
-  DEFAULT_AI_BATCH_SETTINGS.maxConcurrentBatches;
+/** Output budget per request; the decision JSON is small. */
 const MAX_COMPLETION_TOKENS_PER_REQUEST = 150;
-const CHAT_MESSAGE_OVERHEAD_TOKENS = 12;
-const REQUEST_OVERHEAD_TOKENS = 24;
+/**
+ * Largest payload sent for one email, in characters (about 100k tokens, well
+ * inside Haiku's context). Past it the deep chain, which the rules say never
+ * decides, is cut first; the first and second email are kept whole when they fit.
+ */
+const MAX_PAYLOAD_CHARS = 400_000;
 export const RESPONSE_FORMAT = {
   type: "json_schema",
   json_schema: {
@@ -89,14 +79,34 @@ export function stripPayloadSignatures(content: Record<string, unknown>): void {
   }
 }
 
-function countTokens(text: string): number {
-  return TOKENIZER.encode(text).length;
-}
+/** Rough token estimate for display (about 4 characters per token). */
+const estimateTokens = (text: string) => Math.ceil(text.length / 4);
 
-// Cache of per-email userContent token counts, keyed by email hash. A payload's
-// token count is content-stable, so this avoids re-encoding the same payload
-// across successive batch chunks within a run.
-const userContentTokenCache = new Map<string, number>();
+/**
+ * The user message for one email: the payload without signatures, cut down to
+ * MAX_PAYLOAD_CHARS when needed (chain first, then the bodies) instead of
+ * discarding the email as "too large".
+ */
+export function buildEmailUserContent(
+  content: Record<string, unknown>,
+): string {
+  stripPayloadSignatures(content);
+  let userContent = JSON.stringify(content);
+  if (userContent.length <= MAX_PAYLOAD_CHARS) return userContent;
+  const cut = (value: unknown, keep: number) =>
+    typeof value === "string" && value.length > keep
+      ? `${value.slice(0, keep)}\n[truncated]`
+      : value;
+  const chain = content.rest_of_chain as { text?: unknown } | undefined;
+  if (chain && "text" in chain) chain.text = cut(chain.text, 20_000);
+  userContent = JSON.stringify(content);
+  if (userContent.length <= MAX_PAYLOAD_CHARS) return userContent;
+  for (const key of ["second_email", "first_email"]) {
+    const email = content[key] as { body?: unknown } | null | undefined;
+    if (email && "body" in email) email.body = cut(email.body, 150_000);
+  }
+  return JSON.stringify(content);
+}
 
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -209,15 +219,9 @@ export async function generateBatchFile(
     personalEmail?: string;
     aliases: string[];
   },
-  options?: { maxTokensPerBatch?: number; client?: FilesAiClient },
+  options?: { maxRecordsPerBatch?: number; client?: FilesAiClient },
 ) {
-  const configuredSettings = options?.maxTokensPerBatch
-    ? null
-    : await getAiBatchSettings();
-  const maxTokensPerBatch =
-    options?.maxTokensPerBatch && options.maxTokensPerBatch > 0
-      ? Math.floor(options.maxTokensPerBatch)
-      : (configuredSettings?.maxTokensPerBatch ?? DEFAULT_MAX_TOKENS_PER_BATCH);
+  const maxRecords = options?.maxRecordsPerBatch ?? maxRecordsPerJob();
 
   const row = await prisma.processedFile.findUnique({
     where: { id: fileId },
@@ -281,16 +285,6 @@ export async function generateBatchFile(
 
   const systemPrompt = buildEmailAuditSystemPrompt(subjectCriteria);
 
-  // Precompute the constant per-request token overhead ONCE (previously the
-  // system prompt was re-encoded for every email) and the subject mention
-  // patterns used by the cheap pre-AI filter.
-  const fixedOverheadTokens =
-    countTokens(systemPrompt) +
-    countTokens(JSON.stringify(RESPONSE_FORMAT)) +
-    CHAT_MESSAGE_OVERHEAD_TOKENS +
-    REQUEST_OVERHEAD_TOKENS +
-    MAX_COMPLETION_TOKENS_PER_REQUEST;
-
   const subjectTokens = buildSubjectSearchTokens(subjectCriteria);
   const subjectPatterns = subjectTokens.map(
     (t) => new RegExp(`(^|[^a-z0-9])${escapeRegExp(t)}($|[^a-z0-9])`, "i"),
@@ -307,94 +301,81 @@ export async function generateBatchFile(
   );
   const writer = fs.createWriteStream(batchFilePath);
 
-  let currentTokenCount = 0;
+  let estimatedTokens = estimateTokens(systemPrompt);
   let addedCount = 0;
 
+  // Emails that never mention the subject are discarded without an AI call.
+  // Written in groups: one query per 500 emails, not two per email.
+  let preDiscards: string[] = [];
+  const flushPreDiscards = async () => {
+    if (preDiscards.length === 0) return;
+    const hashes = preDiscards;
+    preDiscards = [];
+    await prisma.$transaction([
+      prisma.email.updateMany({
+        where: { email_hash: { in: hashes }, ai_decision: null },
+        data: {
+          ai_decision: "discard",
+          ai_reason: "System Discard: Data subject not mentioned",
+        },
+      }),
+      prisma.processedFile.update({
+        where: { id: fileId },
+        data: { ai_discarded_count: { increment: hashes.length } },
+      }),
+    ]);
+  };
+
+  // Pass 1: pick up to `maxRecords` emails for this job, remembering only hashes.
+  const picked: string[] = [];
   for (const file of allFiles) {
+    if (picked.length >= maxRecords) break;
     const hash = file.replace(".json", "");
-
     if (!unprocessedHashes.has(hash)) continue;
-
-    const filePath = path.join(jsonFolder, file);
-    const content = JSON.parse(fs.readFileSync(filePath, "utf-8")) as Record<
-      string,
-      unknown
-    >;
-    stripPayloadSignatures(content);
-    const userContent = JSON.stringify(content);
-
-    // Pre-filter: skip the AI call entirely when the subject is not referenced
-    // ANYWHERE in the payload (headers, body or chain). GPT would discard these
-    // anyway, so this saves the API cost with no change in outcome.
+    const text = fs.readFileSync(path.join(jsonFolder, file), "utf-8");
+    // The subject must be referenced somewhere in the payload (headers, body or
+    // chain); otherwise the audit would discard it anyway.
     if (
       subjectPatterns.length > 0 &&
-      !subjectPatterns.some((re) => re.test(userContent))
+      !subjectPatterns.some((re) => re.test(text))
     ) {
-      await prisma.$transaction([
-        prisma.email.updateMany({
-          where: { email_hash: hash },
-          data: {
-            ai_decision: "discard",
-            ai_reason: "System Discard: Data subject not mentioned",
-          },
-        }),
-        prisma.processedFile.update({
-          where: { id: fileId },
-          data: { ai_discarded_count: { increment: 1 } },
-        }),
-      ]);
+      preDiscards.push(hash);
+      if (preDiscards.length >= 500) await flushPreDiscards();
       continue;
     }
+    picked.push(hash);
+  }
+  await flushPreDiscards();
 
-    let userTokens = userContentTokenCache.get(hash);
-    if (userTokens === undefined) {
-      userTokens = countTokens(userContent);
-      userContentTokenCache.set(hash, userTokens);
-    }
-    const estimatedTokens = fixedOverheadTokens + userTokens;
-
-    if (estimatedTokens > maxTokensPerBatch) {
-      console.log(
-        `[AI Engine] Warning: Email ${hash} exceeds max tokens on its own (${estimatedTokens} > ${maxTokensPerBatch}). Discarding...`,
-      );
-
-      // 🚨 CRITICAL FIX: Ensure skipped oversized files are marked as discarded so they don't infinite-loop!
-      await prisma.$transaction([
-        prisma.email.updateMany({
-          where: { email_hash: hash },
-          data: {
-            ai_decision: "discard",
-            ai_reason: "System Discard: Exceeded max batch token limit",
-          },
-        }),
-        prisma.processedFile.update({
-          where: { id: fileId },
-          data: { ai_discarded_count: { increment: 1 } },
-        }),
-      ]);
-
-      continue;
-    }
-
-    if (currentTokenCount + estimatedTokens > maxTokensPerBatch) {
-      console.log(
-        `[AI Chunking] Reached safety limit (${currentTokenCount}/${maxTokensPerBatch} tokens). Splitting batch...`,
-      );
-      break;
-    }
-
-    // Claim before writing/uploading.  This is the critical ownership barrier:
-    // another parallel slot can only select rows whose claim is still null.
-    const claim = await prisma.email.updateMany({
+  // Claim before writing/uploading. This is the ownership barrier: another
+  // parallel slot only selects rows whose claim is still null. Claims go in
+  // groups, then the rows really owned by this run are read back.
+  for (let i = 0; i < picked.length; i += 1000) {
+    await prisma.email.updateMany({
       where: {
-        email_hash: hash,
+        email_hash: { in: picked.slice(i, i + 1000) },
         ai_decision: null,
         ai_batch_run_id: null,
       },
       data: { ai_batch_run_id: batchRunId },
     });
-    if (claim.count === 0) continue;
+  }
+  const owned = new Set(
+    (
+      await prisma.email.findMany({
+        where: { ai_batch_run_id: batchRunId },
+        select: { email_hash: true },
+      })
+    ).map((row) => row.email_hash),
+  );
 
+  // Pass 2: write the request lines of the claimed emails.
+  for (const hash of picked) {
+    if (!owned.has(hash)) continue;
+    const content = JSON.parse(
+      fs.readFileSync(path.join(jsonFolder, `${hash}.json`), "utf-8"),
+    ) as Record<string, unknown>;
+    const userContent = buildEmailUserContent(content);
     const request = {
       custom_id: hash,
       method: "POST",
@@ -404,13 +385,12 @@ export async function generateBatchFile(
           { role: "system", content: systemPrompt },
           { role: "user", content: userContent },
         ],
-        max_completion_tokens: 150,
+        max_completion_tokens: MAX_COMPLETION_TOKENS_PER_REQUEST,
         response_format: RESPONSE_FORMAT,
       },
     };
-
     writer.write(`${JSON.stringify(request)}\n`);
-    currentTokenCount += estimatedTokens;
+    estimatedTokens += estimateTokens(userContent);
     addedCount++;
   }
 
@@ -435,7 +415,7 @@ export async function generateBatchFile(
   }
 
   console.log(
-    `[AI Engine] Uploading Chunk of ${addedCount} items (~${currentTokenCount} tokens) to Bedrock...`,
+    `[AI Engine] Uploading Chunk of ${addedCount} items (~${estimatedTokens} tokens) to Bedrock...`,
   );
 
   try {
@@ -455,7 +435,7 @@ export async function generateBatchFile(
           openai_batch_id: externalBatchId,
           status: "submitted",
           request_count: addedCount,
-          estimated_tokens: currentTokenCount,
+          estimated_tokens: estimatedTokens,
           submitted_at: new Date(),
         },
       }),
@@ -496,25 +476,15 @@ export async function fillAiBatchSlots(
     aliases: string[];
   },
   options?: {
-    maxTokensPerBatch?: number;
+    maxRecordsPerBatch?: number;
     maxConcurrentBatches?: number;
     client?: FilesAiClient;
   },
 ): Promise<void> {
-  const configuredSettings =
-    options?.maxTokensPerBatch && options?.maxConcurrentBatches
-      ? null
-      : await getAiBatchSettings();
   const maxConcurrent = Math.max(
     1,
-    options?.maxConcurrentBatches ??
-      configuredSettings?.maxConcurrentBatches ??
-      DEFAULT_MAX_CONCURRENT_AI_BATCHES,
+    options?.maxConcurrentBatches ?? maxConcurrentJobs(),
   );
-  const maxTokensPerBatch =
-    options?.maxTokensPerBatch ??
-    configuredSettings?.maxTokensPerBatch ??
-    DEFAULT_MAX_TOKENS_PER_BATCH;
   const active = await prisma.aiBatchRun.count({
     where: {
       coordinator_id: fileId,
@@ -524,7 +494,7 @@ export async function fillAiBatchSlots(
   const slots = Math.max(0, maxConcurrent - active);
   for (let index = 0; index < slots; index++) {
     const result = await generateBatchFile(fileId, subjectCriteria, {
-      maxTokensPerBatch,
+      maxRecordsPerBatch: options?.maxRecordsPerBatch,
       client: options?.client,
     });
     if (result !== "submitted") break;

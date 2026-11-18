@@ -160,6 +160,8 @@ const workerEnvironment = [
   "BEDROCK_BATCH_BUCKET",
   "BEDROCK_BATCH_ROLE_ARN",
   "BEDROCK_CONVERSE_CONCURRENCY",
+  "BEDROCK_BATCH_MAX_RECORDS",
+  "BEDROCK_BATCH_MAX_JOBS",
 ].flatMap((name) => {
   const value = process.env[name];
   return value === undefined ? [] : [`${name}=${value}`];

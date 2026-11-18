@@ -1,11 +1,11 @@
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { encodingForModel } from "js-tiktoken";
-import { AI_TOKENIZER_MODEL } from "./ai-model";
 import {
   BEDROCK_BATCH_PREFIX,
   BEDROCK_CONVERSE_PREFIX,
+  maxConcurrentJobs,
+  maxRecordsPerJob,
   REREVIEW_DEFAULT_MIN_P_KEEP,
   REREVIEW_DEFAULT_SAMPLE_PERCENT,
 } from "./bedrock/config";
@@ -29,13 +29,9 @@ import {
   subjectClearlyInvolved,
   subjectMentionTokens,
 } from "./files-ai-text";
-import {
-  DEFAULT_AI_BATCH_SETTINGS,
-  getAiBatchSettings,
-} from "./pipeline-settings";
+import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
-const TOKENIZER = encodingForModel(AI_TOKENIZER_MODEL);
 /**
  * A PDF with more pages than this is judged from a sample only (the start plus
  * the lines that mention the subject). If the sample is relevant and not
@@ -66,8 +62,8 @@ export function isMailItem(relPath: string): boolean {
   return relPath.startsWith(MAIL_ITEM_PREFIX);
 }
 
-const REQUEST_OVERHEAD_TOKENS = 24;
-const MESSAGE_OVERHEAD_TOKENS = 12;
+/** Rough token estimate for display (about 4 characters per token). */
+const estimateTokens = (text: string) => Math.ceil(text.length / 4);
 
 /** A thin seam over the AI service (Amazon Bedrock) so the batch flow can be tested offline. */
 export interface FilesAiClient {
@@ -87,7 +83,9 @@ export interface PrepareFilesAiInput {
   mode?: FilesAiMode;
   /** Explicit items (email bodies and attachments); defaults to the converted PDFs of this wave. */
   candidates?: FilesAiCandidate[];
-  maxTokensPerBatch?: number;
+  /** Records per job and jobs in flight; default to the Bedrock config. */
+  maxRecordsPerBatch?: number;
+  maxActiveJobs?: number;
   batchDir?: string;
   /** Overridable so tests need no real PDFs. */
   readText?: (absPath: string) => Promise<string>;
@@ -122,10 +120,8 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
   const { fileId, dirs, criteria, client } = input;
   const mode = input.mode ?? (await filesAiModeFor(fileId));
   const readText = input.readText;
-  const maxTokens =
-    input.maxTokensPerBatch ??
-    (await getAiBatchSettings()).maxTokensPerBatch ??
-    DEFAULT_AI_BATCH_SETTINGS.maxTokensPerBatch;
+  const maxRecords = input.maxRecordsPerBatch ?? maxRecordsPerJob();
+  const maxActive = input.maxActiveJobs ?? maxConcurrentJobs();
   const candidates = input.candidates ?? listFilesAiCandidates(dirs);
   const existing = new Map(
     (
@@ -137,7 +133,6 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
   );
   const systemPrompt = buildFilesAiSystemPrompt(criteria, mode);
   const mentionTokens = subjectMentionTokens(criteria);
-  const systemTokens = TOKENIZER.encode(systemPrompt).length;
 
   let keptNoText = 0;
   const queue: QueuedRequest[] = [];
@@ -193,18 +188,6 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
       sampled: sample.sampled,
       text: sample.text,
     });
-    const estimate =
-      systemTokens +
-      TOKENIZER.encode(userContent).length +
-      2 * MESSAGE_OVERHEAD_TOKENS +
-      REQUEST_OVERHEAD_TOKENS;
-    if (estimate > maxTokens) {
-      await resolveNow("review", "Too large to screen; needs human review.", {
-        sampled: sample.sampled,
-        largeFile: true,
-      });
-      continue;
-    }
     if (!known) {
       await prisma.filesAiVerdict.create({
         data: {
@@ -222,26 +205,22 @@ export async function prepareFilesAi(input: PrepareFilesAiInput): Promise<{
       line: JSON.stringify(
         buildFilesAiBatchRequest({ customId: id, systemPrompt, userContent }),
       ),
-      tokens: estimate,
+      tokens: estimateTokens(systemPrompt) + estimateTokens(userContent),
     });
   }
 
+  // Jobs hold up to `maxRecords` requests. Only `maxActive` jobs run at once
+  // (across every case); the rest wait as "queued" runs and are submitted by
+  // the poller as slots free up.
   const chunks: QueuedRequest[][] = [];
-  let current: QueuedRequest[] = [];
-  let currentTokens = 0;
-  for (const item of queue) {
-    if (current.length > 0 && currentTokens + item.tokens > maxTokens) {
-      chunks.push(current);
-      current = [];
-      currentTokens = 0;
-    }
-    current.push(item);
-    currentTokens += item.tokens;
+  for (let i = 0; i < queue.length; i += maxRecords) {
+    chunks.push(queue.slice(i, i + maxRecords));
   }
-  if (current.length > 0) chunks.push(current);
-
+  let free = Math.max(0, maxActive - (await activeFilesAiJobs()));
   for (const chunk of chunks) {
-    await submitChunk(fileId, chunk, client, input.batchDir);
+    const submit = free > 0;
+    if (submit) free--;
+    await submitChunk(fileId, chunk, client, input.batchDir, submit);
   }
   return {
     candidates: candidates.length,
@@ -255,7 +234,8 @@ async function submitChunk(
   fileId: string,
   chunk: QueuedRequest[],
   client: FilesAiClient,
-  batchDir?: string,
+  batchDir: string | undefined,
+  submitNow: boolean,
 ): Promise<void> {
   const runId = randomUUID();
   const jsonlPath = runJsonlPath(runId, batchDir);
@@ -277,6 +257,18 @@ async function submitChunk(
       jsonlPath,
       `${chunk.map((item) => item.line).join("\n")}\n`,
     );
+    const sizes = {
+      request_count: chunk.length,
+      estimated_tokens: chunk.reduce((sum, item) => sum + item.tokens, 0),
+    };
+    if (!submitNow) {
+      // Waits for a free job slot; the poller submits it from the request file.
+      await prisma.filesAiBatchRun.update({
+        where: { id: runId },
+        data: { status: "queued", ...sizes },
+      });
+      return;
+    }
     const inputFileId = await client.uploadBatchFile(jsonlPath);
     const batchId = await client.createBatch(inputFileId);
     await prisma.filesAiBatchRun.update({
@@ -284,9 +276,8 @@ async function submitChunk(
       data: {
         status: "submitted",
         openai_batch_id: batchId,
-        request_count: chunk.length,
-        estimated_tokens: chunk.reduce((sum, item) => sum + item.tokens, 0),
         submitted_at: new Date(),
+        ...sizes,
       },
     });
   } catch (error) {
@@ -300,6 +291,64 @@ async function submitChunk(
   }
   // On success the request file stays on disk: it is what a failed or expired
   // batch is resubmitted from. It is removed once the run reaches a final state.
+}
+
+/** Jobs on Bedrock right now, across every case. */
+async function activeFilesAiJobs(): Promise<number> {
+  return prisma.filesAiBatchRun.count({
+    where: { status: { in: ["submitted", "processing"] } },
+  });
+}
+
+/**
+ * Submits queued runs (their request files are already on disk) while fewer
+ * than `maxActive` jobs are in flight. A failure leaves the run queued; the
+ * next sweep tries again. Returns how many were submitted.
+ */
+export async function submitQueuedFilesAiRuns(
+  client: FilesAiClient,
+  batchDir?: string,
+  maxActive: number = maxConcurrentJobs(),
+): Promise<number> {
+  let free = maxActive - (await activeFilesAiJobs());
+  if (free <= 0) return 0;
+  const queued = await prisma.filesAiBatchRun.findMany({
+    where: { status: "queued" },
+    orderBy: { created_at: "asc" },
+    take: free,
+  });
+  let submitted = 0;
+  for (const run of queued) {
+    if (free <= 0) break;
+    const jsonlPath = runJsonlPath(run.id, batchDir);
+    if (!fs.existsSync(jsonlPath)) {
+      await failFilesAiRun(run.id, "Request file missing for a queued run.");
+      continue;
+    }
+    try {
+      const batchId = await client.createBatch(
+        await client.uploadBatchFile(jsonlPath),
+      );
+      const claimed = await prisma.filesAiBatchRun.updateMany({
+        where: { id: run.id, status: "queued" },
+        data: {
+          status: "submitted",
+          openai_batch_id: batchId,
+          submitted_at: new Date(),
+        },
+      });
+      if (claimed.count === 1) {
+        submitted++;
+        free--;
+      }
+    } catch (error) {
+      console.warn(
+        `[Files AI] Could not submit queued run ${run.id}: ${error}`,
+      );
+      break;
+    }
+  }
+  return submitted;
 }
 
 /** Where a run's batch input is kept (shared `batches/` mount by default). */
@@ -593,7 +642,7 @@ export async function getFilesAiState(fileId: string): Promise<{
     prisma.filesAiBatchRun.count({
       where: {
         file_id: fileId,
-        status: { in: ["claiming", "submitted", "processing"] },
+        status: { in: ["claiming", "queued", "submitted", "processing"] },
       },
     }),
     prisma.filesAiBatchRun.count({

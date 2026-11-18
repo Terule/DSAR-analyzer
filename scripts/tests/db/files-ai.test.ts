@@ -4,16 +4,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { encodingForModel } from "js-tiktoken";
-import { AI_TOKENIZER_MODEL } from "../../../src/lib/ai-model";
 import {
   type FilesAiClient,
   getFilesAiState,
   isFilesAiSettled,
   pollFilesAiBatches,
   prepareFilesAi,
+  submitQueuedFilesAiRuns,
 } from "../../../src/lib/files-ai";
-import { buildFilesAiSystemPrompt } from "../../../src/lib/files-ai-prompt";
 import { prisma } from "../../../src/lib/prisma";
 
 const tag = crypto.randomUUID().slice(0, 8);
@@ -87,6 +85,10 @@ class FakeClient implements FilesAiClient {
 
 const textFor = (_abs: string) => Promise.resolve("A normal document body.");
 
+/** Other tests leave submitted runs in the shared DB, so slots are not scarce here. */
+const prepare = (input: Parameters<typeof prepareFilesAi>[0]) =>
+  prepareFilesAi({ maxActiveJobs: 1_000_000, ...input });
+
 describe("Files AI", () => {
   const batchDir = fs.mkdtempSync(path.join(os.tmpdir(), "fai-batches-"));
   before(() => undefined);
@@ -99,7 +101,7 @@ describe("Files AI", () => {
     const fileId = await makeFile();
     const dirs = makeDirs([`Document ${H(1)}.pdf`, `Document ${H(2)}.pdf`]);
     const client = new FakeClient();
-    const result = await prepareFilesAi({
+    const result = await prepare({
       fileId,
       dirs,
       criteria,
@@ -119,7 +121,7 @@ describe("Files AI", () => {
     const fileId = await makeFile();
     const dirs = makeDirs([`Document ${H(3)}.pdf`]);
     const client = new FakeClient();
-    await prepareFilesAi({
+    await prepare({
       fileId,
       dirs,
       criteria,
@@ -127,7 +129,7 @@ describe("Files AI", () => {
       readText: textFor,
       batchDir,
     });
-    const second = await prepareFilesAi({
+    const second = await prepare({
       fileId,
       dirs,
       criteria,
@@ -144,7 +146,7 @@ describe("Files AI", () => {
     const fileId = await makeFile();
     const dirs = makeDirs([`Document ${H(4)}.pdf`]);
     const client = new FakeClient();
-    const result = await prepareFilesAi({
+    const result = await prepare({
       fileId,
       dirs,
       criteria,
@@ -170,7 +172,7 @@ describe("Files AI", () => {
     ];
     const dirs = makeDirs(names);
     const client = new FakeClient();
-    await prepareFilesAi({
+    await prepare({
       fileId,
       dirs,
       criteria,
@@ -222,7 +224,7 @@ describe("Files AI", () => {
     const fileId = await makeFile();
     const dirs = makeDirs([`Document ${H(8)}.pdf`]);
     const client = new FakeClient();
-    await prepareFilesAi({
+    await prepare({
       fileId,
       dirs,
       criteria,
@@ -243,7 +245,7 @@ describe("Files AI", () => {
     const fileId = await makeFile();
     const dirs = makeDirs([`Document ${H(9)}.pdf`]);
     const client = new FakeClient();
-    await prepareFilesAi({
+    await prepare({
       fileId,
       dirs,
       criteria,
@@ -286,7 +288,7 @@ describe("Files AI", () => {
     assert.equal(row.verdict, null);
     // A retry can pick the same file up again.
     client.failCreate = false;
-    const retry = await prepareFilesAi({
+    const retry = await prepare({
       fileId,
       dirs,
       criteria,
@@ -303,50 +305,72 @@ describe("Files AI", () => {
     );
   });
 
-  it("splits candidates across batches by the token budget", async () => {
+  it("cuts a run into jobs of at most maxRecordsPerBatch requests", async () => {
     const fileId = await makeFile();
     const dirs = makeDirs([1, 2, 3].map((n) => `Document ${H(20 + n)}.pdf`));
     const client = new FakeClient();
-    const longText = async () => "word ".repeat(200);
-    const result = await prepareFilesAi({
-      fileId,
-      dirs,
-      criteria,
-      client,
-      readText: longText,
-      batchDir,
-      // One request fits, two do not: sized from the prompt so it survives prompt edits.
-      maxTokensPerBatch:
-        encodingForModel(AI_TOKENIZER_MODEL).encode(
-          buildFilesAiSystemPrompt(criteria, "employee"),
-        ).length + 400,
-    });
-    assert.ok(
-      result.submittedBatches >= 2,
-      `batches=${result.submittedBatches}`,
-    );
-    assert.equal(client.uploads.flat().length, 3);
-  });
-
-  it("sends a single request that exceeds the whole budget to human review", async () => {
-    const fileId = await makeFile();
-    const dirs = makeDirs([`Document ${H(30)}.pdf`]);
-    const client = new FakeClient();
-    const result = await prepareFilesAi({
+    const result = await prepare({
       fileId,
       dirs,
       criteria,
       client,
       readText: textFor,
       batchDir,
-      maxTokensPerBatch: 50,
+      maxRecordsPerBatch: 2,
+      maxActiveJobs: 1_000,
     });
-    assert.equal(result.submittedBatches, 0);
-    const row = await prisma.filesAiVerdict.findFirstOrThrow({
-      where: { file_id: fileId },
+    assert.equal(result.submittedBatches, 2);
+    assert.deepEqual(
+      client.uploads.map((upload) => upload.length).sort(),
+      [1, 2],
+    );
+  });
+
+  it("queues jobs beyond the concurrent limit and submits them when a slot frees", async () => {
+    const fileId = await makeFile();
+    const dirs = makeDirs([1, 2, 3].map((n) => `Document ${H(40 + n)}.pdf`));
+    const client = new FakeClient();
+    const inFlight = await prisma.filesAiBatchRun.count({
+      where: { status: { in: ["submitted", "processing"] } },
     });
-    assert.equal(row.verdict, "review");
-    assert.equal(row.reason, "Too large to screen; needs human review.");
+    await prepare({
+      fileId,
+      dirs,
+      criteria,
+      client,
+      readText: textFor,
+      batchDir,
+      maxRecordsPerBatch: 1,
+      maxActiveJobs: inFlight + 1,
+    });
+    const statuses = async () =>
+      (
+        await prisma.filesAiBatchRun.findMany({
+          where: { file_id: fileId },
+          select: { status: true },
+        })
+      )
+        .map((run) => run.status)
+        .sort();
+    assert.deepEqual(await statuses(), ["queued", "queued", "submitted"]);
+    // The step is not settled while queued runs wait.
+    assert.equal(await isFilesAiSettled(fileId), false);
+
+    // No slot yet: nothing moves.
+    assert.equal(
+      await submitQueuedFilesAiRuns(client, batchDir, inFlight + 1),
+      0,
+    );
+    // The first job finishes; its slot goes to the next queued run.
+    await prisma.filesAiBatchRun.updateMany({
+      where: { file_id: fileId, status: "submitted" },
+      data: { status: "completed" },
+    });
+    assert.equal(
+      await submitQueuedFilesAiRuns(client, batchDir, inFlight + 1),
+      1,
+    );
+    assert.deepEqual(await statuses(), ["completed", "queued", "submitted"]);
   });
 
   describe("screening for confidential content", () => {
@@ -357,7 +381,7 @@ describe("Files AI", () => {
       const fileId = await makeFile();
       const dirs = makeDirs([`Document ${H(50)}.pdf`]);
       const client = new FakeClient();
-      await prepareFilesAi({
+      await prepare({
         fileId,
         dirs,
         criteria,

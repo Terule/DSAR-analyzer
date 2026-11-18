@@ -6,8 +6,6 @@ import {
 } from "../../../src/lib/pipeline-settings";
 
 const base: AiBatchSettings = {
-  maxTokensPerBatch: 1_000_000,
-  maxConcurrentBatches: 2,
   sharePointSiteUrl: "",
   sharePointFolderId: "",
   sharePointFolderPath: "",

@@ -53,7 +53,7 @@ describe("Files workers setting", () => {
     const before = await getAiBatchSettings();
     await updateAiBatchSettings({ ...before, filesConcurrency: 5 });
     const after = await getAiBatchSettings();
-    assert.equal(after.maxTokensPerBatch, before.maxTokensPerBatch);
+    assert.equal(after.rereviewMinPKeep, before.rereviewMinPKeep);
     assert.equal(after.deleteSourcePsts, before.deleteSourcePsts);
     assert.equal(after.filesConcurrency, 5);
   });

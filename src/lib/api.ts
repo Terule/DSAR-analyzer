@@ -114,17 +114,8 @@ export interface SharePointFolder {
   path: string;
 }
 
-export interface AiBatchSettingsLimits {
-  minTokensPerBatch: number;
-  maxTokensPerBatch: number;
-  minConcurrentBatches: number;
-  maxConcurrentBatches: number;
-  maxQueuedTokens: number;
-}
-
 export async function getPipelineSettings(): Promise<{
   settings: AiBatchSettings;
-  limits: AiBatchSettingsLimits;
 }> {
   const res = await fetch("/api/settings", { cache: "no-store" });
   if (!res.ok) throw new Error("Failed to load pipeline settings.");

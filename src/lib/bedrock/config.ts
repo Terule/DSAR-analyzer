@@ -16,6 +16,22 @@ export function converseConcurrency(): number {
   const value = Math.floor(Number(process.env.BEDROCK_CONVERSE_CONCURRENCY));
   return Number.isFinite(value) && value >= 1 ? Math.min(value, 64) : 8;
 }
+/**
+ * Records per Batch job (env BEDROCK_BATCH_MAX_RECORDS, 100-50000, default
+ * 10000). One job per case is the norm; a bigger case is cut into jobs of this
+ * size. Bedrock enforces its own per-job quotas, so this stays conservative.
+ */
+export function maxRecordsPerJob(): number {
+  const value = Math.floor(Number(process.env.BEDROCK_BATCH_MAX_RECORDS));
+  return Number.isFinite(value) && value >= 100
+    ? Math.min(value, 50_000)
+    : 10_000;
+}
+/** Jobs in flight at once (env BEDROCK_BATCH_MAX_JOBS, 1-20, default 4). */
+export function maxConcurrentJobs(): number {
+  const value = Math.floor(Number(process.env.BEDROCK_BATCH_MAX_JOBS));
+  return Number.isFinite(value) && value >= 1 ? Math.min(value, 20) : 4;
+}
 /** Output budget; the decision JSON is small but `reason` can reach 240 characters. */
 export const MIN_OUTPUT_TOKENS = 300;
 

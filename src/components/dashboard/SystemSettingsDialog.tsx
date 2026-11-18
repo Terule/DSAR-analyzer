@@ -10,10 +10,9 @@ import {
   Save,
   ServerCog,
   Settings2,
-  Unlink2,
   X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -35,16 +34,7 @@ const tabs: { label: Tab; icon: typeof Settings2 }[] = [
   { label: "Storage", icon: HardDrive },
   { label: "System", icon: ServerCog },
 ];
-const TOKEN_STEP = 50_000;
 const MASK = "••••••••••••••••••••";
-
-function clamp(value: number, minimum: number, maximum: number) {
-  return Math.min(maximum, Math.max(minimum, value));
-}
-
-function nearestTokenStep(value: number) {
-  return Math.round(value / TOKEN_STEP) * TOKEN_STEP;
-}
 
 export function SystemSettingsDialog({
   open,
@@ -55,11 +45,6 @@ export function SystemSettingsDialog({
 }) {
   const [tab, setTab] = useState<Tab>("AI");
   const [values, setValues] = useState<Values>({});
-  const [tokens, setTokens] = useState(2_000_000);
-  const [parallel, setParallel] = useState(4);
-  const [linked, setLinked] = useState(true);
-  const [linkedQueueTarget, setLinkedQueueTarget] = useState(8_000_000);
-  const [limits, setLimits] = useState<api.AiBatchSettingsLimits | null>(null);
   const [folderTrail, setFolderTrail] = useState<api.SharePointFolder[]>([]);
   const [folderChildren, setFolderChildren] = useState<api.SharePointFolder[]>(
     [],
@@ -83,13 +68,6 @@ export function SystemSettingsDialog({
       .then((data) => {
         const next = data.settings || {};
         setValues(next);
-        setTokens(Number(next.maxTokensPerBatch) || 2_000_000);
-        setParallel(Number(next.maxConcurrentBatches) || 4);
-        setLinkedQueueTarget(
-          (Number(next.maxTokensPerBatch) || 2_000_000) *
-            (Number(next.maxConcurrentBatches) || 4),
-        );
-        setLimits(data.limits || null);
         setFolderTrail([]);
         setFolderChildren([]);
       })
@@ -102,42 +80,9 @@ export function SystemSettingsDialog({
   }, [open]);
 
   const savedSiteUrl = String(values.sharePointSiteUrl || "");
-  const minTokens = limits?.minTokensPerBatch ?? 250_000;
-  const maxTokens = limits?.maxTokensPerBatch ?? 4_000_000;
-  const minParallel = limits?.minConcurrentBatches ?? 1;
-  const maxParallel = limits?.maxConcurrentBatches ?? 12;
-  const queuedTokens = useMemo(() => tokens * parallel, [tokens, parallel]);
 
   const update = (key: string, value: string | number | boolean) =>
     setValues((current) => ({ ...current, [key]: value }));
-
-  const changeParallel = (nextValue: number) => {
-    const nextParallel = clamp(Math.round(nextValue), minParallel, maxParallel);
-    setParallel(nextParallel);
-    if (linked) {
-      setTokens(
-        clamp(
-          nearestTokenStep(linkedQueueTarget / nextParallel),
-          minTokens,
-          maxTokens,
-        ),
-      );
-    }
-  };
-
-  const changeTokens = (nextValue: number) => {
-    const nextTokens = clamp(nearestTokenStep(nextValue), minTokens, maxTokens);
-    setTokens(nextTokens);
-    if (linked) {
-      setParallel(
-        clamp(
-          Math.round(linkedQueueTarget / nextTokens),
-          minParallel,
-          maxParallel,
-        ),
-      );
-    }
-  };
 
   const browseFolders = useCallback(
     async (trail: api.SharePointFolder[]) => {
@@ -177,8 +122,6 @@ export function SystemSettingsDialog({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...values,
-          maxTokensPerBatch: tokens,
-          maxConcurrentBatches: parallel,
         }),
       });
       const data = await response.json();
@@ -319,112 +262,6 @@ export function SystemSettingsDialog({
                       })}
                     </div>,
                   )}
-                  {section(
-                    "Batch delivery window",
-                    "Balance parallel work and batch size while keeping the desired amount of work queued.",
-                    <div className="grid gap-6">
-                      <label className="flex items-center justify-between gap-4 rounded-xl border border-indigo-400/25 bg-indigo-500/10 p-4">
-                        <span className="flex gap-3">
-                          <span className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-indigo-500/20 text-indigo-200">
-                            {linked ? (
-                              <Link2 className="size-4" />
-                            ) : (
-                              <Unlink2 className="size-4" />
-                            )}
-                          </span>
-                          <span>
-                            <span className="block text-sm font-bold text-slate-100">
-                              Link batch window
-                            </span>
-                            <span className="mt-1 block text-xs leading-5 text-slate-400">
-                              {linked
-                                ? `Keep approximately ${(linkedQueueTarget / 1_000_000).toFixed(1)}M tokens queued as the sliders compensate.`
-                                : "Free mode lets each slider change independently."}
-                            </span>
-                          </span>
-                        </span>
-                        <input
-                          type="checkbox"
-                          checked={linked}
-                          onChange={(event) => {
-                            if (event.target.checked)
-                              setLinkedQueueTarget(queuedTokens);
-                            setLinked(event.target.checked);
-                          }}
-                          className="size-5 accent-indigo-500"
-                        />
-                      </label>
-                      <label className="grid gap-2">
-                        <span className="flex items-center justify-between text-sm font-bold text-slate-200">
-                          Parallel AI batches{" "}
-                          <output className="rounded-md bg-slate-950 px-2 py-1 text-indigo-200">
-                            {parallel}
-                          </output>
-                        </span>
-                        <input
-                          type="range"
-                          min={minParallel}
-                          max={maxParallel}
-                          step={1}
-                          value={parallel}
-                          onChange={(event) =>
-                            changeParallel(Number(event.target.value))
-                          }
-                          className="accent-indigo-500"
-                        />
-                        <span className="text-xs text-slate-500">
-                          How many independently retryable Batch jobs may be in
-                          flight.
-                        </span>
-                      </label>
-                      <label className="grid gap-2">
-                        <span className="flex items-center justify-between text-sm font-bold text-slate-200">
-                          Token ceiling per batch{" "}
-                          <output className="rounded-md bg-slate-950 px-2 py-1 text-indigo-200">
-                            {(tokens / 1_000_000).toFixed(2)}M
-                          </output>
-                        </span>
-                        <input
-                          type="range"
-                          min={minTokens}
-                          max={maxTokens}
-                          step={TOKEN_STEP}
-                          value={tokens}
-                          onChange={(event) =>
-                            changeTokens(Number(event.target.value))
-                          }
-                          className="accent-indigo-500"
-                        />
-                        <span className="text-xs text-slate-500">
-                          {linked
-                            ? "Linked mode preserves the queued work target. Unlink for free mode."
-                            : "Larger chunks reduce submission overhead; smaller chunks limit retry scope."}
-                        </span>
-                      </label>
-                      <div className="flex items-center justify-between gap-4 rounded-xl border border-slate-700 bg-slate-950/45 p-4">
-                        <span>
-                          <span className="block text-sm font-semibold text-slate-300">
-                            Maximum queued AI work
-                          </span>
-                          <span className="mt-1 block text-xs text-slate-500">
-                            Safety cap:{" "}
-                            {(
-                              (limits?.maxQueuedTokens ?? 20_000_000) /
-                              1_000_000
-                            ).toFixed(0)}
-                            M tokens.
-                          </span>
-                        </span>
-                        <strong className="text-lg text-indigo-200">
-                          {(queuedTokens / 1_000_000).toFixed(1)}M
-                        </strong>
-                      </div>
-                    </div>,
-                  )}
-                </>
-              )}
-              {tab === "Azure / SharePoint" && (
-                <>
                   {section(
                     "Azure application",
                     "These application credentials remain encrypted and are never sent back to the browser.",

@@ -2,6 +2,7 @@ import {
   type FilesAiClient,
   failFilesAiRun,
   pollFilesAiBatches,
+  submitQueuedFilesAiRuns,
 } from "./files-ai";
 import { configuredFilesAiClient } from "./files-ai-provider";
 import { rereviewWorkRemains } from "./files-ai-rereview";
@@ -36,6 +37,32 @@ export async function pollFilesAiRuns(
       run.id,
       "Submission was interrupted before the batch was created.",
     );
+  }
+
+  // Queued runs wait for a free job slot; submit what fits before polling.
+  if (
+    !onlyFileIds &&
+    (await prisma.filesAiBatchRun.count({ where: { status: "queued" } })) > 0
+  ) {
+    try {
+      await submitQueuedFilesAiRuns(await clientFactory());
+    } catch (error) {
+      console.error("[Files AI] Could not submit queued runs:", error);
+      // Without AWS credentials a queued run never leaves; give up on old ones.
+      const old = await prisma.filesAiBatchRun.findMany({
+        where: {
+          status: "queued",
+          created_at: { lt: new Date(Date.now() - STALE_RUN_MS) },
+        },
+        select: { id: true },
+      });
+      for (const run of old) {
+        await failFilesAiRun(
+          run.id,
+          "No AWS credentials to submit the queued batch.",
+        );
+      }
+    }
   }
 
   const runs = await prisma.filesAiBatchRun.findMany({
@@ -83,7 +110,9 @@ export async function pollFilesAiRuns(
 /** True while any Files AI batch is being prepared or is awaiting its result. */
 export async function filesAiWorkRemains(): Promise<boolean> {
   const active = await prisma.filesAiBatchRun.findFirst({
-    where: { status: { in: ["claiming", "submitted", "processing"] } },
+    where: {
+      status: { in: ["claiming", "queued", "submitted", "processing"] },
+    },
     select: { id: true },
   });
   return !!active || (await rereviewWorkRemains());

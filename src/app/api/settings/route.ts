@@ -3,7 +3,6 @@ import { fillAiBatchSlots } from "@/lib/ai";
 import { getCasePstFileIds } from "@/lib/case-utils";
 import { encryptSetting } from "@/lib/credentials";
 import {
-  AI_BATCH_SETTINGS_LIMITS,
   getAiBatchSettings,
   updateAiBatchSettings,
 } from "@/lib/pipeline-settings";
@@ -13,14 +12,12 @@ export const dynamic = "force-dynamic";
 
 export async function GET() {
   const settings = await getAiBatchSettings();
-  return NextResponse.json({ settings, limits: AI_BATCH_SETTINGS_LIMITS });
+  return NextResponse.json({ settings });
 }
 
 export async function PATCH(request: Request) {
   try {
     const body = (await request.json()) as {
-      maxTokensPerBatch?: number;
-      maxConcurrentBatches?: number;
       sharePointSiteUrl?: string;
       sharePointFolderId?: string;
       sharePointFolderPath?: string;
@@ -45,8 +42,6 @@ export async function PATCH(request: Request) {
     };
     const current = await getAiBatchSettings();
     const settings = await updateAiBatchSettings({
-      maxTokensPerBatch: Number(body.maxTokensPerBatch),
-      maxConcurrentBatches: Number(body.maxConcurrentBatches),
       sharePointSiteUrl: body.sharePointSiteUrl ?? current.sharePointSiteUrl,
       sharePointFolderId: body.sharePointFolderId ?? current.sharePointFolderId,
       sharePointFolderPath:
