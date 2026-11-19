@@ -9,6 +9,7 @@ import MsgReader, { type FieldsData } from "@kenjiuno/msgreader";
 import { simpleParser } from "mailparser";
 import { normalizeHtmlForPdf } from "./converter";
 import { stripEmailSignature } from "./email-content";
+import { discardedForKeyword } from "./email-rules";
 import {
   hasPrivilegedKeyword,
   hasPrivilegedKeywordInDocument,
@@ -1464,16 +1465,16 @@ export async function runStandaloneBatch(
         const sentToSubjectEmail =
           isSentToPersonalAddress(mailRecipients, subjectEmail) ||
           textShowsSentToPersonalAddress(rawText, subjectEmail);
+        // A parsed .eml gets exactly the decision the PST analyzer makes.
+        const keywordDiscard = parsedEml
+          ? discardedForKeyword(parsedEml, subjectEmail)
+          : hasPrivilegedKeyword(mailSubject, mailBody) && !sentToSubjectEmail;
         const containsSubjectName = mentionsSubject(
           `${mailHeaders}\n${mailSubject}\n${mailBody}\n${rawText}`,
           subjectNameTokens,
         );
 
-        if (
-          !bypassFilters &&
-          hasPrivilegedKeyword(mailSubject, mailBody) &&
-          !sentToSubjectEmail
-        ) {
+        if (!bypassFilters && keywordDiscard) {
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword.`,
           );

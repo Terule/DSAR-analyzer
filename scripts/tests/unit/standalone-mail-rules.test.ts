@@ -3,6 +3,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
+import { simpleParser } from "mailparser";
+import { discardedForKeyword } from "../../../src/lib/email-rules";
 import { runStandaloneBatch } from "../../../src/lib/standalone-processor";
 
 const NOTICE =
@@ -121,4 +123,67 @@ describe("Files .eml follows the PST email rules", () => {
     );
     assert.match(log, /Discarded \.EML .*excluded keyword/);
   });
+});
+
+describe("one email, one answer: PST analyzer rule vs Files engine", () => {
+  const personal = "msouza@gmail.com";
+  const cases: { name: string; mail: Parameters<typeof eml>[0] }[] = [
+    { name: "plain mail", mail: { body: "Maria, lunch tomorrow?" } },
+    {
+      name: "keyword in subject",
+      mail: { subject: "Privileged advice", body: "Maria, see below." },
+    },
+    { name: "keyword in body", mail: { body: "Maria, this is Confidential." } },
+    {
+      name: "notice only",
+      mail: { body: `Maria, hello.\n\nKind regards,\nAlice\n\n${NOTICE}` },
+    },
+    {
+      name: "keyword before the sign-off",
+      mail: { body: "Maria, CRO report attached.\n\nKind regards,\nAlice" },
+    },
+    {
+      name: "sent to personal address",
+      mail: {
+        to: "Maria <msouza@gmail.com>",
+        body: "Maria, Confidential terms.",
+      },
+    },
+    {
+      name: "cc to personal address",
+      mail: { cc: "msouza@gmail.com", body: "Maria, Confidential terms." },
+    },
+    {
+      name: "sent to work address",
+      mail: {
+        to: "Maria <maria.souza@corp.com>",
+        body: "Maria, Confidential minutes.",
+      },
+    },
+    {
+      name: "encoded body with keyword",
+      mail: { body: "Maria, Privileged note.", base64: true },
+    },
+    {
+      name: "encoded body without keyword",
+      mail: { body: "Maria, all good.", base64: true },
+    },
+  ];
+
+  for (const { name, mail } of cases) {
+    it(name, async () => {
+      const content = eml(mail);
+      const expected = discardedForKeyword(
+        await simpleParser(content),
+        personal,
+      );
+      const log = await filterLog(content);
+      const filesDiscarded = /Discarded \.EML .*excluded keyword/.test(log);
+      assert.equal(
+        filesDiscarded,
+        expected,
+        `PST rule says ${expected}\n${log}`,
+      );
+    });
+  }
 });

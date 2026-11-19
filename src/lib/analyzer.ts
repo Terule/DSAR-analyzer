@@ -6,11 +6,10 @@ import type { FieldsData } from "@kenjiuno/msgreader";
 import MsgReader from "@kenjiuno/msgreader";
 import { type ParsedMail, simpleParser } from "mailparser";
 import { computeEmailHash, dedupScope, isDuplicateEmail } from "./email-dedup";
-import { hasPrivilegedKeyword } from "./exclusions";
+import { collectMailAddresses, discardedForKeyword } from "./email-rules";
 import { keepTail } from "./job-log";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
-import { isSentToPersonalAddress } from "./subject-rules";
 
 interface AnalysisMetrics {
   uniqueCount: number;
@@ -395,40 +394,17 @@ export async function analyzePstDuplicates(
     // Pre-filter: Rule 1 — discard privileged/confidential subjects immediately after dedup.
     // Exception: if the email was sent directly TO the subject's personal email address,
     // include it regardless of privileged keywords — it is personally relevant to the subject.
-    const collectAddresses = (
-      value: ParsedMail["to"] | ParsedMail["from"],
-    ): string[] => {
-      if (!value) return [];
-      const containers = Array.isArray(value) ? value : [value];
-      return containers
-        .flatMap((container) => container.value ?? [])
-        .map((entry) => (entry.address ?? "").toLowerCase())
-        .filter(Boolean);
-    };
-
-    const toAddresses = collectAddresses(parsed.to);
-    const ccAddresses = [
-      ...collectAddresses(parsed.cc),
-      ...collectAddresses(parsed.bcc),
-    ];
-    const sentToSubjectEmail = isSentToPersonalAddress(
-      [...toAddresses, ...ccAddresses],
-      subjectEmail,
-    );
+    const toAddresses = collectMailAddresses(parsed.to);
 
     // Self-forward detection: subject sending from company email to personal email.
-    const fromAddresses = collectAddresses(parsed.from);
+    const fromAddresses = collectMailAddresses(parsed.from);
     const isSelfForward =
       subjectCompanyEmail.length > 0 &&
       subjectEmail.length > 0 &&
       fromAddresses.includes(subjectCompanyEmail) &&
       toAddresses.includes(subjectEmail);
 
-    if (
-      !isClientCase &&
-      hasPrivilegedKeyword(subject, bodyRaw) &&
-      !sentToSubjectEmail
-    ) {
+    if (!isClientCase && discardedForKeyword(parsed, subjectEmail)) {
       const emailId = crypto.randomUUID();
       const sentDate = parsed.date ? parsed.date.toISOString() : "no-date";
       await prisma.email.create({
