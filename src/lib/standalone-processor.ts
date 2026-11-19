@@ -25,6 +25,7 @@ import {
   buildSubjectIdentifiers,
   buildSubjectTokens,
   mentionsSubject,
+  textShowsSentToPersonalAddress,
 } from "./subject-rules";
 import {
   prescreenThresholdMb,
@@ -600,6 +601,7 @@ async function convertOfficeInWorker(
   criteria: string[],
   docTitle: string,
   bypassFilters = false,
+  personalEmail?: string,
   timeoutMs = 150_000,
 ): Promise<OfficeConversionOutcome> {
   const workerPath = path.resolve(
@@ -624,6 +626,7 @@ async function convertOfficeInWorker(
         criteria,
         docTitle,
         bypassFilters,
+        personalEmail,
       },
     });
 
@@ -1206,6 +1209,7 @@ export async function runStandaloneBatch(
           renderingCriteria,
           seqName,
           bypassFilters,
+          subjectEmail,
         );
         if (outcome.passwordProtected) {
           console.log(
@@ -1256,6 +1260,7 @@ export async function runStandaloneBatch(
           sheetCriteria,
           seqName,
           bypassFilters,
+          subjectEmail,
         );
         if (outcome.passwordProtected) {
           console.log(
@@ -1315,12 +1320,10 @@ export async function runStandaloneBatch(
         // Client-facing mail frequently includes a generic confidentiality
         // footer. A message sent directly to the data subject is still
         // responsive, matching the PST pipeline's direct-recipient rule.
-        const sentToSubjectEmail =
-          subjectEmail.length > 0 &&
-          new RegExp(
-            `\\b(?:to|cc|bcc)\\s*:[^\\n]*${subjectEmail.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\$&")}`,
-            "i",
-          ).test(rawPlainText);
+        const sentToSubjectEmail = textShowsSentToPersonalAddress(
+          rawPlainText,
+          subjectEmail,
+        );
 
         if (
           !bypassFilters &&
@@ -1416,12 +1419,10 @@ export async function runStandaloneBatch(
 
         // Exception: if the email was sent directly TO the subject's personal
         // email address, include it even when it contains a privileged keyword.
-        const sentToSubjectEmail =
-          subjectEmail.length > 0 &&
-          new RegExp(
-            `\\bto\\s*:[^\\n]*${subjectEmail.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`,
-            "i",
-          ).test(rawText);
+        const sentToSubjectEmail = textShowsSentToPersonalAddress(
+          rawText,
+          subjectEmail,
+        );
 
         if (
           !bypassFilters &&

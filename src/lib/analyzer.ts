@@ -10,6 +10,7 @@ import { hasPrivilegedKeyword } from "./exclusions";
 import { keepTail } from "./job-log";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
+import { isSentToPersonalAddress } from "./subject-rules";
 
 interface AnalysisMetrics {
   uniqueCount: number;
@@ -406,8 +407,14 @@ export async function analyzePstDuplicates(
     };
 
     const toAddresses = collectAddresses(parsed.to);
-    const sentToSubjectEmail =
-      subjectEmail.length > 0 && toAddresses.includes(subjectEmail);
+    const ccAddresses = [
+      ...collectAddresses(parsed.cc),
+      ...collectAddresses(parsed.bcc),
+    ];
+    const sentToSubjectEmail = isSentToPersonalAddress(
+      [...toAddresses, ...ccAddresses],
+      subjectEmail,
+    );
 
     // Self-forward detection: subject sending from company email to personal email.
     const fromAddresses = collectAddresses(parsed.from);

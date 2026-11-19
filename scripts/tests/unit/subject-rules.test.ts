@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   buildSubjectTokens,
+  isSentToPersonalAddress,
   mentionsSubject,
+  textShowsSentToPersonalAddress,
 } from "../../../src/lib/subject-rules";
 
 const identity = {
@@ -49,4 +51,43 @@ test("matching is by whole word, case-insensitive", () => {
 
 test("no tokens means everything matches (client cases)", () => {
   assert.equal(mentionsSubject("anything", []), true);
+});
+
+test("sent-to exception: only the personal address, in To, Cc or Bcc", () => {
+  assert.equal(
+    isSentToPersonalAddress(
+      ["a@x.com", "MSouza@Gmail.com"],
+      "msouza@gmail.com",
+    ),
+    true,
+  );
+  assert.equal(
+    isSentToPersonalAddress(["maria.souza@corp.com"], "msouza@gmail.com"),
+    false,
+  );
+  assert.equal(isSentToPersonalAddress(["a@x.com"], undefined), false);
+});
+
+test("sent-to exception on text behaves like the address check", () => {
+  const personal = "msouza@gmail.com";
+  assert.equal(
+    textShowsSentToPersonalAddress(
+      "To: Maria <msouza@gmail.com>\nSubject: x",
+      personal,
+    ),
+    true,
+  );
+  assert.equal(
+    textShowsSentToPersonalAddress("Cc: a@x.com, msouza@gmail.com", personal),
+    true,
+  );
+  // The work address and a mention in the body do not open the exception.
+  assert.equal(
+    textShowsSentToPersonalAddress("To: maria.souza@corp.com", personal),
+    false,
+  );
+  assert.equal(
+    textShowsSentToPersonalAddress("write to msouza@gmail.com later", personal),
+    false,
+  );
 });

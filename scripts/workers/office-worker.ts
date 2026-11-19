@@ -26,6 +26,7 @@ interface OfficeWorkerData {
   criteria: string[];
   docTitle: string;
   bypassFilters?: boolean;
+  personalEmail?: string;
 }
 
 /** A stable fingerprint of what an Excel user can see, ignoring package metadata. */
@@ -55,8 +56,15 @@ function excelContentKey(buffer: Buffer): string {
 }
 
 async function main() {
-  const { kind, filePath, outputPath, criteria, docTitle, bypassFilters } =
-    workerData as OfficeWorkerData;
+  const {
+    kind,
+    filePath,
+    outputPath,
+    criteria,
+    docTitle,
+    bypassFilters,
+    personalEmail,
+  } = workerData as OfficeWorkerData;
 
   try {
     if (isPasswordProtectedFile(filePath)) {
@@ -79,6 +87,7 @@ async function main() {
             docTitle,
             undefined,
             bypassFilters,
+            personalEmail,
           )
         : await processExcelToPdf(
             buffer,
@@ -87,6 +96,7 @@ async function main() {
             docTitle,
             undefined,
             bypassFilters,
+            personalEmail,
           );
 
     parentPort?.postMessage({

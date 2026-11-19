@@ -29,27 +29,14 @@ import {
   buildSubjectIdentifiers,
   buildSubjectTokens,
   mentionsSubject,
+  textShowsSentToPersonalAddress,
 } from "./subject-rules";
 import { normalizeSpreadsheetText, repairMojibake } from "./text-encoding";
 
 const FONT_FOLDER =
   process.env.PDF_FONT_DIR || path.join(process.cwd(), "fonts");
 
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 /** A direct recipient remains responsive despite a boilerplate legal footer. */
-function hasDirectRecipientAddress(text: string, criteria: string[]): boolean {
-  const emails = criteria.filter((criterion) => criterion.includes("@"));
-  return emails.some((email) =>
-    new RegExp(
-      `\\b(?:to|cc|bcc)\\s*:\\s*[^\\n]{0,240}${escapeRegExp(email)}`,
-      "i",
-    ).test(text),
-  );
-}
-
 interface SpreadsheetCellValue {
   row: number;
   column: number;
@@ -671,6 +658,7 @@ export async function processDocxToPdf(
   docTitle: string,
   processedHashes?: Set<string>,
   bypassKeywordFilter = false,
+  personalEmail?: string,
 ): Promise<boolean> {
   try {
     const textExtraction = await mammoth.extractRawText({ buffer });
@@ -680,7 +668,7 @@ export async function processDocxToPdf(
     if (
       !bypassKeywordFilter &&
       PRIVILEGED_KEYWORDS_RE.test(rawText) &&
-      !hasDirectRecipientAddress(sourceText, criteria)
+      !textShowsSentToPersonalAddress(sourceText, personalEmail)
     )
       return false;
 
@@ -721,6 +709,7 @@ export async function processExcelToPdf(
   docTitle: string,
   processedHashes?: Set<string>,
   bypassKeywordFilter = false,
+  personalEmail?: string,
 ): Promise<boolean> {
   try {
     const escapeHtml = (value: string): string =>
@@ -798,7 +787,7 @@ export async function processExcelToPdf(
     if (
       !bypassKeywordFilter &&
       PRIVILEGED_KEYWORDS_RE.test(workbookText) &&
-      !hasDirectRecipientAddress(workbookText, criteria)
+      !textShowsSentToPersonalAddress(workbookText, personalEmail)
     )
       return false;
 
@@ -961,10 +950,15 @@ export async function processPdfAttachment(
   _docTitle: string,
   processedHashes?: Set<string>,
   bypassKeywordFilter = false,
+  personalEmail?: string,
 ): Promise<boolean> {
   try {
     const rawText = (await extractPdfText(buffer)).toLowerCase();
-    if (!bypassKeywordFilter && PRIVILEGED_KEYWORDS_RE.test(rawText))
+    if (
+      !bypassKeywordFilter &&
+      PRIVILEGED_KEYWORDS_RE.test(rawText) &&
+      !textShowsSentToPersonalAddress(rawText, personalEmail)
+    )
       return false;
 
     if (!mentionsSubject(rawText, criteria)) return false;
@@ -1037,6 +1031,8 @@ export async function renderEmailAttachments(input: {
   criteria: string[];
   /** Full identifiers only, for spreadsheets (rows are delivered whole). */
   sheetCriteria?: string[];
+  /** The subject's personal address, for the sent-to-the-subject exception. */
+  personalEmail?: string;
   bypassKeywordFilter?: boolean;
   /**
    * Screening verdicts keyed by `attachmentKey` (see mail-screen). `null` or
@@ -1084,6 +1080,7 @@ export async function renderEmailAttachments(input: {
           attSeqName,
           undefined,
           bypassKeywordFilter,
+          input.personalEmail,
         );
       } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
         await processExcelToPdf(
@@ -1093,6 +1090,7 @@ export async function renderEmailAttachments(input: {
           attSeqName,
           undefined,
           bypassKeywordFilter,
+          input.personalEmail,
         );
       } else if (ext === ".pdf") {
         await processPdfAttachment(
@@ -1102,6 +1100,7 @@ export async function renderEmailAttachments(input: {
           attSeqName,
           undefined,
           bypassKeywordFilter,
+          input.personalEmail,
         );
       }
     }
@@ -1263,6 +1262,7 @@ export async function convertToPdfBatch(
         outputDir,
         criteria: filterCriteria,
         sheetCriteria: filterSheetCriteria,
+        personalEmail: subjectPersonalEmail,
         bypassKeywordFilter,
         screen: mailVerdicts,
         reviewDir: reviewEmailsDir,
@@ -1545,6 +1545,7 @@ export async function convertToPdfBatch(
                   reviewDir: reviewEmailsDir,
                   criteria: filterCriteria,
                   sheetCriteria: filterSheetCriteria,
+                  personalEmail: subjectPersonalEmail,
                   bypassKeywordFilter: true,
                   screen: mailVerdicts,
                 });

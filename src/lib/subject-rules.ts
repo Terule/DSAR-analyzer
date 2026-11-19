@@ -102,3 +102,31 @@ export function mentionsSubject(text: string, tokens: string[]): boolean {
   if (matchers.length === 0) return true;
   return matchers.some((matcher) => matcher.test(text));
 }
+
+/**
+ * The one "sent directly to the subject's personal address" exception to the
+ * privileged-keyword rule: mail written to the subject's personal inbox is
+ * personally relevant, whatever it says. Only the personal address counts (a
+ * work address would let every confidential work mail through), in To, Cc or Bcc.
+ */
+export function isSentToPersonalAddress(
+  recipients: string[],
+  personalEmail: string | undefined,
+): boolean {
+  const personal = clean(personalEmail);
+  if (!personal) return false;
+  return recipients.some((address) => clean(address) === personal);
+}
+
+/** Same exception for items that only have text, such as a .msg, a chat export or an attachment. */
+export function textShowsSentToPersonalAddress(
+  text: string,
+  personalEmail: string | undefined,
+): boolean {
+  const personal = clean(personalEmail);
+  if (!personal) return false;
+  return new RegExp(
+    `\\b(?:to|cc|bcc)\\s*:[^\\n]{0,240}${escapeRegExp(personal)}`,
+    "i",
+  ).test(text);
+}
