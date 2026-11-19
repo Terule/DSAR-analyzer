@@ -1,8 +1,6 @@
 import fs from "node:fs";
-import { defaultProvider } from "@aws-sdk/credential-provider-node";
-import { CONVERSE_MODEL, converseConcurrency } from "./bedrock/config";
-import { awsBedrockDeps } from "./bedrock/files-ai-client";
-import { type ParsedRequest, parseRequestLine } from "./bedrock/translate";
+import { CONVERSE_MODEL } from "./bedrock/config";
+import { parseRequestLine } from "./bedrock/translate";
 import {
   filesAiModeFor,
   isMailItem,
@@ -11,34 +9,15 @@ import {
 } from "./files-ai";
 import { decideFilesAi, parseFilesAiJudgement } from "./files-ai-prompt";
 import { prisma } from "./prisma";
+import {
+  runSecondReview,
+  type SecondReviewAdapter,
+  type SecondReviewOptions,
+} from "./second-review";
 
-/** A claim older than this was left by a worker that died; it is queued again. */
-const STALE_RUNNING_MS = 15 * 60_000;
-/** Without AWS credentials for this long, waiting discards go to a person. */
-const NO_CREDENTIALS_GIVE_UP_MS = 30 * 60_000;
-const CHUNK = 200;
-/** One call works through the backlog for at most this long, then yields to the sweep. */
-const TIME_BUDGET_MS = 90_000;
-
-export interface RereviewOptions {
-  /** One Converse call with a forced tool; defaults to AWS Bedrock. */
-  converse?: (request: ParsedRequest, modelId: string) => Promise<unknown>;
+export interface RereviewOptions extends SecondReviewOptions {
   fileId?: string;
   batchDir?: string;
-  timeBudgetMs?: number;
-}
-
-async function mapLimit<T>(
-  items: T[],
-  limit: number,
-  fn: (item: T) => Promise<void>,
-): Promise<void> {
-  let next = 0;
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (next < items.length) await fn(items[next++]);
-    }),
-  );
 }
 
 function loadRequestLines(
@@ -70,30 +49,39 @@ export async function rereviewFilesAiDiscards(
   options: RereviewOptions = {},
 ): Promise<number> {
   const scope = options.fileId ? { file_id: options.fileId } : {};
-  const started = Date.now();
-  await prisma.filesAiVerdict.updateMany({
-    where: {
-      ...scope,
-      rereview_status: "running",
-      rereview_started_at: { lt: new Date(started - STALE_RUNNING_MS) },
-    },
-    data: { rereview_status: "pending", rereview_started_at: null },
-  });
+  const modes = new Map<string, Awaited<ReturnType<typeof filesAiModeFor>>>();
+  const lineCache = new Map<string, Map<string, string>>();
+  const touchedRuns = new Set<string>();
 
-  let converse = options.converse;
-  if (!converse) {
-    try {
-      await defaultProvider()();
-      converse = awsBedrockDeps().converse;
-    } catch {
+  type Row = {
+    id: string;
+    file_id: string;
+    rel_path: string;
+    batch_run_id: string | null;
+    large_file: boolean;
+    subject_involved: boolean;
+    first_reason: string | null;
+  };
+
+  const adapter: SecondReviewAdapter<Row> = {
+    name: "Files AI",
+    async reclaimStale(cutoff) {
+      await prisma.filesAiVerdict.updateMany({
+        where: {
+          ...scope,
+          rereview_status: "running",
+          rereview_started_at: { lt: cutoff },
+        },
+        data: { rereview_status: "pending", rereview_started_at: null },
+      });
+    },
+    async giveUpWithoutCredentials(cutoff) {
       // No credentials: keep waiting, but never strand a file forever.
       await prisma.filesAiVerdict.updateMany({
         where: {
           ...scope,
           rereview_status: "pending",
-          rereview_queued_at: {
-            lt: new Date(started - NO_CREDENTIALS_GIVE_UP_MS),
-          },
+          rereview_queued_at: { lt: cutoff },
         },
         data: {
           verdict: "review",
@@ -104,49 +92,38 @@ export async function rereviewFilesAiDiscards(
         },
       });
       return 0;
-    }
-  }
-
-  const budget = options.timeBudgetMs ?? TIME_BUDGET_MS;
-  const modes = new Map<string, Awaited<ReturnType<typeof filesAiModeFor>>>();
-  const lineCache = new Map<string, Map<string, string>>();
-  const touchedRuns = new Set<string>();
-  let settled = 0;
-
-  while (Date.now() - started < budget) {
-    const candidates = await prisma.filesAiVerdict.findMany({
-      where: { ...scope, rereview_status: "pending" },
-      orderBy: { rereview_queued_at: "asc" },
-      take: CHUNK,
-      select: { id: true },
-    });
-    if (candidates.length === 0) break;
-    const stamp = new Date();
-    await prisma.filesAiVerdict.updateMany({
-      where: {
-        id: { in: candidates.map((row) => row.id) },
-        rereview_status: "pending",
-      },
-      data: { rereview_status: "running", rereview_started_at: stamp },
-    });
-    const rows = await prisma.filesAiVerdict.findMany({
-      where: {
-        id: { in: candidates.map((row) => row.id) },
-        rereview_status: "running",
-        rereview_started_at: stamp,
-      },
-      select: {
-        id: true,
-        file_id: true,
-        rel_path: true,
-        batch_run_id: true,
-        large_file: true,
-        subject_involved: true,
-        first_reason: true,
-      },
-    });
-
-    await mapLimit(rows, converseConcurrency(), async (row) => {
+    },
+    async claim(take, stamp) {
+      const candidates = await prisma.filesAiVerdict.findMany({
+        where: { ...scope, rereview_status: "pending" },
+        orderBy: { rereview_queued_at: "asc" },
+        take,
+        select: { id: true },
+      });
+      if (candidates.length === 0) return null;
+      const ids = candidates.map((row) => row.id);
+      await prisma.filesAiVerdict.updateMany({
+        where: { id: { in: ids }, rereview_status: "pending" },
+        data: { rereview_status: "running", rereview_started_at: stamp },
+      });
+      return prisma.filesAiVerdict.findMany({
+        where: {
+          id: { in: ids },
+          rereview_status: "running",
+          rereview_started_at: stamp,
+        },
+        select: {
+          id: true,
+          file_id: true,
+          rel_path: true,
+          batch_run_id: true,
+          large_file: true,
+          subject_involved: true,
+          first_reason: true,
+        },
+      });
+    },
+    async settle(row, converse) {
       if (row.batch_run_id) {
         touchedRuns.add(row.batch_run_id);
         if (!lineCache.has(row.batch_run_id)) {
@@ -213,18 +190,19 @@ export async function rereviewFilesAiDiscards(
           reviewed_by_model: "haiku-5.5",
         },
       });
-      settled++;
-    });
-  }
+    },
+    async finish() {
+      // A run's request file is kept until none of its discards waits for a second look.
+      for (const runId of touchedRuns) {
+        const waiting = await prisma.filesAiVerdict.count({
+          where: { batch_run_id: runId, rereview_status: { not: null } },
+        });
+        if (waiting === 0) removeRunFiles(runId, options.batchDir);
+      }
+    },
+  };
 
-  // A run's request file is kept until none of its discards waits for a second look.
-  for (const runId of touchedRuns) {
-    const waiting = await prisma.filesAiVerdict.count({
-      where: { batch_run_id: runId, rereview_status: { not: null } },
-    });
-    if (waiting === 0) removeRunFiles(runId, options.batchDir);
-  }
-  return settled;
+  return runSecondReview(adapter, options);
 }
 
 /** True while any discard waits for, or is getting, its second opinion. */
