@@ -86,7 +86,15 @@ const attachment = (filename: string, content: Buffer) =>
 
 async function render(
   attachments: Attachment[],
-  options: { bypassKeywordFilter?: boolean } = {},
+  options: {
+    bypassKeywordFilter?: boolean;
+    onDrop?: (drop: {
+      filename: string;
+      rule: string;
+      reason: string;
+      decidedBy: string;
+    }) => void;
+  } = {},
 ): Promise<string[]> {
   const outputDir = fs.mkdtempSync(path.join(work, "out-"));
   await renderEmailAttachments({
@@ -106,6 +114,60 @@ describe("email attachments", () => {
   it("delivers a convertible attachment that mentions the subject", async () => {
     assert.deepEqual(await render([attachment("memo.pdf", relevant())]), [
       "Email 0001 Attachment 1.pdf",
+    ]);
+  });
+
+  it("delivers a text attachment that mentions the subject", async () => {
+    assert.deepEqual(
+      await render([
+        attachment("notes.txt", Buffer.from("Notes on Jonathan Wheeler")),
+      ]),
+      ["Email 0001 Attachment 1.pdf"],
+    );
+  });
+
+  it("applies the keyword and subject rules to a text attachment", async () => {
+    const drops: { rule: string }[] = [];
+    const onDrop = (d: { rule: string }) => drops.push(d);
+    assert.deepEqual(
+      await render(
+        [
+          attachment(
+            "a.txt",
+            Buffer.from("Privileged advice for Jonathan Wheeler"),
+          ),
+          attachment("b.txt", Buffer.from("Quarterly catering invoice")),
+        ],
+        { onDrop },
+      ),
+      [],
+    );
+    assert.deepEqual(drops.map((d) => d.rule).sort(), [
+      "keyword",
+      "subject_absent",
+    ]);
+  });
+
+  it("reports an unsupported attachment instead of dropping it silently", async () => {
+    const drops: {
+      filename: string;
+      rule: string;
+      reason: string;
+      decidedBy: string;
+    }[] = [];
+    assert.deepEqual(
+      await render([attachment("deck.pptx", Buffer.from("PK"))], {
+        onDrop: (d) => drops.push(d),
+      }),
+      [],
+    );
+    assert.deepEqual(drops, [
+      {
+        decidedBy: "rule",
+        filename: "deck.pptx",
+        rule: "unsupported_type",
+        reason: "Unsupported attachment type .pptx.",
+      },
     ]);
   });
 

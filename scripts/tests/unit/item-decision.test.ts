@@ -115,3 +115,29 @@ test("the Files engine reports each discard with its rule", async () => {
   assert.equal(decisions[0].filePath, file);
   assert.equal(decisions[0].rule, "subject_absent");
 });
+
+test("a .txt in Files follows the document keyword rule", async () => {
+  const input = fs.mkdtempSync(path.join(os.tmpdir(), "item-txt-in-"));
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "item-txt-out-"));
+  const file = path.join(input, "note.txt");
+  fs.writeFileSync(file, "Privileged advice for Maria Souza.");
+  const decisions: FileDecision[] = [];
+  const original = console.log;
+  console.log = () => {};
+  try {
+    await runStandaloneBatch({
+      inputDir: input,
+      filePaths: [file],
+      messagesDir: path.join(out, "Messages"),
+      documentsDir: path.join(out, "Documents"),
+      subjectCriteria: { name: "Maria Souza", email: "maria.souza@corp.com" },
+      onDecision: (d) => decisions.push(d),
+    });
+  } finally {
+    console.log = original;
+  }
+  assert.deepEqual(
+    decisions.map((d) => d.rule),
+    ["keyword"],
+  );
+});

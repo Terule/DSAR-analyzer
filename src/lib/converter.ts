@@ -12,10 +12,11 @@ import {
 import mammoth from "mammoth";
 import * as xlsx from "xlsx";
 import { getCasePstFileIds } from "./case-utils";
-import { flattenAttachments } from "./email-attachments";
+import { type AttachmentDrop, flattenAttachments } from "./email-attachments";
 import { hasPrivilegedKeywordInDocument } from "./exclusions";
 import { listHumanReviewDeliverables } from "./files-ai-apply";
 import { archiveCompletedCase } from "./history";
+import { type AttachmentDecision, recordAttachmentItems } from "./items";
 import { attachmentKey, getMailScreenVerdicts } from "./mail-screen";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
@@ -979,6 +980,62 @@ export async function processPdfAttachment(
   }
 }
 
+function decodeTextAttachment(content: Buffer): string {
+  return content.toString("utf-8");
+}
+
+function escapeHtmlText(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+/**
+ * One rule for plain-text documents (a .txt in Files or as an email attachment):
+ * the document keyword rule, the subject must be cited, and the text is rendered
+ * as a PDF. Returns why it was not delivered, or null when the PDF was written.
+ */
+export async function processTextToPdf(
+  rawText: string,
+  outputPath: string,
+  criteria: string[],
+  docTitle: string,
+  isDuplicate?: (text: string) => boolean,
+  bypassKeywordFilter = false,
+  personalEmail?: string,
+): Promise<"keyword" | "subject_absent" | "duplicate" | null> {
+  if (
+    !bypassKeywordFilter &&
+    hasPrivilegedKeywordInDocument(rawText) &&
+    !textShowsSentToPersonalAddress(rawText, personalEmail)
+  ) {
+    return "keyword";
+  }
+  if (!bypassKeywordFilter && !mentionsSubject(rawText, criteria)) {
+    return "subject_absent";
+  }
+  if (isDuplicate?.(rawText)) return "duplicate";
+  const html = normalizeHtmlForPdf(`
+    <!DOCTYPE html>
+    <html>
+      <head><meta charset="utf-8" /><title>${escapeHtmlText(docTitle)}</title></head>
+      <body>
+        <h2>${escapeHtmlText(docTitle)}</h2>
+        <pre style="white-space: pre-wrap; overflow-wrap: anywhere; font-family: sans-serif;">${escapeHtmlText(rawText)}</pre>
+      </body>
+    </html>
+  `);
+  const tempHtmlPath = `${outputPath}.tmp.html`;
+  fs.writeFileSync(tempHtmlPath, html, "utf-8");
+  try {
+    await runWeasyPrint(tempHtmlPath, outputPath);
+  } finally {
+    fs.rmSync(tempHtmlPath, { force: true });
+  }
+  return null;
+}
+
 function finalizeAttachmentNames(outputDir: string, currentBaseName: string) {
   const escapedBase = currentBaseName.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
   const attachmentPattern = new RegExp(
@@ -1042,10 +1099,34 @@ export async function renderEmailAttachments(input: {
    */
   screen?: Map<string, { verdict: string; reason: string }> | null;
   reviewDir?: string;
+  /** Audit trail: told about every attachment that is not delivered, and why. */
+  onDrop?: (drop: {
+    filename: string;
+    rule: string;
+    reason: string;
+    decidedBy: string;
+  }) => void;
 }): Promise<void> {
   const { currentBaseName, outputDir, criteria, screen } = input;
   const bypassKeywordFilter = input.bypassKeywordFilter ?? false;
-  const files = await flattenAttachments(input.attachments);
+  const drop = (
+    filename: string,
+    rule: string,
+    reason: string,
+    decidedBy = "rule",
+  ) => {
+    try {
+      input.onDrop?.({ filename, rule, reason, decidedBy });
+    } catch (error) {
+      console.warn("[Attachments] Audit trail callback failed:", error);
+    }
+  };
+  const files = await flattenAttachments(
+    input.attachments,
+    console.log,
+    (dropped: AttachmentDrop) =>
+      drop(dropped.filename, dropped.rule, dropped.reason),
+  );
 
   const deliver: typeof files = [];
   const review: typeof files = [];
@@ -1057,11 +1138,17 @@ export async function renderEmailAttachments(input: {
     const verdict =
       screen.get(attachmentKey(file.content))?.verdict ?? "review";
     if (verdict === "keep") deliver.push(file);
-    else if (verdict === "discard")
+    else if (verdict === "discard") {
       console.log(
         `[Attachments] Not delivering ${file.filename} of ${currentBaseName}: confidential.`,
       );
-    else review.push(file);
+      drop(
+        file.filename,
+        "ai_file",
+        screen.get(attachmentKey(file.content))?.reason || "Confidential.",
+        "ai",
+      );
+    } else review.push(file);
   }
 
   const renderInto = async (batch: typeof files, directory: string) => {
@@ -1072,8 +1159,9 @@ export async function renderEmailAttachments(input: {
       const ext = path.extname(file.filename).toLowerCase();
       const attSeqName = `${currentBaseName} Attachment ${String(counter).padStart(padLen, "0")}`;
       counter++;
+      let delivered = true;
       if (ext === ".docx" || ext === ".doc") {
-        await processDocxToPdf(
+        delivered = await processDocxToPdf(
           file.content,
           path.join(directory, `${attSeqName}.pdf`),
           criteria,
@@ -1083,7 +1171,7 @@ export async function renderEmailAttachments(input: {
           input.personalEmail,
         );
       } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
-        await processExcelToPdf(
+        delivered = await processExcelToPdf(
           file.content,
           path.join(directory, `${attSeqName}.pdf`),
           input.sheetCriteria ?? criteria,
@@ -1092,8 +1180,34 @@ export async function renderEmailAttachments(input: {
           bypassKeywordFilter,
           input.personalEmail,
         );
+      } else if (ext === ".txt") {
+        const textReason = await processTextToPdf(
+          decodeTextAttachment(file.content),
+          path.join(directory, `${attSeqName}.pdf`),
+          criteria,
+          attSeqName,
+          undefined,
+          bypassKeywordFilter,
+          input.personalEmail,
+        );
+        if (textReason) {
+          delivered = false;
+          drop(
+            file.filename,
+            textReason === "keyword"
+              ? "keyword"
+              : textReason === "subject_absent"
+                ? "subject_absent"
+                : "dup",
+            textReason === "keyword"
+              ? "Contains excluded keyword."
+              : textReason === "subject_absent"
+                ? "Data subject not mentioned."
+                : "Duplicate content.",
+          );
+        }
       } else if (ext === ".pdf") {
-        await processPdfAttachment(
+        delivered = await processPdfAttachment(
           file.content,
           path.join(directory, `${attSeqName}${ext}`),
           criteria,
@@ -1101,6 +1215,13 @@ export async function renderEmailAttachments(input: {
           undefined,
           bypassKeywordFilter,
           input.personalEmail,
+        );
+      }
+      if (!delivered && ext !== ".txt") {
+        drop(
+          file.filename,
+          "attachment_filter",
+          "Not delivered by the document filters (excluded keyword, subject not cited, duplicate or empty output).",
         );
       }
     }
@@ -1255,8 +1376,18 @@ export async function convertToPdfBatch(
       currentBaseName: string,
       outputDir: string,
       bypassKeywordFilter = false,
-    ) =>
-      renderEmailAttachments({
+      parentHash?: string,
+    ) => {
+      const drops: AttachmentDecision[] = [];
+      return renderEmailAttachments({
+        onDrop: (d) =>
+          drops.push({
+            filename: d.filename,
+            state: "discarded",
+            rule: d.rule,
+            reason: d.reason,
+            decidedBy: d.decidedBy,
+          }),
         attachments,
         currentBaseName,
         outputDir,
@@ -1266,7 +1397,10 @@ export async function convertToPdfBatch(
         bypassKeywordFilter,
         screen: mailVerdicts,
         reviewDir: reviewEmailsDir,
+      }).then(async () => {
+        if (parentHash) await recordAttachmentItems(fileId, parentHash, drops);
       });
+    };
 
     for (let idx = 0; idx < emlFiles.length; idx++) {
       const filename = emlFiles[idx];
@@ -1324,6 +1458,7 @@ export async function convertToPdfBatch(
                 currentBaseName,
                 deliverablesDir,
                 bypassAttachmentKeywords,
+                emailHash,
               );
             };
 
@@ -1459,6 +1594,7 @@ export async function convertToPdfBatch(
                   baseName,
                   warningDir,
                   true, // self-forwards are addressed to personal email — bypass keyword filter
+                  email_hash,
                 );
               }
 

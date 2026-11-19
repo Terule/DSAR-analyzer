@@ -7,7 +7,7 @@ import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import MsgReader, { type FieldsData } from "@kenjiuno/msgreader";
 import { simpleParser } from "mailparser";
-import { normalizeHtmlForPdf } from "./converter";
+import { normalizeHtmlForPdf, processTextToPdf } from "./converter";
 import { stripEmailSignature } from "./email-content";
 import { discardedForKeyword } from "./email-rules";
 import {
@@ -416,19 +416,6 @@ function buildMsgHtml(
   return normalizeHtmlForPdf(`
     <!DOCTYPE html><html><head><title>${escapeHtml(subject)}</title></head>
     <body>${header}<pre style="white-space: pre-wrap; margin: 0;">${escapeHtml(message.body || "(No body content)")}</pre></body></html>
-  `);
-}
-
-function buildTextDocumentHtml(rawText: string, sourceName: string): string {
-  return normalizeHtmlForPdf(`
-    <!DOCTYPE html>
-    <html>
-      <head><meta charset="utf-8" /><title>${escapeHtml(sourceName)}</title></head>
-      <body>
-        <h2>${escapeHtml(sourceName)}</h2>
-        <pre style="white-space: pre-wrap; overflow-wrap: anywhere; font-family: sans-serif;">${escapeHtml(rawText)}</pre>
-      </body>
-    </html>
   `);
 }
 
@@ -1601,13 +1588,29 @@ export async function runStandaloneBatch(
           continue;
         }
         const rawText = buffer.toString("utf-8");
-        const normalizedText = rawText.toLowerCase();
-        if (!bypassFilters && !mentionsSubject(rawText, criteria)) {
+        const reason = await withTimeout(
+          processTextToPdf(
+            rawText,
+            pdfOutputPath,
+            criteria,
+            seqName,
+            (text) => isDuplicateContent(text.toLowerCase(), processedHashes),
+            bypassFilters,
+            subjectEmail,
+          ),
+          file,
+        );
+        if (reason === "keyword") {
+          recordDiscard(
+            filePath,
+            `Discarded TXT ${file}: Contains excluded keyword.`,
+          );
+        } else if (reason === "subject_absent") {
           recordDiscard(
             filePath,
             `Discarded TXT ${file}: Data subject not mentioned.`,
           );
-        } else if (isDuplicateContent(normalizedText, processedHashes)) {
+        } else if (reason === "duplicate") {
           recordDiscard(
             filePath,
             `Discarded Duplicate TXT ${file} (Content Match).`,
@@ -1616,14 +1619,6 @@ export async function runStandaloneBatch(
           skippedCount++;
           continue;
         } else {
-          await withTimeout(
-            renderHtmlToPdfWeasyPrint(
-              buildTextDocumentHtml(rawText, seqName),
-              pdfOutputPath,
-              file,
-            ),
-            file,
-          );
           success = true;
           producedPath = pdfOutputPath;
         }

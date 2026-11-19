@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { after, before, describe, it } from "node:test";
 import {
   fileItemId,
+  recordAttachmentItems,
   recordFileItems,
   syncEmailItems,
 } from "../../../src/lib/items";
@@ -151,6 +152,26 @@ describe("items audit trail (shadow mode)", () => {
       (await prisma.item.findUnique({ where: { id } }))?.kind,
       "file",
     );
+  });
+
+  it("records dropped attachments under their email", async () => {
+    await email("host");
+    await recordAttachmentItems(fileId, hash("host"), [
+      {
+        filename: "deck.pptx",
+        state: "discarded",
+        rule: "unsupported_type",
+        reason: "Unsupported attachment type .pptx.",
+        decidedBy: "rule",
+      },
+    ]);
+    const rows = await prisma.item.findMany({
+      where: { parent_id: hash("host") },
+    });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].origin, "attachment");
+    assert.equal(rows[0].decision_rule, "unsupported_type");
+    assert.equal(rows[0].case_request_id, null);
   });
 
   it("never throws, even for hashes that do not exist", async () => {

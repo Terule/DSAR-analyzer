@@ -294,3 +294,79 @@ export function fileDecisionToItem(
     decidedBy: "rule",
   };
 }
+
+export interface AttachmentDecision {
+  filename: string;
+  state: ItemState;
+  rule: string;
+  reason: string | null;
+  decidedBy: string;
+}
+
+/**
+ * Records what happened to an email's attachments, as items whose parent is the
+ * email. A zip entry carries its path inside the archive in `filename`. Never throws.
+ */
+export async function recordAttachmentItems(
+  fileId: string,
+  parentHash: string,
+  decisions: AttachmentDecision[],
+): Promise<void> {
+  if (decisions.length === 0) return;
+  try {
+    const row = await prisma.processedFile.findUnique({
+      where: { id: fileId },
+      select: { case_request_id: true },
+    });
+    for (const decision of decisions) {
+      const id = crypto
+        .createHash("sha256")
+        .update(`attachment:${parentHash}:${decision.filename}`)
+        .digest("hex");
+      const data = {
+        state: decision.state,
+        decision_rule: decision.rule,
+        reason: decision.reason,
+        decided_by: decision.decidedBy,
+      };
+      const previous = await prisma.item.findUnique({
+        where: { id },
+        select: {
+          state: true,
+          decision_rule: true,
+          reason: true,
+          decided_by: true,
+        },
+      });
+      if (
+        previous &&
+        previous.state === data.state &&
+        previous.decision_rule === data.decision_rule &&
+        previous.reason === data.reason &&
+        previous.decided_by === data.decided_by
+      ) {
+        continue;
+      }
+      await prisma.$transaction([
+        prisma.item.upsert({
+          where: { id },
+          create: {
+            id,
+            case_request_id: row?.case_request_id ?? null,
+            file_id: fileId,
+            parent_id: parentHash,
+            kind: "file",
+            origin: "attachment",
+            ...data,
+          },
+          update: data,
+        }),
+        prisma.itemEvent.create({
+          data: { item_id: id, ...data, state: data.state },
+        }),
+      ]);
+    }
+  } catch (error) {
+    console.warn("[Items] Could not record the audit trail:", error);
+  }
+}
