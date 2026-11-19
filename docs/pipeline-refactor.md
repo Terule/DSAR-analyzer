@@ -152,4 +152,4 @@ Cada passo entrega valor sozinho e tem rollback simples. Antes de começar: um c
 - **Casos de cliente** ficam para depois, junto com a unificação dos critérios: o processo de empregado entrega mais do que a SAR da ICO exige.
 - O que fazer com anexos `.mp4` etc. que o RH queira ver: hoje, descartados e auditados.
 - Tamanho do contexto do Teams (2 mensagens) e regras para conversas em grupo grandes.
-- Custo: sem o filtro de IA, todo email que passa na palavra-chave e cita o titular vai para a IA; medir no caso real antes do passo 6.
+- Custo: o filtro de "titular citado" não foi removido, só movido para o Extract (passo 2), então esse passo não muda o custo da IA. O que pode subir é o passo 1: o conjunto de tokens ficou mais amplo (primeiro e último nome sozinhos, parte local do email, os dois emails), e passa mais email para a IA. Medir no caso real antes de decidir se o critério precisa apertar.
