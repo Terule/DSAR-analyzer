@@ -16,6 +16,7 @@ import {
 } from "./files-ai";
 import { type FilesAiCandidate, readPdfSample } from "./files-ai-extract";
 import { configuredFilesAiClient } from "./files-ai-provider";
+import { syncEmailItems } from "./items";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
@@ -349,6 +350,12 @@ export async function finishMailScreen(coordinatorId: string): Promise<void> {
         where: { email_hash: hash, ai_decision: "keep" },
         data: { ai_decision: target, ai_reason: body.reason ?? "" },
       });
+      if (updated.count > 0) {
+        await syncEmailItems([hash], {
+          rule: "mail_screen",
+          decidedBy: "bedrock",
+        });
+      }
       if (target === "discard") discarded += updated.count;
     }
     if (discarded > 0) {

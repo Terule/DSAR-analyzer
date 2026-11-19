@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { type AddressObject, simpleParser } from "mailparser";
 import { stripEmailSignature } from "./email-content";
+import { syncEmailItems } from "./items";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
 import { buildSubjectTokens, mentionsSubject } from "./subject-rules";
@@ -222,6 +223,7 @@ export async function extractUniqueEmails(
               ai_reason: "Client case: deduplication only",
             },
           });
+          await syncEmailItems([record.email_hash]);
           continue;
         }
 
@@ -249,6 +251,7 @@ export async function extractUniqueEmails(
               ai_reason: "System Discard: Draft (Missing Routing Headers)",
             },
           });
+          await syncEmailItems([record.email_hash]);
 
           // 2. Delete the copied .eml file so it doesn't clutter the main folder
           fs.unlinkSync(finalEmlPath);
@@ -289,6 +292,7 @@ export async function extractUniqueEmails(
               ai_reason: "Pre-filter: Data subject not mentioned",
             },
           });
+          await syncEmailItems([record.email_hash]);
           subjectAbsent++;
           continue;
         }

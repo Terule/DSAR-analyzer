@@ -7,6 +7,7 @@ import MsgReader from "@kenjiuno/msgreader";
 import { type ParsedMail, simpleParser } from "mailparser";
 import { computeEmailHash, dedupScope, isDuplicateEmail } from "./email-dedup";
 import { collectMailAddresses, discardedForKeyword } from "./email-rules";
+import { syncEmailItems } from "./items";
 import { keepTail } from "./job-log";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
@@ -422,6 +423,7 @@ export async function analyzePstDuplicates(
             "Pre-filter: Subject or body contains privileged/confidential keyword",
         },
       });
+      await syncEmailItems([emailHash]);
       await prisma.processedFile.update({
         where: { id: fileId },
         data: { ai_discarded_count: { increment: 1 } },
@@ -459,6 +461,7 @@ export async function analyzePstDuplicates(
           : {}),
       },
     });
+    await syncEmailItems([emailHash]);
 
     // --- RECURSIVE ATTACHMENT FLATTENING ---
     if (parsed.attachments && parsed.attachments.length > 0) {

@@ -146,6 +146,7 @@ model CaseRequest {
   updated_at            DateTime      @updatedAt
   case                  ManagedCase   @relation(fields: [case_id], references: [id], onDelete: Cascade)
   processed_files       ProcessedFile[]
+  items                 Item[]
 
   @@unique([case_id, name])
   @@index([status, created_at])
@@ -409,4 +410,47 @@ model OneTrustForm {
   updated_at          DateTime @updatedAt
 
   @@map("onetrust_forms")
+}
+
+// Audit trail (docs/pipeline-refactor.md, step 0, shadow mode): one row per
+// email, file, attachment or chat message, with the rule that last decided it.
+// It only records what the pipeline already decided; no stage reads it yet.
+model Item {
+  id              String   @id
+  case_request_id String?
+  file_id         String?
+  parent_id       String?
+  kind            String
+  origin          String
+  // pending | kept | discarded | review
+  state           String   @default("pending")
+  decision_rule   String?
+  reason          String?
+  decided_by      String?
+  cascade         Boolean  @default(false)
+  created_at      DateTime @default(now())
+  updated_at      DateTime @updatedAt
+
+  case_request CaseRequest? @relation(fields: [case_request_id], references: [id], onDelete: Cascade)
+  events       ItemEvent[]
+
+  @@index([case_request_id, state])
+  @@index([file_id])
+  @@map("items")
+}
+
+// Every change of an item's state, with the rule, reason and who decided.
+model ItemEvent {
+  id            String   @id @default(uuid())
+  item_id       String
+  state         String
+  decision_rule String?
+  reason        String?
+  decided_by    String?
+  created_at    DateTime @default(now())
+
+  item Item @relation(fields: [item_id], references: [id], onDelete: Cascade)
+
+  @@index([item_id])
+  @@map("item_events")
 }

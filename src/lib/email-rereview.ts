@@ -13,6 +13,7 @@ import { awsBedrockDeps } from "./bedrock/files-ai-client";
 import type { ParsedRequest } from "./bedrock/translate";
 import { getCasePstFileIds } from "./case-utils";
 import { applyConfidentiality } from "./email-audit";
+import { syncEmailItems } from "./items";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 
@@ -193,6 +194,7 @@ export async function rereviewEmailDiscards(
         rereview_started_at: null,
       },
     });
+    await syncEmailItems([row.email_hash], { decidedBy: "haiku-5.5" });
     if (row.rereview_coordinator_id) touched.add(row.rereview_coordinator_id);
     settled++;
   };

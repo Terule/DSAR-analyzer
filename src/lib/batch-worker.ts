@@ -20,6 +20,7 @@ import {
 import { enqueueFilePhase } from "./control-plane/pipeline";
 import { applyConfidentiality } from "./email-audit";
 import { configuredFilesAiClient } from "./files-ai-provider";
+import { syncEmailItems } from "./items";
 import { startMailScreen } from "./mail-screen";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
@@ -663,6 +664,15 @@ async function pollSingleBatchStatus(
         data: { status: "completed", completed_at: new Date() },
       }),
     ]);
+
+    await syncEmailItems(
+      pendingUpdates.map((item) => item.emailHash),
+      {
+        decidedBy: batchId.startsWith(BEDROCK_BATCH_PREFIX)
+          ? "haiku-4.5"
+          : "haiku-5.5",
+      },
+    );
 
     // The decisions are durable: the run's local Bedrock files are no longer needed.
     removeBedrockArtifacts(batchId);
