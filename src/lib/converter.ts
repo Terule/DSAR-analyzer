@@ -16,6 +16,7 @@ import { type AttachmentDrop, flattenAttachments } from "./email-attachments";
 import { hasPrivilegedKeywordInDocument } from "./exclusions";
 import { listHumanReviewDeliverables } from "./files-ai-apply";
 import { archiveCompletedCase } from "./history";
+import { classifyImage, isImageFilename, readImageFacts } from "./image-rules";
 import { type AttachmentDecision, recordAttachmentItems } from "./items";
 import { attachmentKey, getMailScreenVerdicts } from "./mail-screen";
 import { prisma } from "./prisma";
@@ -980,6 +981,35 @@ export async function processPdfAttachment(
   }
 }
 
+function imageMimeType(buffer: Buffer): string {
+  if (buffer.toString("ascii", 0, 3) === "GIF") return "image/gif";
+  if (buffer[0] === 0xff && buffer[1] === 0xd8) return "image/jpeg";
+  if (buffer.toString("ascii", 8, 12) === "WEBP") return "image/webp";
+  return "image/png";
+}
+
+/**
+ * Renders one image as a one-page PDF, scaled to fit the page. Used for images
+ * that are not signatures: nobody reads them automatically yet, so they go to a
+ * person.
+ */
+export async function processImageToPdf(
+  buffer: Buffer,
+  outputPath: string,
+  docTitle: string,
+): Promise<void> {
+  const html = `<!DOCTYPE html><html><head><meta charset="utf-8" /><title>${escapeHtmlText(docTitle)}</title>
+<style>@page { size: A4; margin: 15mm; } body { margin: 0; } img { display: block; max-width: 100%; max-height: 250mm; margin: 0 auto; }</style>
+</head><body><img src="data:${imageMimeType(buffer)};base64,${buffer.toString("base64")}" /></body></html>`;
+  const tempHtmlPath = `${outputPath}.tmp.html`;
+  fs.writeFileSync(tempHtmlPath, html, "utf-8");
+  try {
+    await runWeasyPrint(tempHtmlPath, outputPath);
+  } finally {
+    fs.rmSync(tempHtmlPath, { force: true });
+  }
+}
+
 function decodeTextAttachment(content: Buffer): string {
   return content.toString("utf-8");
 }
@@ -1121,8 +1151,48 @@ export async function renderEmailAttachments(input: {
       console.warn("[Attachments] Audit trail callback failed:", error);
     }
   };
+  // Images are judged on their own: a signature or decoration is dropped with
+  // the signal that decided, anything else is rendered for a person to look at.
+  const imageAttachments: Array<{ filename: string; content: Buffer }> = [];
+  const documentAttachments: typeof input.attachments = [];
+  for (const attachment of input.attachments) {
+    const name = attachment?.filename || "attachment";
+    if (attachment?.content && isImageFilename(name)) {
+      // An image embedded in the message body is already part of the email PDF.
+      if ((attachment as { related?: boolean }).related === true) continue;
+      imageAttachments.push({
+        filename: name,
+        content: Buffer.isBuffer(attachment.content)
+          ? attachment.content
+          : Buffer.from(attachment.content),
+      });
+    } else {
+      documentAttachments.push(attachment);
+    }
+  }
+  const imagesForReview: typeof imageAttachments = [];
+  for (const image of imageAttachments) {
+    const facts = readImageFacts(image.content);
+    if (!facts) {
+      drop(image.filename, "unreadable_image", "The image could not be read.");
+      continue;
+    }
+    const verdict = classifyImage(image.filename, facts);
+    if (verdict.kind === "signature") {
+      console.log(
+        `[Attachments] Dropped ${image.filename}: signature image (${verdict.signal}).`,
+      );
+      drop(
+        image.filename,
+        "signature_image",
+        `Signature or decoration image: ${verdict.signal}.`,
+      );
+    } else {
+      imagesForReview.push(image);
+    }
+  }
   const files = await flattenAttachments(
-    input.attachments,
+    documentAttachments,
     console.log,
     (dropped: AttachmentDrop) =>
       drop(dropped.filename, dropped.rule, dropped.reason),
@@ -1231,6 +1301,32 @@ export async function renderEmailAttachments(input: {
   await renderInto(deliver, outputDir);
   if (review.length > 0 && input.reviewDir) {
     await renderInto(review, input.reviewDir);
+  }
+
+  // Images that are not signatures wait for a person (no vision model yet).
+  // Without a review folder they are held back and reported, never delivered.
+  if (imagesForReview.length > 0) {
+    if (!input.reviewDir) {
+      for (const image of imagesForReview) {
+        drop(
+          image.filename,
+          "image_review_unavailable",
+          "Image needs human review but there is no review folder.",
+        );
+      }
+    } else {
+      fs.mkdirSync(input.reviewDir, { recursive: true });
+      const pad = String(imagesForReview.length).length;
+      let n = 1;
+      for (const image of imagesForReview) {
+        const imageName = `${currentBaseName} Image ${String(n++).padStart(pad, "0")}`;
+        await processImageToPdf(
+          image.content,
+          path.join(input.reviewDir, `${imageName}.pdf`),
+          imageName,
+        );
+      }
+    }
   }
 }
 

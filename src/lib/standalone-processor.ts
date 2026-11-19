@@ -7,13 +7,18 @@ import { pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
 import MsgReader, { type FieldsData } from "@kenjiuno/msgreader";
 import { simpleParser } from "mailparser";
-import { normalizeHtmlForPdf, processTextToPdf } from "./converter";
+import {
+  normalizeHtmlForPdf,
+  processImageToPdf,
+  processTextToPdf,
+} from "./converter";
 import { stripEmailSignature } from "./email-content";
 import { discardedForKeyword } from "./email-rules";
 import {
   hasPrivilegedKeyword,
   hasPrivilegedKeywordInDocument,
 } from "./exclusions";
+import { classifyImage, IMAGE_EXTENSIONS, readImageFacts } from "./image-rules";
 import { fileDiscardRule } from "./items";
 import {
   isPasswordProtectedFile,
@@ -1680,10 +1685,49 @@ export async function runStandaloneBatch(
         }
       }
 
-      // Formats the renderer cannot handle (video, images, audio...) are
-      // never delivered, in any case type.
+      // --- HANDLER 7: Images ---
+      // A signature or decoration is dropped with the signal that decided; any
+      // other image becomes a PDF without text, which the screening step sends
+      // to a person (nothing reads images automatically yet).
+      else if (IMAGE_EXTENSIONS.has(ext)) {
+        const imageBuffer = await withTimeout(
+          fs.promises.readFile(filePath),
+          `${file} read`,
+          60_000,
+        );
+        const facts = readImageFacts(imageBuffer);
+        if (!facts) {
+          recordDiscard(
+            filePath,
+            `Discarded ${ext.toUpperCase()} ${file}: unreadable image.`,
+          );
+          skippedCount++;
+          continue;
+        }
+        const verdict = classifyImage(file, facts);
+        if (verdict.kind === "signature") {
+          recordDiscard(
+            filePath,
+            `Discarded ${ext.toUpperCase()} ${file}: signature image (${verdict.signal}).`,
+          );
+          skippedCount++;
+          continue;
+        }
+        await withTimeout(
+          processImageToPdf(imageBuffer, pdfOutputPath, seqName),
+          file,
+        );
+        success = true;
+        producedPath = pdfOutputPath;
+      }
+
+      // Formats the renderer cannot handle (video, audio...) are never
+      // delivered, in any case type.
       else {
-        console.log(`[Standalone Engine] Skipping unsupported format: ${file}`);
+        recordDiscard(
+          filePath,
+          `Discarded ${ext.toUpperCase() || "(no extension)"} ${file}: unsupported format.`,
+        );
         skippedCount++;
         continue;
       }

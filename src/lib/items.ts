@@ -185,6 +185,9 @@ export function fileDiscardRule(text: string): string {
   }
   if (/not mentioned|Missing subject name/i.test(text)) return "subject_absent";
   if (/0-byte|empty output/i.test(text)) return "empty_output";
+  if (/signature image/i.test(text)) return "signature_image";
+  if (/unreadable image/i.test(text)) return "unreadable_image";
+  if (/unsupported format/i.test(text)) return "unsupported_type";
   return "files_filter";
 }
 
