@@ -39,6 +39,15 @@ import {
   textShowsSentToPersonalAddress,
 } from "./subject-rules";
 import {
+  buildExcerpts,
+  CHAT_CONTEXT_MESSAGES,
+  excerptText,
+  messageCitesSubject,
+  messageKey,
+  parseChatMessages,
+  renderExcerptsHtml,
+} from "./teams-chat";
+import {
   prescreenThresholdMb,
   scanXlsxForMentions,
   shouldPrescreenSpreadsheet,
@@ -724,70 +733,6 @@ function isDuplicateContent(
   return false;
 }
 
-function isAuthoredBySubject(
-  plainText: string,
-  subjectTokens: string[],
-): boolean {
-  return subjectTokens.some((token) => {
-    const t = escapeRegExp(token);
-    const authoredPatterns = [
-      new RegExp(`\\b(from|sender|author|by)\\s*[:\\-]?\\s*${t}\\b`, "i"),
-      new RegExp(`\\b${t}\\b\\s*(said|posted|sent|wrote)\\b`, "i"),
-      new RegExp(`\\bmessage from\\s+${t}\\b`, "i"),
-      // Teams export line style: "Full Name <email@domain> 3/12/2025 10:06 PM"
-      new RegExp(
-        `\\b${t}\\b\\s*<[^>\\n]{1,120}@[^>\\n]{1,120}>\\s+\\d{1,2}[/\\-]\\d{1,2}[/\\-]\\d{2,4}`,
-        "i",
-      ),
-      // Broader fallback for sender signatures in chat exports
-      new RegExp(`\\b${t}\\b\\s*<[^>\\n]{1,120}@[^>\\n]{1,120}>`, "i"),
-    ];
-    return authoredPatterns.some((re) => re.test(plainText));
-  });
-}
-
-function isDirectReplyToSubject(
-  plainText: string,
-  subjectTokens: string[],
-): boolean {
-  return subjectTokens.some((token) => {
-    const t = escapeRegExp(token);
-    const replyPatterns = [
-      new RegExp(`\\brepl(?:y|ied|ying)\\s+to\\s+${t}\\b`, "i"),
-      new RegExp(`\\bin\\s+reply\\s+to\\s+${t}\\b`, "i"),
-      new RegExp(`\\brespond(?:ed|ing)?\\s+to\\s+${t}\\b`, "i"),
-      new RegExp(`\\b(replying\\s+to|replied\\s+to)\\s+${t}\\b`, "i"),
-    ];
-    return replyPatterns.some((re) => re.test(plainText));
-  });
-}
-
-function stripLikelyHeaderMentions(
-  plainText: string,
-  subjectTokens: string[],
-): string {
-  let sanitized = plainText;
-  for (const token of subjectTokens) {
-    const t = escapeRegExp(token);
-    sanitized = sanitized.replace(
-      new RegExp(
-        `\\b(from|sender|author|by|to|cc|bcc)\\s*[:\\-]?\\s*${t}\\b`,
-        "gi",
-      ),
-      " ",
-    );
-    sanitized = sanitized.replace(
-      new RegExp(`\\bmessage\\s+from\\s+${t}\\b`, "gi"),
-      " ",
-    );
-    sanitized = sanitized.replace(
-      new RegExp(`\\b${t}\\b\\s*(said|posted|sent|wrote)\\b`, "gi"),
-      " ",
-    );
-  }
-  return sanitized.replace(/\s+/g, " ").trim();
-}
-
 function toPlainTextFromHtml(rawHtml: string): string {
   const noScripts = rawHtml
     .replace(/<script[\s\S]*?<\/script>/gi, " ")
@@ -797,156 +742,6 @@ function toPlainTextFromHtml(rawHtml: string): string {
     .replace(/\s+/g, " ")
     .trim()
     .toLowerCase();
-}
-
-function toStructuredPlainTextFromHtml(rawHtml: string): string {
-  const noScripts = rawHtml
-    .replace(/<script[\s\S]*?<\/script>/gi, " ")
-    .replace(/<style[\s\S]*?<\/style>/gi, " ");
-
-  // Preserve likely line boundaries so sender headers remain detectable.
-  const withBreaks = noScripts.replace(
-    /<\s*\/?\s*(br|p|div|li|tr|h[1-6]|section|article|header|footer)\b[^>]*>/gi,
-    "\n",
-  );
-
-  return withBreaks
-    .replace(/<[^>]*>?/gm, " ")
-    .replace(/\r/g, "\n")
-    .replace(/[ \t]+/g, " ")
-    .replace(/\n{2,}/g, "\n")
-    .trim()
-    .toLowerCase();
-}
-
-function isTopMessageAuthoredBySubject(
-  rawHtml: string,
-  subjectTokens: string[],
-): boolean {
-  const structured = toStructuredPlainTextFromHtml(rawHtml);
-  const lines = structured
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .slice(0, 4);
-
-  if (lines.length === 0) return false;
-
-  const dateRe = /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/i;
-  const timeRe = /\b\d{1,2}:\d{2}\s*(am|pm)\b/i;
-
-  return lines.some((line) => {
-    const hasHeaderShape = dateRe.test(line) || timeRe.test(line);
-    if (!hasHeaderShape) return false;
-
-    return subjectTokens.some((token) => {
-      const tokenRe = new RegExp(
-        `(^|[^a-z0-9])${escapeRegExp(token)}($|[^a-z0-9])`,
-        "i",
-      );
-      return tokenRe.test(line);
-    });
-  });
-}
-
-function hasSubjectHeaderPattern(
-  text: string,
-  subjectFullName: string,
-): boolean {
-  const normalizedSubject = subjectFullName.trim().replace(/\s+/g, " ");
-  if (!normalizedSubject) return false;
-
-  const subjectRe = escapeRegExp(normalizedSubject.toLowerCase());
-
-  // Matches: "Subject Name <subject@email.com> 3/12/2025 10:06 PM"
-  const headerPattern = new RegExp(
-    `\\b${subjectRe}\\b\\s*<[^>\\n]{1,120}@[^>\\n]{1,120}>\\s+\\d{1,2}[/-]\\d{1,2}[/-]\\d{2,4}\\s+\\d{1,2}:\\d{2}(?:\\s*(?:am|pm))?\\b`,
-    "i",
-  );
-
-  return headerPattern.test(text);
-}
-
-// A sender header line looks like:
-//   "Name <email@domain> 3/12/2025 10:06 PM"  or  "Name 3/12/2025 10:06 PM"
-// The FIRST such line in the export identifies the message's own author.
-function findSenderHeaderLines(structuredText: string): string[] {
-  const emailBracketRe = /<[^>\n]{1,160}@[^>\n]{1,160}>/i;
-  const dateRe = /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/;
-  const timeRe = /\b\d{1,2}:\d{2}\s*(?:am|pm)?\b/i;
-
-  return structuredText
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
-    .filter((line) => {
-      const looksLikeHeader =
-        emailBracketRe.test(line) || (dateRe.test(line) && timeRe.test(line));
-      return looksLikeHeader;
-    });
-}
-
-// Returns true when the message's own sender (the first sender header line)
-// is the data subject. This is the authoritative "subject is the sender" check.
-function isFirstSenderSubject(
-  structuredText: string,
-  subjectTokens: string[],
-): boolean {
-  const headerLines = findSenderHeaderLines(structuredText);
-  if (headerLines.length === 0) return false;
-
-  const topSenderLine = headerLines[0];
-
-  return subjectTokens.some((token) => {
-    const tokenRe = new RegExp(
-      `(^|[^a-z0-9])${escapeRegExp(token)}($|[^a-z0-9])`,
-      "i",
-    );
-    return tokenRe.test(topSenderLine);
-  });
-}
-
-// Most robust "subject is the sender" detector for Teams exports.
-// The sender name always appears immediately BEFORE the first message's
-// timestamp (e.g. "Taylor Burgess <tburgess@...> 3/12/2025 10:06 PM").
-// Teams frequently splits name/email/timestamp across separate elements, so we
-// operate on the flattened text and inspect the window right before the first
-// timestamp instead of relying on a single line containing everything.
-function isSenderOfFirstMessageSubject(
-  flattenedPlainText: string,
-  subjectTokens: string[],
-): boolean {
-  const dateRe = /\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b/;
-  const timeRe = /\b\d{1,2}:\d{2}\s*(?:am|pm)\b/i;
-
-  const dateMatch = flattenedPlainText.match(dateRe);
-  const timeMatch = flattenedPlainText.match(timeRe);
-
-  let firstTimestampIndex = -1;
-  if (typeof dateMatch?.index === "number") {
-    firstTimestampIndex = dateMatch.index;
-  }
-  if (typeof timeMatch?.index === "number") {
-    firstTimestampIndex =
-      firstTimestampIndex === -1
-        ? timeMatch.index
-        : Math.min(firstTimestampIndex, timeMatch.index);
-  }
-
-  if (firstTimestampIndex === -1) return false;
-
-  // The sender name sits in the text just before the first timestamp.
-  const senderWindow = flattenedPlainText
-    .slice(0, firstTimestampIndex)
-    .slice(-160);
-
-  return subjectTokens.some((token) => {
-    const tokenRe = new RegExp(
-      `(^|[^a-z0-9])${escapeRegExp(token)}($|[^a-z0-9])`,
-      "i",
-    );
-    return tokenRe.test(senderWindow);
-  });
 }
 
 // Native WeasyPrint renderer to replace Puppeteer
@@ -1301,7 +1096,12 @@ export async function runStandaloneBatch(
         if (success) producedPath = pdfOutputPath;
       }
 
-      // --- HANDLER 3: Teams Chats (HTML) ---
+      // --- HANDLER 3: Teams chats and other HTML (docs/pipeline-refactor.md, 4.3) ---
+      // A Teams export is judged message by message: the messages that cite the
+      // subject are kept with two messages of context on each side, the keyword
+      // rule applies to each excerpt, and only the excerpts are rendered. HTML
+      // that is not a chat export is an ordinary document. Client cases keep the
+      // whole conversation, as before.
       else if (ext === ".html" || ext === ".htm") {
         if (!buffer) {
           skippedCount++;
@@ -1310,94 +1110,89 @@ export async function runStandaloneBatch(
         const rawHtml = buffer.toString("utf-8");
         const rawPlainText = toPlainTextFromHtml(rawHtml);
         const plainText = stripEmailSignature(rawPlainText);
-        const structuredText = toStructuredPlainTextFromHtml(rawHtml);
-        const hasExplicitSubjectHeader = hasSubjectHeaderPattern(
-          structuredText,
-          subjectCriteria.name,
-        );
-        const firstSenderIsSubject = isFirstSenderSubject(
-          structuredText,
-          subjectNameTokens,
-        );
-        const senderOfFirstMessageIsSubject = isSenderOfFirstMessageSubject(
-          plainText,
-          subjectNameTokens,
-        );
-        const topMessageFromSubject = isTopMessageAuthoredBySubject(
-          rawHtml,
-          subjectNameTokens,
-        );
-        const plainTextWithoutHeaders = stripLikelyHeaderMentions(
-          plainText,
-          subjectNameTokens,
-        );
-        const containsSubjectNameInBody = mentionsSubject(
-          plainTextWithoutHeaders,
-          subjectNameTokens,
-        );
-        const replyToSubject = isDirectReplyToSubject(
-          plainText,
-          subjectNameTokens,
-        );
-        const fromSubject =
-          firstSenderIsSubject ||
-          senderOfFirstMessageIsSubject ||
-          topMessageFromSubject ||
-          isAuthoredBySubject(plainText, subjectNameTokens);
-        // Client-facing mail frequently includes a generic confidentiality
-        // footer. A message sent directly to the data subject is still
-        // responsive, matching the PST pipeline's direct-recipient rule.
-        const sentToSubjectEmail = textShowsSentToPersonalAddress(
-          rawPlainText,
-          subjectEmail,
-        );
+        const chatMessages = bypassFilters ? [] : parseChatMessages(rawHtml);
+        let htmlToRender = rawHtml;
+        let discardNote: string | null = null;
 
-        if (
-          !bypassFilters &&
+        if (bypassFilters) {
+          if (isDuplicateContent(plainText, processedHashes)) {
+            discardNote = "duplicate";
+          }
+        } else if (chatMessages.length > 0) {
+          const excerpts = buildExcerpts(
+            chatMessages,
+            subjectNameTokens,
+            CHAT_CONTEXT_MESSAGES,
+            // A message already delivered from another export of the chat is
+            // not a candidate again.
+            (message) => processedHashes.has(messageKey(message)),
+          );
+          const citing = chatMessages.filter(
+            (message) =>
+              messageCitesSubject(message, subjectNameTokens) &&
+              !processedHashes.has(messageKey(message)),
+          ).length;
+          const kept = excerpts.filter((excerpt) => {
+            const text = excerptText(excerpt);
+            return !(
+              hasPrivilegedKeywordInDocument(text) &&
+              !textShowsSentToPersonalAddress(text, subjectEmail)
+            );
+          });
+          if (excerpts.length === 0) {
+            discardNote = chatMessages.some((message) =>
+              messageCitesSubject(message, subjectNameTokens),
+            )
+              ? "duplicate"
+              : "not-mentioned";
+          } else if (kept.length === 0) {
+            discardNote = "keyword";
+          } else {
+            for (const excerpt of kept) {
+              for (const id of excerpt.candidateIds) {
+                const message = excerpt.messages.find((m) => m.id === id);
+                if (message) processedHashes.add(messageKey(message));
+              }
+            }
+            console.log(
+              `[Standalone Filter] ${file}: kept ${kept.length} excerpt(s) around ${citing} message(s) citing the subject (of ${chatMessages.length}).`,
+            );
+            htmlToRender = renderExcerptsHtml(file, chatMessages.length, kept);
+          }
+        } else if (
           hasPrivilegedKeywordInDocument(plainText) &&
-          !sentToSubjectEmail
+          !textShowsSentToPersonalAddress(rawPlainText, subjectEmail)
         ) {
+          discardNote = "keyword";
+        } else if (!mentionsSubject(plainText, subjectNameTokens)) {
+          discardNote = "not-mentioned";
+        } else if (isDuplicateContent(plainText, processedHashes)) {
+          discardNote = "duplicate";
+        }
+
+        if (discardNote === "keyword") {
           recordDiscard(
             filePath,
             `Discarded HTML ${file}: Contains excluded keyword.`,
           );
-        } else if (!bypassFilters && hasExplicitSubjectHeader) {
+        } else if (discardNote === "not-mentioned") {
           recordDiscard(
             filePath,
-            `Discarded HTML ${file}: Matches subject header pattern (Name <email> date time).`,
+            `Discarded HTML ${file}: Data subject not mentioned.`,
           );
-        } else if (!bypassFilters && fromSubject) {
+        } else if (discardNote === "duplicate") {
           recordDiscard(
             filePath,
-            `Discarded HTML ${file}: Top message is authored by subject.`,
+            `Discarded Duplicate HTML ${file} (Content Match).`,
           );
-        } else if (
-          !bypassFilters &&
-          !containsSubjectNameInBody &&
-          !replyToSubject
-        ) {
-          recordDiscard(
-            filePath,
-            `Discarded HTML ${file}: Missing subject name in body and no direct reply signal.`,
-          );
+          duplicatesCount++;
+          skippedCount++;
+          continue;
         } else {
-          // Content-level dedup for Teams messages. Byte-identical files are
-          // already caught by the SHA256 file hash, but re-exports of the same
-          // message usually differ only in markup/whitespace/ids.
-          if (isDuplicateContent(plainText, processedHashes)) {
-            recordDiscard(
-              filePath,
-              `Discarded Duplicate HTML ${file} (Content Match).`,
-            );
-            duplicatesCount++;
-            skippedCount++;
-            continue;
-          }
-
           try {
             await withTimeout(
               renderHtmlToPdfWeasyPrint(
-                normalizeHtmlForPdf(rawHtml),
+                normalizeHtmlForPdf(htmlToRender),
                 pdfOutputPath,
                 seqName,
               ),
