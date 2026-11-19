@@ -27,6 +27,7 @@ import {
 import {
   buildSubjectIdentifiers,
   buildSubjectTokens,
+  isSentToPersonalAddress,
   mentionsSubject,
   textShowsSentToPersonalAddress,
 } from "./subject-rules";
@@ -1407,55 +1408,84 @@ export async function runStandaloneBatch(
                 " ",
               ),
         );
-        const hasExplicitSubjectHeader = hasSubjectHeaderPattern(
-          rawText,
-          subjectCriteria.name,
-        );
 
-        const fromSubject = isAuthoredBySubject(rawText, subjectNameTokens);
-        const replyToSubject = isDirectReplyToSubject(
-          rawText,
+        // The same rules as every PST email (docs/pipeline-refactor.md, 4.1):
+        // read the message itself, not its raw bytes, so encoded bodies and
+        // headers are judged on what the person would read.
+        let parsedEml: Awaited<ReturnType<typeof simpleParser>> | null = null;
+        if (ext === ".eml") {
+          try {
+            parsedEml = await withTimeout(simpleParser(buffer), file);
+          } catch {
+            parsedEml = null;
+          }
+        }
+        const addressesOf = (
+          value: Awaited<ReturnType<typeof simpleParser>>["to"],
+        ): string[] =>
+          (Array.isArray(value) ? value : value ? [value] : [])
+            .flatMap((container) => container.value ?? [])
+            .map((entry) => entry.address ?? "")
+            .filter(Boolean);
+        const mailSubject = parsedEml
+          ? parsedEml.subject || ""
+          : parsedMsg
+            ? parsedMsg.subject || ""
+            : "";
+        const mailBody = parsedEml
+          ? parsedEml.text || ""
+          : parsedMsg
+            ? parsedMsg.body || ""
+            : rawText;
+        const mailHeaders = parsedEml
+          ? [
+              parsedEml.from?.text,
+              parsedEml.to && "text" in parsedEml.to ? parsedEml.to.text : "",
+            ].join(" ")
+          : parsedMsg
+            ? [
+                parsedMsg.senderName,
+                parsedMsg.senderEmail,
+                parsedMsg.senderSmtpAddress,
+                ...(parsedMsg.recipients ?? []).map(
+                  (r) => `${r.name ?? ""} ${r.email ?? ""}`,
+                ),
+              ].join(" ")
+            : "";
+        const mailRecipients = parsedEml
+          ? [
+              ...addressesOf(parsedEml.to),
+              ...addressesOf(parsedEml.cc),
+              ...addressesOf(parsedEml.bcc),
+            ]
+          : (parsedMsg?.recipients ?? []).map(
+              (r) => r.email ?? r.smtpAddress ?? "",
+            );
+        const sentToSubjectEmail =
+          isSentToPersonalAddress(mailRecipients, subjectEmail) ||
+          textShowsSentToPersonalAddress(rawText, subjectEmail);
+        const containsSubjectName = mentionsSubject(
+          `${mailHeaders}\n${mailSubject}\n${mailBody}\n${rawText}`,
           subjectNameTokens,
-        );
-        const containsSubjectName = mentionsSubject(rawText, subjectNameTokens);
-
-        // Exception: if the email was sent directly TO the subject's personal
-        // email address, include it even when it contains a privileged keyword.
-        const sentToSubjectEmail = textShowsSentToPersonalAddress(
-          rawText,
-          subjectEmail,
         );
 
         if (
           !bypassFilters &&
-          hasPrivilegedKeyword("", rawText) &&
+          hasPrivilegedKeyword(mailSubject, mailBody) &&
           !sentToSubjectEmail
         ) {
           console.log(
             `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword.`,
           );
-        } else if (!bypassFilters && hasExplicitSubjectHeader) {
+        } else if (!bypassFilters && !containsSubjectName) {
           console.log(
-            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Matches subject header pattern (Name <email> date time).`,
-          );
-        } else if (!bypassFilters && fromSubject) {
-          console.log(
-            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Message appears authored by subject.`,
-          );
-        } else if (!bypassFilters && !containsSubjectName && !replyToSubject) {
-          console.log(
-            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Missing subject-name signal.`,
+            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Data subject not mentioned.`,
           );
         } else {
           const pdfOutput = path.join(targetDir, `${seqName}.pdf`);
 
           if (ext === ".eml") {
-            let parsed: Awaited<ReturnType<typeof simpleParser>> | null = null;
-            try {
-              parsed = await withTimeout(simpleParser(buffer), file);
-            } catch {
-              parsed = null;
-            }
+            const parsed = parsedEml;
 
             // Dedup on a clean key built from the envelope + body text so that
             // re-exports of the same email collapse even if raw bytes differ.
