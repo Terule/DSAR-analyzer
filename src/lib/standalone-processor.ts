@@ -14,6 +14,7 @@ import {
   hasPrivilegedKeyword,
   hasPrivilegedKeywordInDocument,
 } from "./exclusions";
+import { fileDiscardRule } from "./items";
 import {
   isPasswordProtectedFile,
   isPasswordProtectionError,
@@ -52,6 +53,15 @@ export interface StandaloneBatchParams {
   };
   /** Client cases retain all unique content, without relevance exclusions. */
   clientMode?: boolean;
+  /** Audit trail: called for every file the filters discard, with the rule and reason. */
+  onDecision?: (decision: FileDecision) => void;
+}
+
+export interface FileDecision {
+  filePath: string;
+  state: "discarded";
+  rule: string;
+  reason: string;
 }
 
 export interface StandaloneBatchResult {
@@ -1071,6 +1081,22 @@ export async function runStandaloneBatch(
   const bypassFilters = params.clientMode === true;
   const renderingCriteria = bypassFilters ? [] : criteria;
 
+  // Every filter discard goes through here: it keeps the log line the operators
+  // read and tells the audit trail which rule decided.
+  const recordDiscard = (filePath: string, text: string) => {
+    console.log(`[Standalone Filter] ${text}`);
+    try {
+      params.onDecision?.({
+        filePath,
+        state: "discarded",
+        rule: fileDiscardRule(text),
+        reason: text.replace(/^Discarded\s+/, ""),
+      });
+    } catch (error) {
+      console.warn("[Standalone Filter] Audit trail callback failed:", error);
+    }
+  };
+
   const standaloneStagingDir = inputDir;
   const deliverablesDirMessages = messagesDir;
   const deliverablesDirDocuments = documentsDir;
@@ -1150,8 +1176,9 @@ export async function runStandaloneBatch(
       // A file that needs a password to open is confidential: it is discarded
       // in every case type (client included), whatever its format.
       if (isPasswordProtectedFile(filePath)) {
-        console.log(
-          `[Standalone Filter] Discarded ${file}: Password-protected/encrypted file.`,
+        recordDiscard(
+          filePath,
+          `Discarded ${file}: Password-protected/encrypted file.`,
         );
         skippedCount++;
         continue;
@@ -1164,8 +1191,9 @@ export async function runStandaloneBatch(
         120_000,
       );
       if (processedHashes.has(fileHash)) {
-        console.log(
-          `[Standalone Filter] Discarded Duplicate ${file} (Hash: ${fileHash.substring(0, 8)})`,
+        recordDiscard(
+          filePath,
+          `Discarded Duplicate ${file} (Hash: ${fileHash.substring(0, 8)})`,
         );
         duplicatesCount++;
         skippedCount++; // Count as skipped for the UI
@@ -1216,8 +1244,9 @@ export async function runStandaloneBatch(
           subjectEmail,
         );
         if (outcome.passwordProtected) {
-          console.log(
-            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
+          recordDiscard(
+            filePath,
+            `Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
           );
           skippedCount++;
           continue;
@@ -1245,8 +1274,9 @@ export async function runStandaloneBatch(
         ) {
           const scan = await scanXlsxForMentions(filePath, sheetCriteria);
           if (scan.status === "not-mentioned") {
-            console.log(
-              `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: the subject is not mentioned anywhere in this large workbook (streamed scan).`,
+            recordDiscard(
+              filePath,
+              `Discarded ${ext.toUpperCase()} ${file}: the subject is not mentioned anywhere in this large workbook (streamed scan).`,
             );
             skippedCount++;
             continue;
@@ -1267,8 +1297,9 @@ export async function runStandaloneBatch(
           subjectEmail,
         );
         if (outcome.passwordProtected) {
-          console.log(
-            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
+          recordDiscard(
+            filePath,
+            `Discarded ${ext.toUpperCase()} ${file}: Password-protected/encrypted file.`,
           );
           skippedCount++;
           continue;
@@ -1334,32 +1365,37 @@ export async function runStandaloneBatch(
           hasPrivilegedKeywordInDocument(plainText) &&
           !sentToSubjectEmail
         ) {
-          console.log(
-            `[Standalone Filter] Discarded HTML ${file}: Contains excluded keyword.`,
+          recordDiscard(
+            filePath,
+            `Discarded HTML ${file}: Contains excluded keyword.`,
           );
         } else if (!bypassFilters && hasExplicitSubjectHeader) {
-          console.log(
-            `[Standalone Filter] Discarded HTML ${file}: Matches subject header pattern (Name <email> date time).`,
+          recordDiscard(
+            filePath,
+            `Discarded HTML ${file}: Matches subject header pattern (Name <email> date time).`,
           );
         } else if (!bypassFilters && fromSubject) {
-          console.log(
-            `[Standalone Filter] Discarded HTML ${file}: Top message is authored by subject.`,
+          recordDiscard(
+            filePath,
+            `Discarded HTML ${file}: Top message is authored by subject.`,
           );
         } else if (
           !bypassFilters &&
           !containsSubjectNameInBody &&
           !replyToSubject
         ) {
-          console.log(
-            `[Standalone Filter] Discarded HTML ${file}: Missing subject name in body and no direct reply signal.`,
+          recordDiscard(
+            filePath,
+            `Discarded HTML ${file}: Missing subject name in body and no direct reply signal.`,
           );
         } else {
           // Content-level dedup for Teams messages. Byte-identical files are
           // already caught by the SHA256 file hash, but re-exports of the same
           // message usually differ only in markup/whitespace/ids.
           if (isDuplicateContent(plainText, processedHashes)) {
-            console.log(
-              `[Standalone Filter] Discarded Duplicate HTML ${file} (Content Match).`,
+            recordDiscard(
+              filePath,
+              `Discarded Duplicate HTML ${file} (Content Match).`,
             );
             duplicatesCount++;
             skippedCount++;
@@ -1475,12 +1511,14 @@ export async function runStandaloneBatch(
         );
 
         if (!bypassFilters && keywordDiscard) {
-          console.log(
-            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword.`,
+          recordDiscard(
+            filePath,
+            `Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword.`,
           );
         } else if (!bypassFilters && !containsSubjectName) {
-          console.log(
-            `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: Data subject not mentioned.`,
+          recordDiscard(
+            filePath,
+            `Discarded ${ext.toUpperCase()} ${file}: Data subject not mentioned.`,
           );
         } else {
           const pdfOutput = path.join(targetDir, `${seqName}.pdf`);
@@ -1494,8 +1532,9 @@ export async function runStandaloneBatch(
               ? `${parsed.subject || ""} ${parsed.from?.text || ""} ${parsed.text || parsed.html || ""}`
               : rawText;
             if (isDuplicateContent(dedupSource, processedHashes)) {
-              console.log(
-                `[Standalone Filter] Discarded Duplicate EML ${file} (Content Match).`,
+              recordDiscard(
+                filePath,
+                `Discarded Duplicate EML ${file} (Content Match).`,
               );
               duplicatesCount++;
               skippedCount++;
@@ -1531,8 +1570,9 @@ export async function runStandaloneBatch(
             // MSG files require structured parsing: their raw bytes are an OLE
             // container, not a printable text representation.
             if (isDuplicateContent(rawText, processedHashes)) {
-              console.log(
-                `[Standalone Filter] Discarded Duplicate MSG ${file} (Content Match).`,
+              recordDiscard(
+                filePath,
+                `Discarded Duplicate MSG ${file} (Content Match).`,
               );
               duplicatesCount++;
               skippedCount++;
@@ -1563,12 +1603,14 @@ export async function runStandaloneBatch(
         const rawText = buffer.toString("utf-8");
         const normalizedText = rawText.toLowerCase();
         if (!bypassFilters && !mentionsSubject(rawText, criteria)) {
-          console.log(
-            `[Standalone Filter] Discarded TXT ${file}: Data subject not mentioned.`,
+          recordDiscard(
+            filePath,
+            `Discarded TXT ${file}: Data subject not mentioned.`,
           );
         } else if (isDuplicateContent(normalizedText, processedHashes)) {
-          console.log(
-            `[Standalone Filter] Discarded Duplicate TXT ${file} (Content Match).`,
+          recordDiscard(
+            filePath,
+            `Discarded Duplicate TXT ${file} (Content Match).`,
           );
           duplicatesCount++;
           skippedCount++;
@@ -1595,12 +1637,14 @@ export async function runStandaloneBatch(
           ).toLowerCase();
 
           if (!bypassFilters && hasPrivilegedKeywordInDocument(rawText)) {
-            console.log(
-              `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
+            recordDiscard(
+              filePath,
+              `Discarded PDF ${file}: Contains excluded keyword.`,
             );
           } else if (!bypassFilters && !mentionsSubject(rawText, criteria)) {
-            console.log(
-              `[Standalone Filter] Discarded PDF ${file}: Data subject not mentioned.`,
+            recordDiscard(
+              filePath,
+              `Discarded PDF ${file}: Data subject not mentioned.`,
             );
           } else {
             // Additional semantic hash check for content-level duplicate PDFs.
@@ -1609,8 +1653,9 @@ export async function runStandaloneBatch(
               .update(rawText)
               .digest("hex");
             if (processedHashes.has(textHash)) {
-              console.log(
-                `[Standalone Filter] Discarded Duplicate PDF ${file} (Content Match).`,
+              recordDiscard(
+                filePath,
+                `Discarded Duplicate PDF ${file} (Content Match).`,
               );
               duplicatesCount++;
               skippedCount++;
@@ -1624,8 +1669,9 @@ export async function runStandaloneBatch(
           }
         } catch (pdfError) {
           if (isPasswordProtectionError(pdfError)) {
-            console.log(
-              `[Standalone Filter] Discarded PDF ${file}: Password-protected/encrypted file.`,
+            recordDiscard(
+              filePath,
+              `Discarded PDF ${file}: Password-protected/encrypted file.`,
             );
             skippedCount++;
             continue;
@@ -1692,8 +1738,9 @@ export async function runStandaloneBatch(
         if (isEmpty) {
           removeIfEmpty(producedPath);
           success = false;
-          console.warn(
-            `[Standalone Filter] Discarded ${file}: produced a 0-byte/empty output.`,
+          recordDiscard(
+            filePath,
+            `Discarded ${file}: produced a 0-byte/empty output.`,
           );
         }
       }
@@ -1704,8 +1751,9 @@ export async function runStandaloneBatch(
       if (success && semanticContentKey) {
         if (processedHashes.has(semanticContentKey)) {
           fs.rmSync(producedPath || pdfOutputPath, { force: true });
-          console.log(
-            `[Standalone Filter] Discarded Duplicate ${file} (matching Office content).`,
+          recordDiscard(
+            filePath,
+            `Discarded Duplicate ${file} (matching Office content).`,
           );
           duplicatesCount++;
           skippedCount++;

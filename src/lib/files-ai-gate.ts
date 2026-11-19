@@ -22,6 +22,7 @@ import {
 } from "./files-ai-apply";
 import type { FilesAiCriteria } from "./files-ai-prompt";
 import { configuredFilesAiClient } from "./files-ai-provider";
+import { recordFileItems } from "./items";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
@@ -156,6 +157,32 @@ export async function applyFilesAiVerdicts(input: {
   const requestScope = owner?.case_request_id
     ? { case_request_id: owner.case_request_id, kind: "files" }
     : undefined;
+
+  // Audit trail (shadow): every settled verdict, keyed by its delivered path.
+  const settled = await prisma.filesAiVerdict.findMany({
+    where: { file_id: input.fileId, verdict: { not: null } },
+    select: {
+      rel_path: true,
+      verdict: true,
+      reason: true,
+      reviewed_by_model: true,
+    },
+  });
+  await recordFileItems(
+    input.fileId,
+    settled.map((v) => ({
+      relPath: v.rel_path,
+      state:
+        v.verdict === "keep"
+          ? "kept"
+          : v.verdict === "discard"
+            ? "discarded"
+            : "review",
+      rule: "ai_file",
+      reason: v.reason ?? null,
+      decidedBy: v.reviewed_by_model ?? "ai",
+    })),
+  );
 
   // Files the AI could not settle are held back from numbering and delivered
   // in their own folder. They stay delivered, so the counters do not move.

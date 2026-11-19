@@ -15,6 +15,7 @@ import { extractUniqueEmails } from "@/lib/exporter";
 import { listHumanReviewDeliverables } from "@/lib/files-ai-apply";
 import { applyFilesAiVerdicts, runFilesAiPrepare } from "@/lib/files-ai-gate";
 import { archiveCompletedCase } from "@/lib/history";
+import { fileDecisionToItem, recordFileItems } from "@/lib/items";
 import { startMailScreen } from "@/lib/mail-screen";
 import { prisma } from "@/lib/prisma";
 import { getPstArtifactPaths } from "@/lib/pst-artifacts";
@@ -23,6 +24,7 @@ import { queueSharePointArtifacts } from "@/lib/sharepoint-artifact-outbox";
 import { startSharePointArtifactWorker } from "@/lib/sharepoint-artifact-queue";
 import {
   copyUnconvertedStandaloneFiles,
+  type FileDecision,
   finalizeStandaloneDeliverables,
   listFinalizedStandaloneDeliverables,
   listStandaloneInputFiles,
@@ -632,10 +634,12 @@ export async function runPhaseJob(
     typeof row.files_started_at === "bigint"
       ? Number(row.files_started_at)
       : Date.now();
+  const auditDecisions: FileDecision[] = [];
   const result = await runStandaloneBatch(
     {
       inputDir: row.filepath,
       filePaths: batchPaths,
+      onDecision: (decision) => auditDecisions.push(decision),
       messagesDir: path.join(outputBase, requestPath, "Messages"),
       documentsDir: path.join(outputBase, requestPath, "Documents"),
       subjectCriteria: {
@@ -659,6 +663,12 @@ export async function runPhaseJob(
     },
   );
   if (!result.success) throw new Error(result.error || "Files phase failed.");
+  await recordFileItems(
+    fileId,
+    auditDecisions.map((decision) =>
+      fileDecisionToItem(row.filepath ?? "", decision),
+    ),
+  );
   const totals = await recordFilesBatchResult({
     jobId: job.id,
     fileId,

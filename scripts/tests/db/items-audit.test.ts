@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { after, before, describe, it } from "node:test";
-import { syncEmailItems } from "../../../src/lib/items";
+import {
+  fileItemId,
+  recordFileItems,
+  syncEmailItems,
+} from "../../../src/lib/items";
 import { prisma } from "../../../src/lib/prisma";
 
 const tag = crypto.randomUUID().slice(0, 8);
@@ -100,6 +104,53 @@ describe("items audit trail (shadow mode)", () => {
     });
     assert.equal(child?.origin, "attachment");
     assert.equal(child?.parent_id, hash("parent"));
+  });
+
+  it("records file decisions once and follows a change", async () => {
+    const relPath = "Docs/a.docx";
+    await recordFileItems(fileId, [
+      {
+        relPath,
+        state: "discarded",
+        rule: "keyword",
+        reason: "Contains excluded keyword.",
+        decidedBy: "rule",
+      },
+    ]);
+    await recordFileItems(fileId, [
+      {
+        relPath,
+        state: "discarded",
+        rule: "keyword",
+        reason: "Contains excluded keyword.",
+        decidedBy: "rule",
+      },
+    ]);
+    await recordFileItems(fileId, [
+      {
+        relPath,
+        state: "kept",
+        rule: "ai_file",
+        reason: "About the subject",
+        decidedBy: "haiku-5.5",
+      },
+    ]);
+    const id = fileItemId(fileId, relPath);
+    const trail = await prisma.itemEvent.findMany({
+      where: { item_id: id },
+      orderBy: { created_at: "asc" },
+    });
+    assert.deepEqual(
+      trail.map((e) => [e.state, e.decision_rule]),
+      [
+        ["discarded", "keyword"],
+        ["kept", "ai_file"],
+      ],
+    );
+    assert.equal(
+      (await prisma.item.findUnique({ where: { id } }))?.kind,
+      "file",
+    );
   });
 
   it("never throws, even for hashes that do not exist", async () => {

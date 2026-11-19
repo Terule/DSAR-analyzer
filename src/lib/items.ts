@@ -7,6 +7,8 @@
  * existing stages already decided, so a failure here must never change a decision
  * or stop a stage.
  */
+import crypto from "node:crypto";
+import path from "node:path";
 import { prisma } from "./prisma";
 
 export type ItemState = "pending" | "kept" | "discarded" | "review";
@@ -171,4 +173,124 @@ export async function syncEmailItems(
   } catch (error) {
     console.warn("[Items] Could not record the audit trail:", error);
   }
+}
+
+/** Maps the text the Files engine logs for a discard to the rule that decided it. */
+export function fileDiscardRule(text: string): string {
+  if (/Duplicate/i.test(text)) return "dup";
+  if (/Password-protected|encrypted/i.test(text)) return "password";
+  if (/excluded keyword/i.test(text)) return "keyword";
+  if (/subject header pattern|authored by subject/i.test(text)) {
+    return "chat_legacy";
+  }
+  if (/not mentioned|Missing subject name/i.test(text)) return "subject_absent";
+  if (/0-byte|empty output/i.test(text)) return "empty_output";
+  return "files_filter";
+}
+
+/** Stable id of a file in a Files folder: the processed-files row and the path inside it. */
+export function fileItemId(fileId: string, relPath: string): string {
+  return crypto
+    .createHash("sha256")
+    .update(`file:${fileId}:${relPath}`)
+    .digest("hex");
+}
+
+export interface FileItemDecision {
+  /** Path relative to the Files folder. */
+  relPath: string;
+  state: ItemState;
+  rule: string;
+  reason: string | null;
+  decidedBy: string;
+}
+
+/**
+ * Records decisions about files of a Files folder (a `processed_files` row).
+ * Writes an event only when something changed. Never throws.
+ */
+export async function recordFileItems(
+  fileId: string,
+  decisions: FileItemDecision[],
+): Promise<void> {
+  if (decisions.length === 0) return;
+  try {
+    const row = await prisma.processedFile.findUnique({
+      where: { id: fileId },
+      select: { case_request_id: true },
+    });
+    for (const decision of decisions) {
+      const id = fileItemId(fileId, decision.relPath);
+      const previous = await prisma.item.findUnique({
+        where: { id },
+        select: {
+          state: true,
+          decision_rule: true,
+          reason: true,
+          decided_by: true,
+        },
+      });
+      if (
+        previous &&
+        previous.state === decision.state &&
+        previous.decision_rule === decision.rule &&
+        previous.reason === decision.reason &&
+        previous.decided_by === decision.decidedBy
+      ) {
+        continue;
+      }
+      await prisma.$transaction([
+        prisma.item.upsert({
+          where: { id },
+          create: {
+            id,
+            case_request_id: row?.case_request_id ?? null,
+            file_id: fileId,
+            kind: "file",
+            origin: "files_folder",
+            state: decision.state,
+            decision_rule: decision.rule,
+            reason: decision.reason,
+            decided_by: decision.decidedBy,
+          },
+          update: {
+            state: decision.state,
+            decision_rule: decision.rule,
+            reason: decision.reason,
+            decided_by: decision.decidedBy,
+          },
+        }),
+        prisma.itemEvent.create({
+          data: {
+            item_id: id,
+            state: decision.state,
+            decision_rule: decision.rule,
+            reason: decision.reason,
+            decided_by: decision.decidedBy,
+          },
+        }),
+      ]);
+    }
+  } catch (error) {
+    console.warn("[Items] Could not record the audit trail:", error);
+  }
+}
+
+/** Convenience for the Files engine: its decisions carry absolute paths. */
+export function fileDecisionToItem(
+  inputDir: string,
+  decision: {
+    filePath: string;
+    state: "discarded";
+    rule: string;
+    reason: string;
+  },
+): FileItemDecision {
+  return {
+    relPath: path.relative(inputDir, decision.filePath),
+    state: decision.state,
+    rule: decision.rule,
+    reason: decision.reason,
+    decidedBy: "rule",
+  };
 }
