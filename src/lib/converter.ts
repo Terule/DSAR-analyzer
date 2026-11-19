@@ -13,7 +13,7 @@ import mammoth from "mammoth";
 import * as xlsx from "xlsx";
 import { getCasePstFileIds } from "./case-utils";
 import { flattenAttachments } from "./email-attachments";
-import { PRIVILEGED_KEYWORDS_RE } from "./exclusions";
+import { hasPrivilegedKeywordInDocument } from "./exclusions";
 import { listHumanReviewDeliverables } from "./files-ai-apply";
 import { archiveCompletedCase } from "./history";
 import { attachmentKey, getMailScreenVerdicts } from "./mail-screen";
@@ -667,7 +667,7 @@ export async function processDocxToPdf(
 
     if (
       !bypassKeywordFilter &&
-      PRIVILEGED_KEYWORDS_RE.test(rawText) &&
+      hasPrivilegedKeywordInDocument(rawText) &&
       !textShowsSentToPersonalAddress(sourceText, personalEmail)
     )
       return false;
@@ -786,7 +786,7 @@ export async function processExcelToPdf(
     const workbookText = exclusionText.join(" ");
     if (
       !bypassKeywordFilter &&
-      PRIVILEGED_KEYWORDS_RE.test(workbookText) &&
+      hasPrivilegedKeywordInDocument(workbookText) &&
       !textShowsSentToPersonalAddress(workbookText, personalEmail)
     )
       return false;
@@ -956,7 +956,7 @@ export async function processPdfAttachment(
     const rawText = (await extractPdfText(buffer)).toLowerCase();
     if (
       !bypassKeywordFilter &&
-      PRIVILEGED_KEYWORDS_RE.test(rawText) &&
+      hasPrivilegedKeywordInDocument(rawText) &&
       !textShowsSentToPersonalAddress(rawText, personalEmail)
     )
       return false;

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { hasPrivilegedKeyword } from "../../../src/lib/exclusions";
+import test, { describe, it } from "node:test";
+import {
+  hasPrivilegedKeyword,
+  hasPrivilegedKeywordInDocument,
+} from "../../../src/lib/exclusions";
 
 describe("hasPrivilegedKeyword (one rule for every email)", () => {
   it("matches the keyword in the subject", () => {
@@ -37,4 +40,28 @@ describe("hasPrivilegedKeyword (one rule for every email)", () => {
       hasPrivilegedKeyword("Subject line", "CRO meeting"),
     );
   });
+});
+
+test("documents: the confidentiality notice is ignored, the body is not", () => {
+  const notice =
+    "This email and any attachments are confidential and intended only for the recipient.";
+  assert.equal(
+    hasPrivilegedKeywordInDocument(`Meeting notes about Maria\n\n${notice}`),
+    false,
+  );
+  assert.equal(
+    hasPrivilegedKeywordInDocument(`Privileged legal advice\n\n${notice}`),
+    true,
+  );
+  assert.equal(
+    hasPrivilegedKeywordInDocument("CONFIDENTIAL - board paper"),
+    true,
+  );
+});
+
+test("documents: a sign-off in the middle does not hide the rest", () => {
+  const text = "Intro\nThanks,\nBob\n\nLater section marked Confidential";
+  assert.equal(hasPrivilegedKeywordInDocument(text), true);
+  // The email rule would cut at "Thanks," and miss it: that is why documents differ.
+  assert.equal(hasPrivilegedKeyword("", text), false);
 });

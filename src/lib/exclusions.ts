@@ -1,4 +1,7 @@
-import { stripEmailSignature } from "./email-content";
+import {
+  stripConfidentialityNotice,
+  stripEmailSignature,
+} from "./email-content";
 
 /**
  * Privileged / confidential keywords that force an immediate discard.
@@ -36,4 +39,13 @@ export function hasPrivilegedKeyword(subject: string, body: string): boolean {
   return PRIVILEGED_KEYWORDS_RE.test(
     stripEmailSignature(`${subject}\n${body}`),
   );
+}
+
+/**
+ * The same keyword rule for every file (docx, pdf, spreadsheet, chat export,
+ * text) and attachment: the standard confidentiality notice is ignored, the
+ * rest of the text counts.
+ */
+export function hasPrivilegedKeywordInDocument(text: string): boolean {
+  return PRIVILEGED_KEYWORDS_RE.test(stripConfidentialityNotice(text));
 }

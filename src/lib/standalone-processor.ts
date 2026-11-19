@@ -9,7 +9,10 @@ import MsgReader, { type FieldsData } from "@kenjiuno/msgreader";
 import { simpleParser } from "mailparser";
 import { normalizeHtmlForPdf } from "./converter";
 import { stripEmailSignature } from "./email-content";
-import { hasPrivilegedKeyword, PRIVILEGED_KEYWORDS_RE } from "./exclusions";
+import {
+  hasPrivilegedKeyword,
+  hasPrivilegedKeywordInDocument,
+} from "./exclusions";
 import {
   isPasswordProtectedFile,
   isPasswordProtectionError,
@@ -1063,7 +1066,6 @@ export async function runStandaloneBatch(
 
   // Shared privileged/confidential keyword filter (see src/lib/exclusions.ts)
   // so the Files pipeline stays in lockstep with the PST pipeline.
-  const exclusionsRegex = PRIVILEGED_KEYWORDS_RE;
   const bypassFilters = params.clientMode === true;
   const renderingCriteria = bypassFilters ? [] : criteria;
 
@@ -1327,7 +1329,7 @@ export async function runStandaloneBatch(
 
         if (
           !bypassFilters &&
-          exclusionsRegex.test(plainText) &&
+          hasPrivilegedKeywordInDocument(plainText) &&
           !sentToSubjectEmail
         ) {
           console.log(
@@ -1561,7 +1563,7 @@ export async function runStandaloneBatch(
             await extractPdfTextInWorker(filePath, file, 45_000)
           ).toLowerCase();
 
-          if (!bypassFilters && exclusionsRegex.test(rawText)) {
+          if (!bypassFilters && hasPrivilegedKeywordInDocument(rawText)) {
             console.log(
               `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
             );
