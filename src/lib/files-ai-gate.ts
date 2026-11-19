@@ -22,7 +22,7 @@ import {
 } from "./files-ai-apply";
 import type { FilesAiCriteria } from "./files-ai-prompt";
 import { configuredFilesAiClient } from "./files-ai-provider";
-import { recordFileItems } from "./items";
+import { exportAuditTrail, recordFileItems } from "./items";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
@@ -183,6 +183,8 @@ export async function applyFilesAiVerdicts(input: {
       decidedBy: v.reviewed_by_model ?? "ai",
     })),
   );
+
+  await exportAuditTrail(owner?.case_request_id, input.requestOutputDir);
 
   // Files the AI could not settle are held back from numbering and delivered
   // in their own folder. They stay delivered, so the counters do not move.

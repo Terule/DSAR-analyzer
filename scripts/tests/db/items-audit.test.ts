@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import crypto from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import {
+  exportAuditTrail,
   fileItemId,
   recordAttachmentItems,
   recordFileItems,
@@ -172,6 +176,86 @@ describe("items audit trail (shadow mode)", () => {
     assert.equal(rows[0].origin, "attachment");
     assert.equal(rows[0].decision_rule, "unsupported_type");
     assert.equal(rows[0].case_request_id, null);
+  });
+
+  it("exports discarded and review items as a CSV with readable labels", async () => {
+    const requestId = `t-items-req-${tag}`;
+    const caseId = `t-items-case-${tag}`;
+    await prisma.managedCase.create({
+      data: {
+        id: caseId,
+        name: `ZZ-${tag}`,
+        subject_name: "Maria Souza",
+        subject_email: "maria.souza@corp.com",
+        case_type: "employee",
+      },
+    });
+    await prisma.caseRequest.create({
+      data: {
+        id: requestId,
+        case_id: caseId,
+        name: "R1",
+        scope: "all",
+        staging_path: "/tmp/s",
+        deliverable_path: "/tmp/d",
+      },
+    });
+    const owner = `t-items-owner-${tag}`;
+    await prisma.processedFile.create({
+      data: {
+        id: owner,
+        filepath: `/tmp/${owner}.pst`,
+        kind: "files",
+        case_request_id: requestId,
+      },
+    });
+    await recordFileItems(owner, [
+      {
+        relPath: "Docs/a, b.docx",
+        state: "discarded",
+        rule: "keyword",
+        reason: 'Contains "excluded" keyword.',
+        decidedBy: "rule",
+      },
+      {
+        relPath: "Docs/ok.docx",
+        state: "review",
+        rule: "ai_file",
+        reason: "Needs a person",
+        decidedBy: "haiku-4.5",
+      },
+    ]);
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), "audit-csv-"));
+    const file = await exportAuditTrail(requestId, out);
+    assert.equal(file, path.join(out, "Discarded", "audit-trail.csv"));
+    const lines = fs
+      .readFileSync(file as string, "utf8")
+      .trim()
+      .split("\n");
+    assert.equal(
+      lines[0],
+      "item,kind,origin,parent,state,rule,reason,decided_by,decided_at",
+    );
+    assert.equal(lines.length, 3);
+    assert.ok(
+      lines.some((l) =>
+        l.startsWith(
+          '"Docs/a, b.docx",file,files_folder,,discarded,keyword,"Contains ""excluded"" keyword.",rule,',
+        ),
+      ),
+    );
+    assert.ok(
+      lines.some((l) =>
+        l.startsWith(
+          "Docs/ok.docx,file,files_folder,,review,ai_file,Needs a person,haiku-4.5,",
+        ),
+      ),
+    );
+
+    await prisma.item.deleteMany({ where: { case_request_id: requestId } });
+    await prisma.processedFile.deleteMany({ where: { id: owner } });
+    await prisma.caseRequest.deleteMany({ where: { id: requestId } });
+    await prisma.managedCase.deleteMany({ where: { id: caseId } });
   });
 
   it("never throws, even for hashes that do not exist", async () => {

@@ -17,7 +17,11 @@ import { hasPrivilegedKeywordInDocument } from "./exclusions";
 import { listHumanReviewDeliverables } from "./files-ai-apply";
 import { archiveCompletedCase } from "./history";
 import { classifyImage, isImageFilename, readImageFacts } from "./image-rules";
-import { type AttachmentDecision, recordAttachmentItems } from "./items";
+import {
+  type AttachmentDecision,
+  exportAuditTrail,
+  recordAttachmentItems,
+} from "./items";
 import { attachmentKey, getMailScreenVerdicts } from "./mail-screen";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
@@ -1860,6 +1864,7 @@ export async function convertToPdfBatch(
         );
       }
     }
+    await exportAuditTrail(row.case_request_id, targetFolder);
     await archiveCompletedCase(fileId);
     // Once Render succeeds, the final PDFs no longer depend on raw EMLs or
     // batch payloads. Remove the hidden work tree to reclaim disk space.

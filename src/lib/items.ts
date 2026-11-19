@@ -8,6 +8,7 @@
  * or stop a stage.
  */
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { prisma } from "./prisma";
 
@@ -251,6 +252,7 @@ export async function recordFileItems(
             file_id: fileId,
             kind: "file",
             origin: "files_folder",
+            label: decision.relPath,
             state: decision.state,
             decision_rule: decision.rule,
             reason: decision.reason,
@@ -360,6 +362,7 @@ export async function recordAttachmentItems(
             parent_id: parentHash,
             kind: "file",
             origin: "attachment",
+            label: decision.filename,
             ...data,
           },
           update: data,
@@ -371,5 +374,55 @@ export async function recordAttachmentItems(
     }
   } catch (error) {
     console.warn("[Items] Could not record the audit trail:", error);
+  }
+}
+
+function csvCell(value: string): string {
+  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/**
+ * Writes `Discarded/audit-trail.csv` for a request that discarded something:
+ * every item that was discarded, kept or sent to a person, with the rule and who decided. Never throws:
+ * the trail is a record, not a stage.
+ */
+export async function exportAuditTrail(
+  caseRequestId: string | null | undefined,
+  requestOutputDir: string,
+): Promise<string | null> {
+  if (!caseRequestId) return null;
+  try {
+    const items = await prisma.item.findMany({
+      where: { case_request_id: caseRequestId, state: { not: "pending" } },
+      orderBy: [{ kind: "asc" }, { origin: "asc" }, { id: "asc" }],
+    });
+    // The Discarded folder exists only for requests that discarded something.
+    if (!items.some((item) => item.state === "discarded")) return null;
+    const directory = path.join(requestOutputDir, "Discarded");
+    fs.mkdirSync(directory, { recursive: true });
+    const file = path.join(directory, "audit-trail.csv");
+    const lines = [
+      "item,kind,origin,parent,state,rule,reason,decided_by,decided_at",
+      ...items.map((item) =>
+        [
+          item.label ?? item.id.slice(0, 16),
+          item.kind,
+          item.origin,
+          item.parent_id ? item.parent_id.slice(0, 16) : "",
+          item.state,
+          item.decision_rule ?? "",
+          item.reason ?? "",
+          item.decided_by ?? "",
+          item.updated_at.toISOString(),
+        ]
+          .map((cell) => csvCell(String(cell)))
+          .join(","),
+      ),
+    ];
+    fs.writeFileSync(file, `${lines.join("\n")}\n`);
+    return file;
+  } catch (error) {
+    console.warn("[Items] Could not export the audit trail:", error);
+    return null;
   }
 }
