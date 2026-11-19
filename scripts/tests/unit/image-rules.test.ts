@@ -198,7 +198,9 @@ describe("images in a Files folder", () => {
         messagesDir: path.join(out, "Messages"),
         documentsDir: path.join(out, "Documents"),
         subjectCriteria: { name: "Maria Souza", email: "maria.souza@corp.com" },
-        onDecision: (d) => decisions.push(d),
+        onDecision: (d) => {
+          if (d.state === "discarded") decisions.push(d);
+        },
       });
     } finally {
       console.log = original;

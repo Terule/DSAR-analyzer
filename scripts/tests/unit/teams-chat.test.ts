@@ -162,7 +162,9 @@ describe("the Files engine on Teams exports", () => {
           email: "maria.souza@corp.com",
           personalEmail: "msouza@gmail.com",
         },
-        onDecision: (d) => decisions.push(d),
+        onDecision: (d) => {
+          if (d.state === "discarded") decisions.push(d);
+        },
       });
     } finally {
       console.log = original;

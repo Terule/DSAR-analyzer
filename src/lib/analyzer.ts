@@ -7,7 +7,7 @@ import MsgReader from "@kenjiuno/msgreader";
 import { type ParsedMail, simpleParser } from "mailparser";
 import { computeEmailHash, dedupScope, isDuplicateEmail } from "./email-dedup";
 import { collectMailAddresses, discardedForKeyword } from "./email-rules";
-import { syncEmailItems } from "./items";
+import { createDuplicateRecorder, syncEmailItems } from "./items";
 import { keepTail } from "./job-log";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
@@ -134,6 +134,7 @@ export async function analyzePstDuplicates(
     fs.rmSync(tempDir, { recursive: true, force: true });
   fs.mkdirSync(tempDir, { recursive: true });
 
+  const duplicates = createDuplicateRecorder(fileId, caseRequestId);
   const metrics: AnalysisMetrics = {
     uniqueCount: 0,
     duplicateCount: 0,
@@ -388,6 +389,7 @@ export async function analyzePstDuplicates(
 
     if (isDuplicate === 1) {
       metrics.duplicateCount++;
+      await duplicates.add(emailHash);
       fs.unlinkSync(filePath); // Destroy the duplicate file instantly to free disk space!
       return null; // Skip attachment parsing for duplicates
     }
@@ -512,6 +514,7 @@ export async function analyzePstDuplicates(
   // ==========================================
   // PHASE 3: Cleanup & Finalize
   // ==========================================
+  await duplicates.flush();
   if (fs.existsSync(tempDir)) {
     fs.rmSync(tempDir, { recursive: true, force: true });
   }

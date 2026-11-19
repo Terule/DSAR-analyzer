@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import {
+  createDuplicateRecorder,
   exportAuditTrail,
   fileItemId,
   recordAttachmentItems,
@@ -256,6 +257,67 @@ describe("items audit trail (shadow mode)", () => {
     await prisma.processedFile.deleteMany({ where: { id: owner } });
     await prisma.caseRequest.deleteMany({ where: { id: requestId } });
     await prisma.managedCase.deleteMany({ where: { id: caseId } });
+  });
+
+  it("records email duplicates in bulk under the email they duplicate", async () => {
+    await email("orig");
+    const recorder = createDuplicateRecorder(fileId, null, 2);
+    await recorder.add(hash("orig"));
+    await recorder.add(hash("orig"));
+    await recorder.add(hash("orig"));
+    await recorder.flush();
+    // The same run again (a reprocess) writes nothing new.
+    const again = createDuplicateRecorder(fileId, null, 2);
+    await again.add(hash("orig"));
+    await again.add(hash("orig"));
+    await again.add(hash("orig"));
+    await again.flush();
+    const rows = await prisma.item.findMany({
+      where: { parent_id: hash("orig"), decision_rule: "dup" },
+    });
+    assert.equal(rows.length, 3);
+    assert.equal(
+      await prisma.itemEvent.count({
+        where: { item_id: { in: rows.map((row) => row.id) } },
+      }),
+      3,
+    );
+    assert.equal(rows[0].state, "discarded");
+  });
+
+  it("a kept file and its later AI discard are one item with two events", async () => {
+    const delivered = "Documents/Document abc.pdf";
+    await recordFileItems(fileId, [
+      {
+        relPath: delivered,
+        label: "Items/report.docx",
+        state: "kept",
+        rule: "files_filter",
+        reason: "Passed the file filters.",
+        decidedBy: "rule",
+      },
+    ]);
+    await recordFileItems(fileId, [
+      {
+        relPath: delivered,
+        state: "discarded",
+        rule: "ai_file",
+        reason: "Confidential",
+        decidedBy: "haiku-4.5",
+      },
+    ]);
+    const id = fileItemId(fileId, delivered);
+    const item = await prisma.item.findUnique({ where: { id } });
+    assert.equal(item?.label, "Items/report.docx", "the label survives");
+    assert.equal(item?.state, "discarded");
+    const trail = await prisma.itemEvent.findMany({
+      where: { item_id: id },
+      orderBy: { created_at: "asc" },
+    });
+    assert.deepEqual(
+      trail.map((e) => e.state),
+      ["kept", "discarded"],
+    );
   });
 
   it("never throws, even for hashes that do not exist", async () => {

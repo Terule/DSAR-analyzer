@@ -73,9 +73,11 @@ export interface StandaloneBatchParams {
 
 export interface FileDecision {
   filePath: string;
-  state: "discarded";
+  state: "discarded" | "kept";
   rule: string;
   reason: string;
+  /** For a kept file: where it was delivered, as `Documents/<name>` or `Messages/<name>`. */
+  deliveredRel?: string;
 }
 
 export interface StandaloneBatchResult {
@@ -1600,6 +1602,22 @@ export async function runStandaloneBatch(
       if (success) {
         processedHashes.add(fileHash); // Lock this hash so future duplicates are dropped
         processedCount++;
+        if (producedPath) {
+          try {
+            params.onDecision?.({
+              filePath,
+              state: "kept",
+              rule: "files_filter",
+              reason: "Passed the file filters.",
+              deliveredRel: `${path.basename(path.dirname(producedPath))}/${path.basename(producedPath)}`,
+            });
+          } catch (error) {
+            console.warn(
+              "[Standalone Filter] Audit trail callback failed:",
+              error,
+            );
+          }
+        }
         console.log(`[Standalone Engine] Exported: ${seqName}.pdf`);
         onProgress?.({
           processed: processedCount,

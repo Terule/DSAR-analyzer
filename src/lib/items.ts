@@ -201,8 +201,14 @@ export function fileItemId(fileId: string, relPath: string): string {
 }
 
 export interface FileItemDecision {
-  /** Path relative to the Files folder. */
+  /**
+   * Identity of the item: the delivered path (`Documents/<name>`) when the file
+   * was delivered, so the AI verdict on that file lands on the same item, or the
+   * path inside the Files folder when it never was.
+   */
   relPath: string;
+  /** What a person recognises (the path inside the Files folder); defaults to `relPath`. */
+  label?: string;
   state: ItemState;
   rule: string;
   reason: string | null;
@@ -252,13 +258,14 @@ export async function recordFileItems(
             file_id: fileId,
             kind: "file",
             origin: "files_folder",
-            label: decision.relPath,
+            label: decision.label ?? decision.relPath,
             state: decision.state,
             decision_rule: decision.rule,
             reason: decision.reason,
             decided_by: decision.decidedBy,
           },
           update: {
+            ...(decision.label ? { label: decision.label } : {}),
             state: decision.state,
             decision_rule: decision.rule,
             reason: decision.reason,
@@ -286,13 +293,16 @@ export function fileDecisionToItem(
   inputDir: string,
   decision: {
     filePath: string;
-    state: "discarded";
+    state: "discarded" | "kept";
     rule: string;
     reason: string;
+    deliveredRel?: string;
   },
 ): FileItemDecision {
+  const inputRel = path.relative(inputDir, decision.filePath);
   return {
-    relPath: path.relative(inputDir, decision.filePath),
+    relPath: decision.deliveredRel ?? inputRel,
+    label: inputRel,
     state: decision.state,
     rule: decision.rule,
     reason: decision.reason,
@@ -383,7 +393,8 @@ function csvCell(value: string): string {
 
 /**
  * Writes `Discarded/audit-trail.csv` for a request that discarded something:
- * every item that was discarded, kept or sent to a person, with the rule and who decided. Never throws:
+ * every item that was discarded or sent to a person (kept items stay in the
+ * database only, so the file reads as a list of exceptions), with the rule and who decided. Never throws:
  * the trail is a record, not a stage.
  */
 export async function exportAuditTrail(
@@ -393,7 +404,10 @@ export async function exportAuditTrail(
   if (!caseRequestId) return null;
   try {
     const items = await prisma.item.findMany({
-      where: { case_request_id: caseRequestId, state: { not: "pending" } },
+      where: {
+        case_request_id: caseRequestId,
+        state: { in: ["discarded", "review"] },
+      },
       orderBy: [{ kind: "asc" }, { origin: "asc" }, { id: "asc" }],
     });
     // The Discarded folder exists only for requests that discarded something.
@@ -425,4 +439,81 @@ export async function exportAuditTrail(
     console.warn("[Items] Could not export the audit trail:", error);
     return null;
   }
+}
+
+/**
+ * Duplicates have no `emails` row of their own, so they are recorded as items
+ * whose parent is the email they duplicate. They can be hundreds of thousands,
+ * so they are buffered and written in bulk. Never throws.
+ */
+export function createDuplicateRecorder(
+  fileId: string,
+  caseRequestId: string | null | undefined,
+  chunkSize = 500,
+) {
+  const perHash = new Map<string, number>();
+  let buffer: Array<{ id: string; parent: string }> = [];
+
+  const flush = async (): Promise<void> => {
+    if (buffer.length === 0) return;
+    const batch = buffer;
+    buffer = [];
+    try {
+      const existing = new Set(
+        (
+          await prisma.item.findMany({
+            where: { id: { in: batch.map((entry) => entry.id) } },
+            select: { id: true },
+          })
+        ).map((item) => item.id),
+      );
+      const fresh = batch.filter((entry) => !existing.has(entry.id));
+      if (fresh.length === 0) return;
+      const reason = "Duplicate of an email already kept in this request.";
+      await prisma.$transaction([
+        prisma.item.createMany({
+          skipDuplicates: true,
+          data: fresh.map((entry) => ({
+            id: entry.id,
+            case_request_id: caseRequestId ?? null,
+            file_id: fileId,
+            parent_id: entry.parent,
+            kind: "email",
+            origin: "pst",
+            state: "discarded",
+            decision_rule: "dup",
+            reason,
+            decided_by: "rule",
+          })),
+        }),
+        prisma.itemEvent.createMany({
+          data: fresh.map((entry) => ({
+            item_id: entry.id,
+            state: "discarded",
+            decision_rule: "dup",
+            reason,
+            decided_by: "rule",
+          })),
+        }),
+      ]);
+    } catch (error) {
+      console.warn("[Items] Could not record duplicates:", error);
+    }
+  };
+
+  return {
+    async add(emailHash: string): Promise<void> {
+      const n = (perHash.get(emailHash) ?? 0) + 1;
+      perHash.set(emailHash, n);
+      buffer.push({
+        id: crypto
+          .createHash("sha256")
+          .update(`duplicate:${fileId}:${emailHash}:${n}`)
+          .digest("hex"),
+        parent: emailHash,
+      });
+      if (buffer.length >= chunkSize) await flush();
+    },
+    flush,
+  };
 }

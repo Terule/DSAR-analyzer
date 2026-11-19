@@ -8,10 +8,14 @@
 import fs from "node:fs";
 import path from "node:path";
 import { archiveCompletedCase } from "../../src/lib/history";
+import { fileDecisionToItem, recordFileItems } from "../../src/lib/items";
 import { prisma } from "../../src/lib/prisma";
 import { queueSharePointArtifacts } from "../../src/lib/sharepoint-artifact-outbox";
 import { startSharePointArtifactWorker } from "../../src/lib/sharepoint-artifact-queue";
-import { runStandaloneBatch } from "../../src/lib/standalone-processor";
+import {
+  type FileDecision,
+  runStandaloneBatch,
+} from "../../src/lib/standalone-processor";
 
 interface FilesRow {
   id: string;
@@ -73,9 +77,11 @@ async function main() {
     : [];
 
   try {
+    const auditDecisions: FileDecision[] = [];
     const result = await runStandaloneBatch(
       {
         inputDir: filepath,
+        onDecision: (decision) => auditDecisions.push(decision),
         messagesDir,
         documentsDir,
         subjectCriteria: {
@@ -103,6 +109,11 @@ async function main() {
             console.error("[files-worker] Progress write failed:", err);
           });
       },
+    );
+
+    await recordFileItems(
+      fileId,
+      auditDecisions.map((decision) => fileDecisionToItem(filepath, decision)),
     );
 
     const durationMs = Date.now() - startedAt;

@@ -141,3 +141,31 @@ test("a .txt in Files follows the document keyword rule", async () => {
     ["keyword"],
   );
 });
+
+test("a kept file is reported with where it was delivered", async () => {
+  const input = fs.mkdtempSync(path.join(os.tmpdir(), "item-kept-in-"));
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "item-kept-out-"));
+  const file = path.join(input, "note.txt");
+  fs.writeFileSync(file, "Lunch with Maria Souza tomorrow.");
+  const decisions: FileDecision[] = [];
+  const original = console.log;
+  console.log = () => {};
+  try {
+    await runStandaloneBatch({
+      inputDir: input,
+      filePaths: [file],
+      messagesDir: path.join(out, "Messages"),
+      documentsDir: path.join(out, "Documents"),
+      subjectCriteria: { name: "Maria Souza", email: "maria.souza@corp.com" },
+      onDecision: (d) => decisions.push(d),
+    });
+  } finally {
+    console.log = original;
+  }
+  assert.equal(decisions.length, 1);
+  assert.equal(decisions[0].state, "kept");
+  assert.match(
+    decisions[0].deliveredRel ?? "",
+    /^Documents\/Document [0-9a-f]+\.pdf$/,
+  );
+});
