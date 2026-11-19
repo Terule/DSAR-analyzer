@@ -306,6 +306,7 @@ export async function runPhaseJob(
   let subjectName = row.subject_name || "";
   let subjectAliases = row.subject_aliases;
   let subjectPersonalEmail = row.subject_personal_email;
+  let subjectEmail = row.subject_email;
   if (!subjectName.trim() && row.case_request_id) {
     const request = await prisma.caseRequest.findUnique({
       where: { id: row.case_request_id },
@@ -315,6 +316,7 @@ export async function runPhaseJob(
       subjectName = request.case.subject_name;
       subjectAliases = request.case.subject_aliases;
       subjectPersonalEmail = request.case.subject_personal_email;
+      subjectEmail = request.case.subject_email;
       await prisma.processedFile.update({
         where: { id: fileId },
         data: {
@@ -638,6 +640,7 @@ export async function runPhaseJob(
       documentsDir: path.join(outputBase, requestPath, "Documents"),
       subjectCriteria: {
         name: subjectName,
+        email: subjectEmail || undefined,
         personalEmail: subjectPersonalEmail || undefined,
         aliases: aliases(subjectAliases),
       },

@@ -25,6 +25,11 @@ import { formatNumber, numberWidth } from "./request-waves";
 import { queueSharePointArtifacts } from "./sharepoint-artifact-outbox";
 import { startSharePointArtifactWorker } from "./sharepoint-artifact-queue";
 import { pruneWaveSourcePsts } from "./source-prune";
+import {
+  buildSubjectIdentifiers,
+  buildSubjectTokens,
+  mentionsSubject,
+} from "./subject-rules";
 import { normalizeSpreadsheetText, repairMojibake } from "./text-encoding";
 
 const FONT_FOLDER =
@@ -679,10 +684,7 @@ export async function processDocxToPdf(
     )
       return false;
 
-    const mentionsSubject =
-      criteria.length === 0 ||
-      criteria.some((c) => rawText.includes(c.toLowerCase()));
-    if (!mentionsSubject) return false;
+    if (!mentionsSubject(rawText, criteria)) return false;
 
     if (processedHashes) {
       const contentHash = crypto
@@ -965,10 +967,7 @@ export async function processPdfAttachment(
     if (!bypassKeywordFilter && PRIVILEGED_KEYWORDS_RE.test(rawText))
       return false;
 
-    const mentionsSubject =
-      criteria.length === 0 ||
-      criteria.some((c) => rawText.includes(c.toLowerCase()));
-    if (!mentionsSubject) return false;
+    if (!mentionsSubject(rawText, criteria)) return false;
 
     if (processedHashes) {
       const contentHash = crypto
@@ -1036,6 +1035,8 @@ export async function renderEmailAttachments(input: {
   currentBaseName: string;
   outputDir: string;
   criteria: string[];
+  /** Full identifiers only, for spreadsheets (rows are delivered whole). */
+  sheetCriteria?: string[];
   bypassKeywordFilter?: boolean;
   /**
    * Screening verdicts keyed by `attachmentKey` (see mail-screen). `null` or
@@ -1088,7 +1089,7 @@ export async function renderEmailAttachments(input: {
         await processExcelToPdf(
           file.content,
           path.join(directory, `${attSeqName}.pdf`),
-          criteria,
+          input.sheetCriteria ?? criteria,
           attSeqName,
           undefined,
           bypassKeywordFilter,
@@ -1224,18 +1225,19 @@ export async function convertToPdfBatch(
     });
     let lastProgressWrite = 0;
 
-    const filterCriteriaSet = new Set<string>();
-    if (row.subject_aliases) {
-      row.subject_aliases.split(",").forEach((a) => {
-        const alias = a.trim().toLowerCase();
-        if (alias) filterCriteriaSet.add(alias);
-      });
-    }
-    if (row.subject_name) filterCriteriaSet.add(row.subject_name.toLowerCase());
-    if (row.subject_email)
-      filterCriteriaSet.add(row.subject_email.toLowerCase());
-
-    const filterCriteria = Array.from(filterCriteriaSet);
+    // One token set for every item type (see src/lib/subject-rules.ts).
+    const filterCriteria = buildSubjectTokens({
+      name: row.subject_name || "",
+      email: row.subject_email || "",
+      personalEmail: row.subject_personal_email || "",
+      aliases: (row.subject_aliases || "").split(","),
+    });
+    const filterSheetCriteria = buildSubjectIdentifiers({
+      name: row.subject_name || "",
+      email: row.subject_email || "",
+      personalEmail: row.subject_personal_email || "",
+      aliases: (row.subject_aliases || "").split(","),
+    });
     const subjectPersonalEmail = (row.subject_personal_email || "")
       .trim()
       .toLowerCase();
@@ -1260,6 +1262,7 @@ export async function convertToPdfBatch(
         currentBaseName,
         outputDir,
         criteria: filterCriteria,
+        sheetCriteria: filterSheetCriteria,
         bypassKeywordFilter,
         screen: mailVerdicts,
         reviewDir: reviewEmailsDir,
@@ -1541,6 +1544,7 @@ export async function convertToPdfBatch(
                   outputDir: reviewEmailsDir,
                   reviewDir: reviewEmailsDir,
                   criteria: filterCriteria,
+                  sheetCriteria: filterSheetCriteria,
                   bypassKeywordFilter: true,
                   screen: mailVerdicts,
                 });

@@ -22,6 +22,11 @@ import {
   numberWidth,
 } from "./request-waves";
 import {
+  buildSubjectIdentifiers,
+  buildSubjectTokens,
+  mentionsSubject,
+} from "./subject-rules";
+import {
   prescreenThresholdMb,
   scanXlsxForMentions,
   shouldPrescreenSpreadsheet,
@@ -33,7 +38,12 @@ export interface StandaloneBatchParams {
   filePaths?: string[];
   messagesDir: string;
   documentsDir: string;
-  subjectCriteria: { name: string; personalEmail?: string; aliases?: string[] };
+  subjectCriteria: {
+    name: string;
+    email?: string;
+    personalEmail?: string;
+    aliases?: string[];
+  };
   /** Client cases retain all unique content, without relevance exclusions. */
   clientMode?: boolean;
 }
@@ -677,41 +687,6 @@ async function convertOfficeInWorker(
   });
 }
 
-function buildSubjectNameTokens(
-  subjectName: string,
-  aliases: string[] = [],
-): string[] {
-  const cleanedName = subjectName.trim().replace(/\s+/g, " ");
-  const parts = cleanedName.split(" ").filter(Boolean);
-
-  const tokens = new Set<string>();
-  if (cleanedName) tokens.add(cleanedName.toLowerCase());
-
-  if (parts.length > 0) {
-    const firstName = parts[0].toLowerCase();
-    const surname = parts[parts.length - 1].toLowerCase();
-    if (firstName.length >= 4) tokens.add(firstName);
-    if (surname.length >= 4) tokens.add(surname);
-  }
-
-  for (const alias of aliases) {
-    const cleanAlias = alias.trim().replace(/\s+/g, " ").toLowerCase();
-    if (cleanAlias) tokens.add(cleanAlias);
-  }
-
-  return Array.from(tokens).filter(Boolean);
-}
-
-function textContainsAnyToken(text: string, tokens: string[]): boolean {
-  return tokens.some((token) => {
-    const pattern = new RegExp(
-      `(^|[^a-z0-9])${escapeRegExp(token)}($|[^a-z0-9])`,
-      "i",
-    );
-    return pattern.test(text);
-  });
-}
-
 // Normalizes visible text to a stable dedup key by dropping everything except
 // letters and digits, so re-exports that differ only in markup, whitespace,
 // punctuation, or element ids collapse to the same key.
@@ -1067,13 +1042,21 @@ export async function runStandaloneBatch(
   const subjectEmail = (subjectCriteria.personalEmail || "")
     .trim()
     .toLowerCase();
-  const criteria = [subjectCriteria.name, subjectEmail, ...aliases]
-    .map((c) => c.trim().toLowerCase())
-    .filter(Boolean);
-  const subjectNameTokens = buildSubjectNameTokens(
-    subjectCriteria.name,
+  // One token set for every item type (see src/lib/subject-rules.ts).
+  const criteria = buildSubjectTokens({
+    name: subjectCriteria.name,
+    email: subjectCriteria.email,
+    personalEmail: subjectCriteria.personalEmail,
     aliases,
-  );
+  });
+  const subjectNameTokens = criteria;
+  // Spreadsheets deliver whole rows, so they only match full identifiers.
+  const sheetCriteria = buildSubjectIdentifiers({
+    name: subjectCriteria.name,
+    email: subjectCriteria.email,
+    personalEmail: subjectCriteria.personalEmail,
+    aliases,
+  });
 
   // Shared privileged/confidential keyword filter (see src/lib/exclusions.ts)
   // so the Files pipeline stays in lockstep with the PST pipeline.
@@ -1245,14 +1228,14 @@ export async function runStandaloneBatch(
         // what the conversion would have dropped, in seconds. When the scan
         // cannot tell, the normal conversion runs.
         if (
-          criteria.length > 0 &&
+          sheetCriteria.length > 0 &&
           shouldPrescreenSpreadsheet(
             ext,
             fs.statSync(filePath).size,
             prescreenThresholdMb(),
           )
         ) {
-          const scan = await scanXlsxForMentions(filePath, criteria);
+          const scan = await scanXlsxForMentions(filePath, sheetCriteria);
           if (scan.status === "not-mentioned") {
             console.log(
               `[Standalone Filter] Discarded ${ext.toUpperCase()} ${file}: the subject is not mentioned anywhere in this large workbook (streamed scan).`,
@@ -1270,7 +1253,7 @@ export async function runStandaloneBatch(
           "excel",
           filePath,
           pdfOutputPath,
-          criteria,
+          sheetCriteria,
           seqName,
           bypassFilters,
         );
@@ -1316,7 +1299,7 @@ export async function runStandaloneBatch(
           plainText,
           subjectNameTokens,
         );
-        const containsSubjectNameInBody = textContainsAnyToken(
+        const containsSubjectNameInBody = mentionsSubject(
           plainTextWithoutHeaders,
           subjectNameTokens,
         );
@@ -1429,10 +1412,7 @@ export async function runStandaloneBatch(
           rawText,
           subjectNameTokens,
         );
-        const containsSubjectName = textContainsAnyToken(
-          rawText,
-          subjectNameTokens,
-        );
+        const containsSubjectName = mentionsSubject(rawText, subjectNameTokens);
 
         // Exception: if the email was sent directly TO the subject's personal
         // email address, include it even when it contains a privileged keyword.
@@ -1548,10 +1528,7 @@ export async function runStandaloneBatch(
         }
         const rawText = buffer.toString("utf-8");
         const normalizedText = rawText.toLowerCase();
-        if (
-          !bypassFilters &&
-          !criteria.some((criterion) => normalizedText.includes(criterion))
-        ) {
+        if (!bypassFilters && !mentionsSubject(rawText, criteria)) {
           console.log(
             `[Standalone Filter] Discarded TXT ${file}: Data subject not mentioned.`,
           );
@@ -1587,10 +1564,7 @@ export async function runStandaloneBatch(
             console.log(
               `[Standalone Filter] Discarded PDF ${file}: Contains excluded keyword.`,
             );
-          } else if (
-            !bypassFilters &&
-            !criteria.some((c) => rawText.includes(c))
-          ) {
+          } else if (!bypassFilters && !mentionsSubject(rawText, criteria)) {
             console.log(
               `[Standalone Filter] Discarded PDF ${file}: Data subject not mentioned.`,
             );

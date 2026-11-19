@@ -80,6 +80,8 @@ async function main() {
         documentsDir,
         subjectCriteria: {
           name: row.subject_name || "",
+          email: row.subject_email || undefined,
+          personalEmail: row.subject_personal_email || undefined,
           aliases,
         },
       },

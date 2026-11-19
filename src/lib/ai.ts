@@ -15,6 +15,7 @@ import { configuredFilesAiClient } from "./files-ai-provider";
 import { startMailScreen } from "./mail-screen";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
+import { buildSubjectTokens, mentionsSubject } from "./subject-rules";
 
 /** Best-effort cancellation of external Batch work before a case is removed. */
 export async function cancelAiBatchesForFiles(fileIds: string[]) {
@@ -106,51 +107,6 @@ export function buildEmailUserContent(
     if (email && "body" in email) email.body = cut(email.body, 150_000);
   }
   return JSON.stringify(content);
-}
-
-function escapeRegExp(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-// Broad "is the subject mentioned at all" token set: full name, first/last name
-// parts, aliases, email and its local-part. Used only to skip emails that don't
-// reference the subject ANYWHERE (headers, body or chain) — a guaranteed discard
-// that GPT would also reject, so we save the API call.
-function buildSubjectSearchTokens(criteria: {
-  name: string;
-  email: string;
-  personalEmail?: string;
-  aliases: string[];
-}): string[] {
-  const tokens = new Set<string>();
-  const name = (criteria.name || "").trim().toLowerCase();
-  if (name) {
-    tokens.add(name);
-    const parts = name.split(/\s+/).filter(Boolean);
-    if (parts.length > 0) {
-      const first = parts[0];
-      const last = parts[parts.length - 1];
-      if (first.length >= 3) tokens.add(first);
-      if (last.length >= 3) tokens.add(last);
-    }
-  }
-  for (const alias of criteria.aliases || []) {
-    const a = alias.trim().toLowerCase();
-    if (a) tokens.add(a);
-  }
-  const email = (criteria.email || "").trim().toLowerCase();
-  if (email) {
-    tokens.add(email);
-    const local = email.split("@")[0];
-    if (local && local.length >= 3) tokens.add(local);
-  }
-  const personalEmail = (criteria.personalEmail || "").trim().toLowerCase();
-  if (personalEmail) {
-    tokens.add(personalEmail);
-    const personalLocal = personalEmail.split("@")[0];
-    if (personalLocal && personalLocal.length >= 3) tokens.add(personalLocal);
-  }
-  return Array.from(tokens).filter(Boolean);
 }
 
 /** Tests inject a fake Bedrock client here; production never sets it. */
@@ -285,10 +241,7 @@ export async function generateBatchFile(
 
   const systemPrompt = buildEmailAuditSystemPrompt(subjectCriteria);
 
-  const subjectTokens = buildSubjectSearchTokens(subjectCriteria);
-  const subjectPatterns = subjectTokens.map(
-    (t) => new RegExp(`(^|[^a-z0-9])${escapeRegExp(t)}($|[^a-z0-9])`, "i"),
-  );
+  const subjectTokens = buildSubjectTokens(subjectCriteria);
 
   const batchRunId = randomUUID();
   await prisma.aiBatchRun.create({
@@ -335,10 +288,7 @@ export async function generateBatchFile(
     const text = fs.readFileSync(path.join(jsonFolder, file), "utf-8");
     // The subject must be referenced somewhere in the payload (headers, body or
     // chain); otherwise the audit would discard it anyway.
-    if (
-      subjectPatterns.length > 0 &&
-      !subjectPatterns.some((re) => re.test(text))
-    ) {
+    if (subjectTokens.length > 0 && !mentionsSubject(text, subjectTokens)) {
       preDiscards.push(hash);
       if (preDiscards.length >= 500) await flushPreDiscards();
       continue;
