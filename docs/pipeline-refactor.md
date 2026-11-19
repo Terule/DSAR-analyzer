@@ -130,7 +130,7 @@ Cada passo entrega valor sozinho e tem rollback simples. Antes de começar: um c
 
 0. **`items` + `item_events` em modo sombra**: gravar os mesmos descartes que existem hoje, sem mudar a decisão. Dá a trilha de auditoria e permite comparar os passos seguintes.
 1. **Módulos de regras únicos** (email, arquivo, mensagem) e tokens de titular únicos, com teste de que o mesmo item dá o mesmo resultado em qualquer caminho. Fecha as diferenças de "onde o item está". **Feito para email e arquivo** (2026-11-18): `subject-rules.ts` (titular citado, exceção do e-mail pessoal), `email-rules.ts` (decisão de palavra-chave do email, chamada pelo analisador e pelo motor de Files), `hasPrivilegedKeywordInDocument` (arquivos e anexos), teste de equivalência em `standalone-mail-rules.test.ts`. Falta a mensagem de Teams, que entra no passo 5.
-2. **"Titular citado" antes da extração**; sai o pré-filtro da IA.
+2. **"Titular citado" antes da extração**; sai o pré-filtro da IA. **Feito** (2026-11-19): `extractUniqueEmails` descarta o email que não cita o titular em nenhuma parte (cabeçalhos, assunto, corpo inteiro, nomes de anexos) antes de montar o payload, com a razão `Pre-filter: Data subject not mentioned`; o pré-filtro de `ai.ts` foi removido. O EML fica no lugar, para os anexos (passo 3). Teste: `extract-subject-filter.test.ts`. Ainda não é antes do `readpst`: o filtro roda no Extract, depois do Parse.
 3. **Anexos no pipeline de arquivos**: abre `.pptx`, `.txt`, zips; tipo não suportado descartado com auditoria; remove as cópias do `converter.ts`.
 4. **Imagens**: camadas 1 a 4 primeiro; IA de visão depois.
 5. **Teams por mensagem**: segmentação, contexto, renderização de trechos, deduplicação por mensagem.

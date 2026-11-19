@@ -191,6 +191,15 @@ describe("employee email audit on Bedrock", () => {
           file_id: fileId,
           email_hash: hash(name),
           is_duplicate: 0,
+          // Extract drops an email that never cites the subject before the AI
+          // phase (see extract-subject-filter.test.ts); the AI phase just
+          // must not send it.
+          ...(name === "notAboutSubject"
+            ? {
+                ai_decision: "discard",
+                ai_reason: "Pre-filter: Data subject not mentioned",
+              }
+            : {}),
         },
       });
     }
@@ -206,7 +215,7 @@ describe("employee email audit on Bedrock", () => {
 
     const submitted = await generateBatchFile(fileId, criteria, {});
     assert.equal(submitted, "submitted");
-    // The email that never mentions the subject is discarded without an AI call.
+    // The email Extract already discarded for not citing the subject is not sent.
     assert.deepEqual(
       client.uploaded.sort(),
       [hash("attachmentRescue"), hash("fromSubject")].sort(),

@@ -15,7 +15,6 @@ import { configuredFilesAiClient } from "./files-ai-provider";
 import { startMailScreen } from "./mail-screen";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
-import { buildSubjectTokens, mentionsSubject } from "./subject-rules";
 
 /** Best-effort cancellation of external Batch work before a case is removed. */
 export async function cancelAiBatchesForFiles(fileIds: string[]) {
@@ -241,8 +240,6 @@ export async function generateBatchFile(
 
   const systemPrompt = buildEmailAuditSystemPrompt(subjectCriteria);
 
-  const subjectTokens = buildSubjectTokens(subjectCriteria);
-
   const batchRunId = randomUUID();
   await prisma.aiBatchRun.create({
     data: { id: batchRunId, coordinator_id: fileId, status: "claiming" },
@@ -257,45 +254,14 @@ export async function generateBatchFile(
   let estimatedTokens = estimateTokens(systemPrompt);
   let addedCount = 0;
 
-  // Emails that never mention the subject are discarded without an AI call.
-  // Written in groups: one query per 500 emails, not two per email.
-  let preDiscards: string[] = [];
-  const flushPreDiscards = async () => {
-    if (preDiscards.length === 0) return;
-    const hashes = preDiscards;
-    preDiscards = [];
-    await prisma.$transaction([
-      prisma.email.updateMany({
-        where: { email_hash: { in: hashes }, ai_decision: null },
-        data: {
-          ai_decision: "discard",
-          ai_reason: "System Discard: Data subject not mentioned",
-        },
-      }),
-      prisma.processedFile.update({
-        where: { id: fileId },
-        data: { ai_discarded_count: { increment: hashes.length } },
-      }),
-    ]);
-  };
-
   // Pass 1: pick up to `maxRecords` emails for this job, remembering only hashes.
   const picked: string[] = [];
   for (const file of allFiles) {
     if (picked.length >= maxRecords) break;
     const hash = file.replace(".json", "");
     if (!unprocessedHashes.has(hash)) continue;
-    const text = fs.readFileSync(path.join(jsonFolder, file), "utf-8");
-    // The subject must be referenced somewhere in the payload (headers, body or
-    // chain); otherwise the audit would discard it anyway.
-    if (subjectTokens.length > 0 && !mentionsSubject(text, subjectTokens)) {
-      preDiscards.push(hash);
-      if (preDiscards.length >= 500) await flushPreDiscards();
-      continue;
-    }
     picked.push(hash);
   }
-  await flushPreDiscards();
 
   // Claim before writing/uploading. This is the ownership barrier: another
   // parallel slot only selects rows whose claim is still null. Claims go in

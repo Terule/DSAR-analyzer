@@ -4,6 +4,7 @@ import { type AddressObject, simpleParser } from "mailparser";
 import { stripEmailSignature } from "./email-content";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
+import { buildSubjectTokens, mentionsSubject } from "./subject-rules";
 
 // Helper to calculate basic token estimates
 function estimateTokens(text: string): number {
@@ -113,11 +114,39 @@ export async function extractUniqueEmails(
     where: { id: fileId },
     select: {
       filepath: true,
-      case_request: { select: { case: { select: { case_type: true } } } },
+      subject_name: true,
+      subject_email: true,
+      subject_personal_email: true,
+      subject_aliases: true,
+      case_request: {
+        select: {
+          case: {
+            select: {
+              case_type: true,
+              subject_name: true,
+              subject_email: true,
+              subject_personal_email: true,
+              subject_aliases: true,
+            },
+          },
+        },
+      },
     },
   });
   if (!row?.filepath) throw new Error("File target missing");
   const isClientCase = row.case_request?.case.case_type === "client";
+  const requestCase = row.case_request?.case;
+  // One token set for every item type (src/lib/subject-rules.ts). The row's
+  // own subject wins; the case's fills in when the row has none yet.
+  const subjectTokens = buildSubjectTokens({
+    name: row.subject_name || requestCase?.subject_name || "",
+    email: row.subject_email || requestCase?.subject_email || "",
+    personalEmail:
+      row.subject_personal_email || requestCase?.subject_personal_email || "",
+    aliases: (row.subject_aliases || requestCase?.subject_aliases || "").split(
+      ",",
+    ),
+  });
 
   await prisma.processedFile.update({
     where: { id: fileId },
@@ -164,6 +193,7 @@ export async function extractUniqueEmails(
 
     let totalTokens = 0;
     let draftsBlocked = 0;
+    let subjectAbsent = 0;
 
     for (const record of uniqueRecords) {
       const emlPath = path.join(rawFolder, `${record.id}.eml`);
@@ -231,6 +261,37 @@ export async function extractUniqueEmails(
           parsed.text || "",
           parsed.html || "",
         );
+
+        // The subject has to be cited somewhere in the message (headers,
+        // subject, any part of the body, attachment names). An email that never
+        // mentions them is discarded here, before the payload is built, so it
+        // costs no payload and no AI call. The EML stays where it is: its
+        // attachments are handled on their own.
+        const mentionText = [
+          fromRaw,
+          fromFormatted,
+          toRaw,
+          toFormatted,
+          getAddressText(parsed.cc),
+          parsed.subject || "",
+          parsed.text || "",
+          fallbackText,
+          ...(parsed.attachments || []).map((att) => att.filename || ""),
+        ].join("\n");
+        if (
+          subjectTokens.length > 0 &&
+          !mentionsSubject(mentionText, subjectTokens)
+        ) {
+          await prisma.email.update({
+            where: { id: record.id },
+            data: {
+              ai_decision: "discard",
+              ai_reason: "Pre-filter: Data subject not mentioned",
+            },
+          });
+          subjectAbsent++;
+          continue;
+        }
 
         const threadBlocks = fallbackText.split(THREAD_BOUNDARY_RE);
         let aiBodyText = fallbackText;
@@ -304,7 +365,7 @@ export async function extractUniqueEmails(
       data: {
         status: "completed",
         estimated_tokens: totalTokens,
-        ai_discarded_count: { increment: draftsBlocked },
+        ai_discarded_count: { increment: draftsBlocked + subjectAbsent },
       },
     });
   } catch (error) {
