@@ -1,39 +1,37 @@
 /**
- * Step 7 of docs/pipeline-refactor.md: before `items` can be the source of truth
- * for emails, it has to agree with the `emails` rows it mirrors. This compares
- * the two for a request and reports every email whose item is missing or whose
- * state differs. Read-only.
+ * Step 7 of docs/pipeline-refactor.md: `items` is the record of email
+ * decisions, so it has to cover every email the pipeline read. This reports,
+ * for a request, the emails that have no item (a decision or a queue entry that
+ * never reached the trail) and the email items that have no email row. Read-only.
  */
-import { emailDecision } from "./items";
 import { prisma } from "./prisma";
 
-export interface ParityProblem {
-  emailHash: string;
-  kind: "missing_item" | "state_differs";
-  expected: string;
-  actual: string | null;
-  reason: string | null;
-}
-
-export interface EmailParity {
-  checked: number;
-  matching: number;
-  /** Same state but another rule or decider: expected for mail screening. */
-  ruleDiffers: number;
-  problems: ParityProblem[];
+export interface EmailCoverage {
+  /** Non-duplicate email rows of the request. */
+  emails: number;
+  /** Email items of the request, duplicates excluded. */
+  items: number;
+  /** Email hashes with no item (the first few). */
+  missingItems: string[];
+  missingCount: number;
+  /** Email items whose email row is gone. */
+  orphanItems: number;
+  /** Items still waiting for the AI (pending). */
+  pending: number;
 }
 
 const PAGE = 5_000;
 
-/** Compares the decision of every non-duplicate email of the request with its item. */
-export async function checkEmailParity(
+export async function checkEmailCoverage(
   requestId: string,
-): Promise<EmailParity> {
-  const result: EmailParity = {
-    checked: 0,
-    matching: 0,
-    ruleDiffers: 0,
-    problems: [],
+): Promise<EmailCoverage> {
+  const result: EmailCoverage = {
+    emails: 0,
+    items: 0,
+    missingItems: [],
+    missingCount: 0,
+    orphanItems: 0,
+    pending: 0,
   };
   let cursor: string | undefined;
   for (;;) {
@@ -45,69 +43,41 @@ export async function checkEmailParity(
       orderBy: { email_hash: "asc" },
       take: PAGE,
       ...(cursor ? { skip: 1, cursor: { email_hash: cursor } } : {}),
-      select: {
-        email_hash: true,
-        ai_decision: true,
-        ai_reason: true,
-        rereview_status: true,
-      },
+      select: { email_hash: true },
     });
     if (rows.length === 0) break;
     cursor = rows[rows.length - 1].email_hash;
-    const items = new Map(
+    const have = new Set(
       (
         await prisma.item.findMany({
           where: { id: { in: rows.map((row) => row.email_hash) } },
-          select: { id: true, state: true, decision_rule: true },
+          select: { id: true },
         })
-      ).map((item) => [item.id, item]),
+      ).map((item) => item.id),
     );
     for (const row of rows) {
-      const expected = emailDecision(row);
-      // An email that has not been decided yet need not have an item.
-      if (expected.state === "pending" && !items.has(row.email_hash)) continue;
-      result.checked += 1;
-      const item = items.get(row.email_hash);
-      if (!item) {
-        result.problems.push({
-          emailHash: row.email_hash,
-          kind: "missing_item",
-          expected: expected.state,
-          actual: null,
-          reason: row.ai_reason,
-        });
-      } else if (item.state !== expected.state) {
-        result.problems.push({
-          emailHash: row.email_hash,
-          kind: "state_differs",
-          expected: expected.state,
-          actual: item.state,
-          reason: row.ai_reason,
-        });
-      } else {
-        result.matching += 1;
-        if (item.decision_rule !== expected.rule) result.ruleDiffers += 1;
+      result.emails += 1;
+      if (!have.has(row.email_hash)) {
+        result.missingCount += 1;
+        if (result.missingItems.length < 20) {
+          result.missingItems.push(row.email_hash);
+        }
       }
     }
     if (rows.length < PAGE) break;
   }
+  const itemWhere = {
+    case_request_id: requestId,
+    kind: "email",
+    OR: [{ decision_rule: null }, { decision_rule: { not: "dup" } }],
+  };
+  result.items = await prisma.item.count({ where: itemWhere });
+  result.pending = await prisma.item.count({
+    where: { ...itemWhere, state: "pending" },
+  });
+  result.orphanItems = Math.max(
+    0,
+    result.items - (result.emails - result.missingCount),
+  );
   return result;
-}
-
-/** Groups the problems by the first words of the reason, to see which stage skipped the trail. */
-export function problemsByStage(
-  problems: ParityProblem[],
-): Array<{ stage: string; kind: string; count: number }> {
-  const groups = new Map<
-    string,
-    { stage: string; kind: string; count: number }
-  >();
-  for (const problem of problems) {
-    const stage = (problem.reason ?? "(no reason)").slice(0, 48);
-    const key = `${problem.kind}|${stage}`;
-    const group = groups.get(key) ?? { stage, kind: problem.kind, count: 0 };
-    group.count += 1;
-    groups.set(key, group);
-  }
-  return [...groups.values()].sort((a, b) => b.count - a.count);
 }

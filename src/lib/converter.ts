@@ -1814,7 +1814,7 @@ export async function convertToPdfBatch(
     }
 
     // --- WARNING EMAILS: self-forwards (company → personal email) ---
-    // These were tagged ai_decision = 'warning' during analysis and skipped AI.
+    // These were tagged as self-forwards (review items) during analysis and skipped AI.
     // Render them into Emails/Warning/ so reviewers can inspect them separately.
     const caseIdsForWarning = await getCasePstFileIds(fileId);
     const warningRecords = (

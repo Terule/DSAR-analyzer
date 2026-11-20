@@ -508,11 +508,19 @@ describe("Mail screening before Render", () => {
 
     const decisions = Object.fromEntries(
       (
-        await prisma.email.findMany({
-          where: { file_id: id },
-          select: { email_hash: true, ai_decision: true },
+        await prisma.item.findMany({
+          where: { file_id: id, kind: "email" },
+          select: { id: true, state: true },
         })
-      ).map((e) => [e.email_hash.slice(h("").length), e.ai_decision]),
+      ).map((e) => [
+        e.id.slice(h("").length),
+        (
+          { kept: "keep", discarded: "discard", review: "review" } as Record<
+            string,
+            string
+          >
+        )[e.state],
+      ]),
     );
     assert.deepEqual(decisions, {
       "c-ok": "keep",

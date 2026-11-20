@@ -5,12 +5,15 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import {
+  createEmailRecord,
+  decideEmail,
+} from "../../../src/lib/email-decisions";
+import {
   createDuplicateRecorder,
   exportAuditTrail,
   fileItemId,
   recordAttachmentItems,
   recordFileItems,
-  syncEmailItems,
 } from "../../../src/lib/items";
 import { prisma } from "../../../src/lib/prisma";
 
@@ -52,13 +55,29 @@ describe("items audit trail (shadow mode)", () => {
   });
 
   it("records a rule discard once, with its rule and reason", async () => {
-    await email("kw", {
-      ai_decision: "discard",
-      ai_reason:
-        "Pre-filter: Subject or body contains privileged/confidential keyword",
+    const reason =
+      "Pre-filter: Subject or body contains privileged/confidential keyword";
+    await createEmailRecord({
+      data: {
+        id: `t-items-e-${tag}-kw`,
+        file_id: fileId,
+        email_hash: hash("kw"),
+        is_duplicate: 0,
+      },
+      decision: {
+        decision: "discard",
+        rule: "keyword",
+        reason,
+        decidedBy: "rule",
+      },
     });
-    await syncEmailItems([hash("kw")]);
-    await syncEmailItems([hash("kw")]);
+    await decideEmail({
+      emailHash: hash("kw"),
+      decision: "discard",
+      rule: "keyword",
+      reason,
+      decidedBy: "rule",
+    });
     const item = await prisma.item.findUnique({ where: { id: hash("kw") } });
     assert.equal(item?.state, "discarded");
     assert.equal(item?.decision_rule, "keyword");
@@ -72,18 +91,28 @@ describe("items audit trail (shadow mode)", () => {
   });
 
   it("follows an email from pending to an AI discard to a kept second review", async () => {
-    await email("ai");
-    await syncEmailItems([hash("ai")]);
-    await prisma.email.update({
-      where: { email_hash: hash("ai") },
-      data: { ai_decision: "discard", ai_reason: "Task mention only" },
+    await createEmailRecord({
+      data: {
+        id: `t-items-e-${tag}-ai`,
+        file_id: fileId,
+        email_hash: hash("ai"),
+        is_duplicate: 0,
+      },
     });
-    await syncEmailItems([hash("ai")], { decidedBy: "haiku-4.5" });
-    await prisma.email.update({
-      where: { email_hash: hash("ai") },
-      data: { ai_decision: "keep", ai_reason: "About the subject" },
+    await decideEmail({
+      emailHash: hash("ai"),
+      decision: "discard",
+      rule: "ai_email",
+      reason: "Task mention only",
+      decidedBy: "haiku-4.5",
     });
-    await syncEmailItems([hash("ai")], { decidedBy: "haiku-5.5" });
+    await decideEmail({
+      emailHash: hash("ai"),
+      decision: "keep",
+      rule: "ai_email",
+      reason: "About the subject",
+      decidedBy: "haiku-5.5",
+    });
 
     const trail = await events("ai");
     assert.deepEqual(
@@ -99,12 +128,24 @@ describe("items audit trail (shadow mode)", () => {
   });
 
   it("marks attachments and keeps the parent link", async () => {
-    await email("parent");
-    await email("child", {
-      is_attachment: 1,
-      parent_email_hash: hash("parent"),
+    await createEmailRecord({
+      data: {
+        id: `t-items-e-${tag}-parent`,
+        file_id: fileId,
+        email_hash: hash("parent"),
+        is_duplicate: 0,
+      },
     });
-    await syncEmailItems([hash("parent"), hash("child")]);
+    await createEmailRecord({
+      data: {
+        id: `t-items-e-${tag}-child`,
+        file_id: fileId,
+        email_hash: hash("child"),
+        is_duplicate: 0,
+        is_attachment: 1,
+        parent_email_hash: hash("parent"),
+      },
+    });
     const child = await prisma.item.findUnique({
       where: { id: hash("child") },
     });
@@ -409,8 +450,15 @@ describe("items audit trail (shadow mode)", () => {
     assert.equal(events, 6, "five creations and one change");
   });
 
-  it("never throws, even for hashes that do not exist", async () => {
-    await syncEmailItems(["missing", ""]);
+  it("writes nothing for a hash that has no email", async () => {
+    const written = await decideEmail({
+      emailHash: "missing",
+      decision: "keep",
+      rule: "ai_email",
+      reason: "x",
+      decidedBy: "haiku-4.5",
+    });
+    assert.equal(written, 0);
     assert.equal(
       await prisma.item.findUnique({ where: { id: "missing" } }),
       null,

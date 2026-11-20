@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+import { createEmailRecord } from "../../../src/lib/email-decisions";
 import { prisma } from "../../../src/lib/prisma";
 import { pruneWaveSourcePsts } from "../../../src/lib/source-prune";
 
@@ -59,12 +60,17 @@ async function setup(options: { wave?: number; renderBase?: number } = {}) {
     fs.writeFileSync(path.join(deliverable, "Emails", name), "pdf");
   // A kept email the AI selected for this request's PST rows.
   const kept = (fileId: string, label: string) =>
-    prisma.email.create({
+    createEmailRecord({
+      decision: {
+        decision: "keep",
+        rule: "ai_email",
+        reason: null,
+        decidedBy: "haiku-4.5",
+      },
       data: {
         id: `t-em-${tag}-${counter}-${label}`,
         file_id: fileId,
         email_hash: `hash-${tag}-${counter}-${label}`,
-        ai_decision: "keep",
       },
     });
   return { requestId, staging, deliverable, pst, row, pdf, kept };
@@ -243,12 +249,17 @@ describe("pruneWaveSourcePsts", () => {
     const a = t.pst("a.pst");
     const rowA = await t.row("a", a);
     await t.kept(rowA.id, "1");
-    await prisma.email.create({
+    await createEmailRecord({
+      decision: {
+        decision: "keep",
+        rule: "ai_email",
+        reason: null,
+        decidedBy: "haiku-4.5",
+      },
       data: {
         id: `t-em-${tag}-${counter}-att`,
         file_id: rowA.id,
         email_hash: `hash-${tag}-${counter}-att`,
-        ai_decision: "keep",
         is_attachment: 1,
       },
     });

@@ -7,7 +7,7 @@ import {
   decideEmail,
   decideEmails,
 } from "../../../src/lib/email-decisions";
-import { checkEmailParity } from "../../../src/lib/items-parity";
+import { checkEmailCoverage } from "../../../src/lib/items-parity";
 import { prisma } from "../../../src/lib/prisma";
 
 const tag = crypto.randomUUID().slice(0, 8);
@@ -76,10 +76,6 @@ describe("email decisions (one writer)", () => {
       label: "Re: lunch",
     });
     assert.equal(written, 1);
-    const email = await prisma.email.findUnique({
-      where: { email_hash: hash(1) },
-    });
-    assert.equal(email?.ai_decision, "discard");
     const item = await prisma.item.findUnique({ where: { id: hash(1) } });
     assert.equal(item?.state, "discarded");
     assert.equal(item?.decision_rule, "draft");
@@ -115,10 +111,6 @@ describe("email decisions (one writer)", () => {
       guard: { state: "kept" },
     });
     assert.equal(written, 0);
-    const email = await prisma.email.findUnique({
-      where: { email_hash: hash(2) },
-    });
-    assert.equal(email?.ai_decision, null);
     assert.equal(await prisma.item.count({ where: { id: hash(2) } }), 0);
   });
 
@@ -148,10 +140,6 @@ describe("email decisions (one writer)", () => {
     const rescued = await prisma.item.findUnique({ where: { id: hash(3) } });
     assert.equal(rescued?.rereview_status, null);
     assert.equal(rescued?.state, "kept");
-    const email = await prisma.email.findUnique({
-      where: { email_hash: hash(3) },
-    });
-    assert.equal(email?.ai_decision, "keep");
     await plainEmail(4);
     await decideEmail({
       emailHash: hash(4),
@@ -214,16 +202,11 @@ describe("email decisions (one writer)", () => {
       where: { id: hash("c1") },
     });
     assert.equal(forwarded?.state, "review");
-    assert.equal(
-      (await prisma.email.findUnique({ where: { email_hash: hash("c1") } }))
-        ?.ai_decision,
-      "warning",
-    );
     const waiting = await prisma.item.findUnique({ where: { id: hash("c2") } });
     assert.equal(waiting?.state, "pending");
   });
 
-  it("does not leave the email decided when the audit trail cannot be written", async () => {
+  it("writes nothing when the audit record cannot be written", async () => {
     await plainEmail("atomic");
     // An item with this id but a missing required value makes the item write fail.
     await assert.rejects(() =>
@@ -236,10 +219,11 @@ describe("email decisions (one writer)", () => {
         decidedBy: "haiku-4.5",
       }),
     );
-    const email = await prisma.email.findUnique({
-      where: { email_hash: hash("atomic") },
-    });
-    assert.equal(email?.ai_decision, null);
+    assert.equal(await prisma.item.count({ where: { id: hash("atomic") } }), 0);
+    assert.equal(
+      await prisma.itemEvent.count({ where: { item_id: hash("atomic") } }),
+      0,
+    );
   });
 
   it("counts kept and discarded emails from the audit trail, not the duplicates", async () => {
@@ -277,9 +261,13 @@ describe("email decisions (one writer)", () => {
     assert.equal(after.discarded, before.discarded + 1);
   });
 
-  it("leaves emails and items in agreement", async () => {
-    const parity = await checkEmailParity(requestId);
-    assert.equal(parity.problems.length, 0);
-    assert.ok(parity.checked >= 1_200);
+  it("leaves every email covered by an item", async () => {
+    const coverage = await checkEmailCoverage(requestId);
+    // Only the two emails these tests deliberately left without a decision.
+    assert.deepEqual(
+      [...coverage.missingItems].sort(),
+      [hash(2), hash("atomic")].sort(),
+    );
+    assert.ok(coverage.emails >= 1_200);
   });
 });

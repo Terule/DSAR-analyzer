@@ -1,11 +1,11 @@
 /**
- * Read-only: for each request (or the one named), compares what the `emails`
- * rows decided with what the audit trail (`items`) recorded.
+ * Read-only: for each request (or the one named), checks that the audit trail
+ * (`items`) covers every email the pipeline read.
  *
  *   node --import tsx scripts/maintenance/items-parity.ts            # every request
  *   node --import tsx scripts/maintenance/items-parity.ts JPF R1     # one request
  */
-import { checkEmailParity, problemsByStage } from "../../src/lib/items-parity";
+import { checkEmailCoverage } from "../../src/lib/items-parity";
 import { prisma } from "../../src/lib/prisma";
 
 async function main() {
@@ -20,15 +20,15 @@ async function main() {
   });
   let failed = false;
   for (const request of requests) {
-    const parity = await checkEmailParity(request.id);
-    if (parity.checked === 0) continue;
+    const coverage = await checkEmailCoverage(request.id);
+    if (coverage.emails === 0 && coverage.items === 0) continue;
     console.log(
-      `${request.case.name} ${request.name}: ${parity.checked} emails, ${parity.matching} match, ${parity.problems.length} differ, ${parity.ruleDiffers} with another rule`,
+      `${request.case.name} ${request.name}: ${coverage.emails} emails, ${coverage.items} items, ${coverage.missingCount} emails without an item, ${coverage.orphanItems} items without an email, ${coverage.pending} pending`,
     );
-    for (const group of problemsByStage(parity.problems).slice(0, 8)) {
-      console.log(`    ${group.count} × ${group.kind}: ${group.stage}`);
+    if (coverage.missingCount > 0) {
+      failed = true;
+      console.log(`    e.g. ${coverage.missingItems.slice(0, 3).join(", ")}`);
     }
-    if (parity.problems.length > 0) failed = true;
   }
   if (failed) process.exitCode = 1;
 }

@@ -19,7 +19,8 @@ export type PruneOutcome =
         | "unmanaged"
         | "not-finished"
         | "no-output"
-        | "incomplete-delivery";
+        | "incomplete-delivery"
+        | "incomplete-trail";
     };
 
 /**
@@ -76,10 +77,11 @@ export async function pruneWaveSourcePsts(
   );
   if (!delivered) return { deleted: 0, skipped: "no-output" };
 
-  // The audit trail is the record now. The email rows are checked too, and the
-  // larger count wins: expecting fewer emails would let the PSTs be deleted
-  // while some are still undelivered.
-  const [keptItems, keptEmails] = await Promise.all([
+  // The audit trail is the record of what was kept. Before it can be trusted to
+  // say how many emails must be delivered, it has to cover every email row: an
+  // email without an item could be a kept one that went uncounted, and the PSTs
+  // would be deleted while it is still undelivered.
+  const [kept, trailed, emailRows] = await Promise.all([
     prisma.item.count({
       where: {
         file_id: { in: ids },
@@ -88,21 +90,24 @@ export async function pruneWaveSourcePsts(
         state: "kept",
       },
     }),
-    prisma.email.count({
+    prisma.item.count({
       where: {
         file_id: { in: ids },
-        ai_decision: "keep",
-        is_attachment: 0,
-        is_duplicate: 0,
+        kind: "email",
+        origin: "pst",
+        OR: [{ decision_rule: null }, { decision_rule: { not: "dup" } }],
       },
     }),
+    prisma.email.count({
+      where: { file_id: { in: ids }, is_attachment: 0, is_duplicate: 0 },
+    }),
   ]);
-  if (keptItems !== keptEmails) {
+  if (trailed < emailRows) {
     console.warn(
-      `[Source Prune] ${fileId}: audit trail has ${keptItems} kept emails, the email rows ${keptEmails}; using the larger.`,
+      `[Prune] Keeping source PSTs for ${fileId}: the audit trail covers ${trailed} of ${emailRows} emails.`,
     );
+    return { deleted: 0, skipped: "incomplete-trail" };
   }
-  const kept = Math.max(keptItems, keptEmails);
   const deliveredEmails = countDeliveredEmails(
     path.join(request.deliverable_path, "Emails"),
     request.render_base ?? 0,

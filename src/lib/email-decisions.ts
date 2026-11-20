@@ -127,13 +127,6 @@ export async function planEmailDecisions(
       if (!input) continue;
       const state = STATE[input.decision];
       const reason = input.reason?.trim() ? input.reason : null;
-      ops.push(
-        // The email row keeps a mirror of the verdict until its columns are dropped.
-        prisma.email.updateMany({
-          where: { email_hash: hash },
-          data: { ai_decision: input.decision, ai_reason: input.reason },
-        }),
-      );
       const label = cleanAuditLabel(input.label) || null;
       ops.push(
         prisma.item.upsert({
@@ -241,14 +234,7 @@ export async function createEmailRecord(options: {
   const label = cleanAuditLabel(options.label) || null;
   const caseRequestId = data.file_id ? await caseRequestOf(data.file_id) : null;
   await prisma.$transaction([
-    prisma.email.create({
-      data: {
-        ...data,
-        ...(decision
-          ? { ai_decision: decision.decision, ai_reason: decision.reason }
-          : {}),
-      },
-    }),
+    prisma.email.create({ data }),
     prisma.item.upsert({
       where: { id: data.email_hash },
       create: {

@@ -223,13 +223,12 @@ describe("second review of Haiku 4.5 email discards", () => {
     await pollBatchStatus(fileId);
 
     const row = async (hash: string) => {
-      const email = await prisma.email.findUniqueOrThrow({
-        where: { email_hash: hash },
-      });
       const item = await prisma.item.findUniqueOrThrow({ where: { id: hash } });
       return {
-        ai_decision: email.ai_decision,
-        ai_reason: email.ai_reason,
+        ai_decision: (
+          { kept: "keep", discarded: "discard" } as Record<string, string>
+        )[item.state],
+        ai_reason: item.reason,
         rereview_status: item.rereview_status,
         rereview_coordinator_id: item.rereview_coordinator_id,
       };

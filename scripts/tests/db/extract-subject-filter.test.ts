@@ -104,10 +104,23 @@ describe("Extract drops emails that never cite the subject", () => {
     );
   };
   const decision = async (name: string) =>
-    prisma.email.findUniqueOrThrow({
-      where: { id: ids[name] },
-      select: { ai_decision: true, ai_reason: true },
-    });
+    prisma.email
+      .findUniqueOrThrow({
+        where: { id: ids[name] },
+        select: { email_hash: true },
+      })
+      .then(async ({ email_hash }) => {
+        const item = await prisma.item.findUnique({
+          where: { id: email_hash },
+        });
+        return {
+          ai_decision:
+            ({ kept: "keep", discarded: "discard" } as Record<string, string>)[
+              item?.state ?? ""
+            ] ?? null,
+          ai_reason: item?.reason ?? null,
+        };
+      });
 
   it("builds the payload for an email that cites the subject", async () => {
     assert.equal(jsonExists("cited"), true);

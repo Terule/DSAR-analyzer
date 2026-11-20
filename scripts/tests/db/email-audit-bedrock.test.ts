@@ -228,11 +228,11 @@ describe("employee email audit on Bedrock", () => {
     assert.match(String(run.openai_batch_id), /^bedrock-batch:/);
     assert.equal(
       (
-        await prisma.email.findUniqueOrThrow({
-          where: { email_hash: hash("notAboutSubject") },
+        await prisma.item.findUniqueOrThrow({
+          where: { id: hash("notAboutSubject") },
         })
-      ).ai_decision,
-      "discard",
+      ).state,
+      "discarded",
     );
 
     const batchId = String(run.openai_batch_id);
@@ -263,12 +263,12 @@ describe("employee email audit on Bedrock", () => {
     await pollBatchStatus(fileId);
 
     const decision = async (name: string) =>
-      prisma.email.findUniqueOrThrow({ where: { email_hash: hash(name) } });
-    assert.equal((await decision("fromSubject")).ai_decision, "keep");
-    assert.equal((await decision("notAboutSubject")).ai_decision, "discard");
+      prisma.item.findUniqueOrThrow({ where: { id: hash(name) } });
+    assert.equal((await decision("fromSubject")).state, "kept");
+    assert.equal((await decision("notAboutSubject")).state, "discarded");
     const rescued = await decision("attachmentRescue");
-    assert.equal(rescued.ai_decision, "keep");
-    assert.match(rescued.ai_reason ?? "", /^Second Pass:/);
+    assert.equal(rescued.state, "kept");
+    assert.match(rescued.reason ?? "", /^Second Pass:/);
     assert.deepEqual(converseCalls, ["eu.anthropic.claude-haiku-5-5"]);
     assert.ok(
       fs.existsSync(path.join(dirs.selected, `${hash("fromSubject")}.eml`)),

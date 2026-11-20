@@ -3,7 +3,7 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
-import { checkEmailParity } from "../../../src/lib/items-parity";
+import { checkEmailCoverage } from "../../../src/lib/items-parity";
 import { prisma } from "../../../src/lib/prisma";
 
 const tag = crypto.randomUUID().slice(0, 8);
@@ -123,9 +123,10 @@ describe("items backfill migration", () => {
     assert.ok(items.every((item) => item.case_request_id === requestId));
     assert.ok(items.every((item) => item.events.length === 1));
 
-    const parity = await checkEmailParity(requestId);
-    assert.equal(parity.problems.length, 0);
-    assert.equal(parity.checked, 8);
+    const coverage = await checkEmailCoverage(requestId);
+    // The one undecided email has no item until the queue migration runs.
+    assert.equal(coverage.missingCount, 1);
+    assert.equal(coverage.emails, 9);
 
     await runMigration();
     const again = await prisma.item.count({
