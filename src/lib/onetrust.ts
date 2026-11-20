@@ -227,6 +227,40 @@ async function loadForm(formId?: string | null): Promise<OneTrustFormConfig> {
   };
 }
 
+/**
+ * Body shape from the web form's Integrate > API "Expected Payload": request
+ * and user types go by display name, and no value may be null.
+ */
+function formRequestBody(
+  settings: Settings,
+  subject: {
+    firstName: string;
+    middleNames: string;
+    lastName: string;
+    email: string;
+    matterNumbers?: string | null;
+    requestTraceId: string;
+  },
+) {
+  return {
+    firstName: subject.firstName,
+    lastName: subject.lastName,
+    email: subject.email,
+    requestTypes: [OT_REQUEST_TYPE],
+    subjectTypes: [settings.oneTrustSubjectType],
+    language: settings.oneTrustLanguage,
+    additionalData: {
+      country: OT_COUNTRY,
+      [settings.oneTrustDateRaisedFieldKey]: currentDate(),
+      ...(subject.middleNames ? { formField78: subject.middleNames } : {}),
+      ...(subject.matterNumbers ? { loyaltyId: subject.matterNumbers } : {}),
+      requestDetails: "No additional request details provided.",
+    },
+    multiselectFields: { formField80: [OT_ON_CF_GR] },
+    requestTraceId: subject.requestTraceId,
+  };
+}
+
 async function createRequest(
   caseId: string,
   settings: Settings,
@@ -240,25 +274,18 @@ async function createRequest(
     throw new Error("The client case needs a subject email.");
   const formConfig = await loadForm(formId);
   const requestTraceId = crypto.randomUUID();
-  // Body shape from the web form's Integrate > API "Expected Payload": request
-  // and user types go by display name, and no value may be null.
-  const accepted = await createFormRequest(settings, formConfig, {
-    firstName,
-    lastName,
-    email: item.subject_email,
-    requestTypes: [OT_REQUEST_TYPE],
-    subjectTypes: [settings.oneTrustSubjectType],
-    language: settings.oneTrustLanguage,
-    additionalData: {
-      country: OT_COUNTRY,
-      [settings.oneTrustDateRaisedFieldKey]: currentDate(),
-      ...(middleNames ? { formField78: middleNames } : {}),
-      ...(item.matter_numbers ? { loyaltyId: item.matter_numbers } : {}),
-      requestDetails: "No additional request details provided.",
-    },
-    multiselectFields: { formField80: [OT_ON_CF_GR] },
-    requestTraceId,
-  });
+  const accepted = await createFormRequest(
+    settings,
+    formConfig,
+    formRequestBody(settings, {
+      firstName,
+      middleNames,
+      lastName,
+      email: item.subject_email,
+      matterNumbers: item.matter_numbers,
+      requestTraceId,
+    }),
+  );
   // Keep OneTrust's own trace ID (or ours) before anything else: it proves the
   // request was accepted, so a later click never creates a second one.
   const traceId = String(
@@ -648,6 +675,60 @@ export async function attachToResultSummary(
       ),
     ),
   });
+}
+
+/**
+ * Finds the request of a subject, or creates it through the web form (the same
+ * call a client case uses) and waits for OneTrust to expose it. Touches no case
+ * row: it exists for maintenance tests (`scripts/maintenance/`).
+ */
+export async function findOrCreateTestRequest(
+  fullName: string,
+  email: string,
+  waitMs = 5 * 60_000,
+): Promise<OneTrustRequestIdentity & { created: boolean }> {
+  const formConfig = await loadForm();
+  const settings = withFormSettings(
+    await getAiBatchSettings(),
+    await findForm(),
+  );
+  const token = await accessToken(settings);
+  const { firstName, middleNames, lastName } = nameParts(fullName);
+  const existing = await resolvePublicRequestIdentity(
+    settings,
+    token,
+    firstName,
+    lastName,
+    email,
+  );
+  if (existing) return { ...existing, created: false };
+  const requestTraceId = crypto.randomUUID();
+  await createFormRequest(
+    settings,
+    formConfig,
+    formRequestBody(settings, {
+      firstName,
+      middleNames,
+      lastName,
+      email,
+      requestTraceId,
+    }),
+  );
+  const deadline = Date.now() + waitMs;
+  while (Date.now() < deadline) {
+    await delay(5_000);
+    const identity = await resolvePublicRequestIdentity(
+      settings,
+      token,
+      firstName,
+      lastName,
+      email,
+    );
+    if (identity) return { ...identity, created: true };
+  }
+  throw new Error(
+    `OneTrust accepted the request (trace ${requestTraceId}) but did not expose it within ${Math.round(waitMs / 1000)} s.`,
+  );
 }
 
 /**

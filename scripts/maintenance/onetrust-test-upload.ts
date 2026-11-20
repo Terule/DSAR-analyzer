@@ -4,7 +4,10 @@
  * request is looked up by the subject's name and email. Run inside the app
  * container, where the stored OneTrust credentials can be decrypted:
  *
- *   tsx scripts/maintenance/onetrust-test-upload.ts <first> <last> <email> <file>...
+ *   tsx scripts/maintenance/onetrust-test-upload.ts [--create] <first> <last> <email> <file>...
+ *
+ * With --create the request is created through the web form first (only when
+ * none exists for that name and email).
  *
  * A file named `Email NN.pdf` is attached with a made-up subject and sent date,
  * the way an email PDF is delivered; any other file is attached without them.
@@ -15,25 +18,29 @@ import {
   accessToken,
   alreadyAttachedFileIds,
   attachToResultSummary,
+  findOrCreateTestRequest,
   resolvePublicRequestIdentity,
   uploadDocument,
 } from "../../src/lib/onetrust";
 import { getAiBatchSettings } from "../../src/lib/pipeline-settings";
 
 async function main() {
-  const [first, last, email, ...files] = process.argv.slice(2);
+  const args = process.argv.slice(2);
+  const create = args[0] === "--create";
+  const [first, last, email, ...files] = create ? args.slice(1) : args;
   if (!first || !last || !email || files.length === 0) {
     throw new Error("Usage: <first> <last> <email> <file>...");
   }
   const settings = await getAiBatchSettings();
   const token = await accessToken(settings);
-  const identity = await resolvePublicRequestIdentity(
-    settings,
-    token,
-    first,
-    last,
-    email,
-  );
+  const identity = create
+    ? await findOrCreateTestRequest(`${first} ${last}`, email)
+    : await resolvePublicRequestIdentity(settings, token, first, last, email);
+  if (create && identity && "created" in identity) {
+    console.log(
+      identity.created ? "Request created." : "Request already existed.",
+    );
+  }
   if (!identity) throw new Error("No OneTrust request found for that subject.");
   console.log("Request found:", identity.requestId);
   const before = await alreadyAttachedFileIds(

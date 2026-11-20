@@ -5,18 +5,18 @@ import {
   resultSummaryPath,
 } from "../../../src/lib/onetrust-attachments";
 
-test("files are attached through the v3 endpoint", () => {
+test("files are attached through the v2 endpoint", () => {
   assert.equal(
     resultSummaryPath("abc/123"),
-    "/api/datasubject/v3/datadiscovery/requestqueues/abc%2F123",
+    "/api/datasubject/v2/datadiscovery/requestqueues/abc%2F123",
   );
 });
 
-test("every attachment is marked for redaction", () => {
+test("an attachment names the file and its id", () => {
   assert.deepEqual(resultSummaryBody("AIDA", "a.pdf", "file-1"), {
     system: "AIDA",
     results: {},
-    attachments: [{ fileName: "a.pdf", fileId: "file-1", isRedact: true }],
+    attachments: [{ fileName: "a.pdf", fileId: "file-1" }],
   });
 });
 
@@ -36,7 +36,6 @@ test("an email attachment carries its subject and sent date", () => {
   assert.deepEqual(body.attachments[0], {
     fileName: "a.pdf",
     fileId: "f",
-    isRedact: true,
     emlAttachmentMetadata: {
       emlSubject: "Q3 budget",
       sendDate: "2026-03-12T10:00:00.000Z",

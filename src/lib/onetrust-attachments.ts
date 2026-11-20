@@ -1,11 +1,13 @@
 /**
- * How a delivered file is attached to a OneTrust request. Client-case files
- * must go through redaction in OneTrust, so every attachment is marked
- * `isRedact: true`; only the v3 Results Summary endpoint carries that flag
- * (the v2 one has no per-file redaction field).
+ * How a delivered file is attached to a OneTrust request: the v2 Results Summary
+ * endpoint. The v3 endpoint documents a per-attachment `isRedact`, but on our
+ * tenant it rejects every request that carries `attachments` with
+ * ERROR_DATASUBJECT-ACCESS_INVALID_DATA (tested 2026-11-20 with and without
+ * `isRedact`, `results` and email metadata), while v2 accepts them. Do not
+ * switch back to v3 without testing it on a request first.
  */
 export function resultSummaryPath(requestId: string): string {
-  return `/api/datasubject/v3/datadiscovery/requestqueues/${encodeURIComponent(requestId)}`;
+  return `/api/datasubject/v2/datadiscovery/requestqueues/${encodeURIComponent(requestId)}`;
 }
 
 export function resultSummaryBody(
@@ -23,7 +25,6 @@ export function resultSummaryBody(
       {
         fileName: attachmentName,
         fileId,
-        isRedact: true,
         ...(metadata ? { emlAttachmentMetadata: metadata } : {}),
       },
     ],
