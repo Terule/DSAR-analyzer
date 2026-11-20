@@ -6,6 +6,7 @@ import {
   isOneTrustDeliverablePath,
   renumberDeliverables,
 } from "./deliverable-sequence";
+import { resultSummaryBody, resultSummaryPath } from "./onetrust-attachments";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
@@ -607,22 +608,13 @@ async function attachToResultSummary(
   attachmentName: string,
   fileId: string,
 ) {
-  await oneTrustJson(
-    settings,
-    token,
-    `/api/datasubject/v2/datadiscovery/requestqueues/${encodeURIComponent(requestId)}`,
-    {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        system: settings.oneTrustSystemLabel,
-        // OneTrust's Results Summary API requires the dataset container even
-        // when this integration contributes only document attachments.
-        results: {},
-        attachments: [{ fileName: attachmentName, fileId }],
-      }),
-    },
-  );
+  await oneTrustJson(settings, token, resultSummaryPath(requestId), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(
+      resultSummaryBody(settings.oneTrustSystemLabel, attachmentName, fileId),
+    ),
+  });
 }
 
 export async function sendCaseToOneTrust(caseId: string, formId?: string) {
