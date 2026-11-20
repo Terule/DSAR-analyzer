@@ -186,3 +186,5 @@ export function formatClock(milliseconds: number): string {
 }
 
 export const count = (value: number) => value.toLocaleString("en-GB");
+
+export const formatUsd = (value: number) => `US$${value.toFixed(2)}`;

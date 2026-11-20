@@ -27,6 +27,7 @@ import {
 } from "./RequestDialogs";
 import { ScanInputModal } from "./ScanInputModal";
 import { SendOneTrustModal } from "./SendOneTrustModal";
+import { StatisticsModal } from "./StatisticsModal";
 import type { CaseItem, RequestItem } from "./types";
 import { Btn, Card, Dot, EmptyPanel, Page } from "./ui";
 import { type Insights, useInsights } from "./use-insights";
@@ -691,6 +692,7 @@ export function CasePage({ caseId }: { caseId: string }) {
   }, [item, requestName]);
 
   const [panel, setPanel] = useState<PanelKind>(null);
+  const [stats, setStats] = useState<"case" | "request" | null>(null);
   const [itemId, setItemId] = useState<string | null>(null);
   const [configure, setConfigure] = useState<CaseItem | null>(null);
   const [archive, setArchive] = useState<CaseItem | null>(null);
@@ -709,8 +711,7 @@ export function CasePage({ caseId }: { caseId: string }) {
   const insights = useInsights(request?.id ?? null, live);
 
   useEffect(() => {
-    if (search.get("view") === "statistics")
-      setPanel({ kind: "stage", stage: "statistics" });
+    if (search.get("view") === "statistics") setStats("case");
   }, [search]);
 
   const closePanel = useCallback(() => {
@@ -899,7 +900,7 @@ export function CasePage({ caseId }: { caseId: string }) {
             <>
               <Btn
                 kind="secondary"
-                onClick={() => setPanel({ kind: "decisions", step: "ai" })}
+                onClick={() => setPanel({ kind: "decisions", step: "review" })}
               >
                 View human review
               </Btn>
@@ -971,8 +972,16 @@ export function CasePage({ caseId }: { caseId: string }) {
   const actionEntries: MenuEntry[] = [
     {
       label: "Statistics",
-      onClick: () => setPanel({ kind: "stage", stage: "statistics" }),
+      onClick: () => setStats("case"),
     },
+    ...(reviewCount
+      ? [
+          {
+            label: `Human review (${count(reviewCount)})`,
+            onClick: () => setPanel({ kind: "decisions", step: "review" }),
+          } as MenuEntry,
+        ]
+      : []),
     { label: "Configure case", onClick: () => setConfigure(item) },
     ...(request && stage?.tone === "done"
       ? [
@@ -1074,8 +1083,7 @@ export function CasePage({ caseId }: { caseId: string }) {
                   ? [
                       {
                         label: "Statistics request",
-                        onClick: () =>
-                          setPanel({ kind: "stage", stage: "statistics" }),
+                        onClick: () => setStats("request"),
                         separatorBefore: true,
                       },
                       {
@@ -1169,7 +1177,9 @@ export function CasePage({ caseId }: { caseId: string }) {
           itemId ? (
             <ItemPanel
               itemId={itemId}
-              backLabel="AI decisions"
+              backLabel={
+                panel.step === "review" ? "Human review" : "AI decisions"
+              }
               onBack={() => setItemId(null)}
               onClose={closePanel}
             />
@@ -1177,7 +1187,8 @@ export function CasePage({ caseId }: { caseId: string }) {
             <DecisionsPanel
               requestId={request.id}
               title={`${caseName} · ${request.name}`}
-              step={panel.step}
+              step={panel.step === "review" ? null : panel.step}
+              review={panel.step === "review"}
               onClose={closePanel}
               onOpenItem={setItemId}
             />
@@ -1187,13 +1198,19 @@ export function CasePage({ caseId }: { caseId: string }) {
           <StageDrawer
             stage={panel.stage}
             request={request}
-            item={item}
             insights={insights}
             onClose={closePanel}
           />
         ) : null}
       </Drawer>
 
+      <StatisticsModal
+        mode={stats}
+        item={item}
+        request={request}
+        insights={insights}
+        onClose={() => setStats(null)}
+      />
       <ConfigureCaseModal
         target={configure}
         onClose={() => setConfigure(null)}
@@ -1272,13 +1289,11 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 function StageDrawer({
   stage,
   request,
-  item,
   insights,
   onClose,
 }: {
   stage: string;
   request: RequestItem;
-  item: CaseItem;
   insights: Insights | null;
   onClose: () => void;
 }) {
@@ -1287,43 +1302,6 @@ function StageDrawer({
   const files = request.stats?.files;
   const box =
     "mx-6 overflow-hidden rounded-xl border border-aida-card-line bg-aida-surface divide-y divide-aida-line";
-  if (stage === "statistics") {
-    const total = Object.values(timing ?? {}).reduce(
-      (sum, value) => sum + value,
-      0,
-    );
-    return (
-      <div className="flex flex-col gap-4 pb-8">
-        <DrawerHeader
-          title={`Statistics · ${request.name}`}
-          subtitle={`${item.name} · numbers for this request only.`}
-          onClose={onClose}
-        />
-        <div className={box}>
-          <Row label="Emails read" value={count(mail?.scanned ?? 0)} />
-          <Row label="Unique emails" value={count(mail?.unique ?? 0)} />
-          <Row
-            label="Emails delivered"
-            value={count(request.phaseProgress?.render?.done ?? 0)}
-          />
-          <Row label="Files delivered" value={count(files?.delivered ?? 0)} />
-          <Row
-            label="For human review"
-            value={count(insights?.funnel.forReview ?? 0)}
-          />
-          <Row
-            label="1st analysis"
-            value={`${count((insights?.funnel.ai.kept ?? 0) + (insights?.funnel.ai.discarded ?? 0))} items`}
-          />
-          <Row
-            label="Reanalysing"
-            value={`${count(insights?.reanalysing ?? 0)} items`}
-          />
-          <Row label="Time" value={formatClock(total)} />
-        </div>
-      </div>
-    );
-  }
   if (stage === "parse") {
     const pst = insights?.pst ?? [];
     return (

@@ -6,12 +6,17 @@ export function itemWhere(
   requestId: string,
   params: URLSearchParams,
 ): Prisma.ItemWhereInput {
-  const tab = (params.get("tab") ?? "emails") as ItemTab;
-  const base = tabFilter(tab);
+  const rawTab = params.get("tab") ?? "emails";
+  // "all" is the human review list: every kind of item together.
+  const base = rawTab === "all" ? null : tabFilter(rawTab as ItemTab);
   const where: Prisma.ItemWhereInput = {
     case_request_id: requestId,
-    origin: base.origin as string,
-    ...(base.kind ? { kind: base.kind } : {}),
+    ...(base
+      ? {
+          origin: base.origin as string,
+          ...(base.kind ? { kind: base.kind } : {}),
+        }
+      : {}),
   };
   const step = params.get("step");
   if (step) {

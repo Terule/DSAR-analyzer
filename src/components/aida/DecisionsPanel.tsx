@@ -88,6 +88,7 @@ export function DecisionsPanel({
   onClose,
   onOpenItem,
   initialTab = "emails",
+  review = false,
 }: {
   requestId: string;
   /** "Concerns..." style subtitle prefix: the case and request. */
@@ -97,9 +98,11 @@ export function DecisionsPanel({
   onClose: () => void;
   onOpenItem: (id: string) => void;
   initialTab?: ItemTab;
+  /** The human review list: every item a person must check, no tabs. */
+  review?: boolean;
 }) {
   const [tab, setTab] = useState<ItemTab>(initialTab);
-  const [state, setState] = useState<string>("");
+  const [state, setState] = useState<string>(review ? "review" : "");
   const [query, setQuery] = useState("");
   const [listing, setListing] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(true);
@@ -109,13 +112,13 @@ export function DecisionsPanel({
   const timer = useRef<number | null>(null);
 
   const params = useMemo(() => {
-    const search = new URLSearchParams({ tab });
+    const search = new URLSearchParams({ tab: review ? "all" : tab });
     if (step && step !== "ai") search.set("step", step);
     if (step === "ai") search.set("step", "ai");
     if (state) search.set("state", state);
     if (query.trim()) search.set("q", query.trim());
     return search;
-  }, [tab, step, state, query]);
+  }, [tab, step, state, query, review]);
 
   const load = useCallback(async () => {
     try {
@@ -188,15 +191,21 @@ export function DecisionsPanel({
     (sum, key) => sum + (counts[key] ?? 0),
     0,
   );
-  const info = (step && STEP_TITLES[step]) || heading || STEP_TITLES.ai;
+  const info = review
+    ? {
+        title: "For human review",
+        subtitle: `${count(counts.review ?? 0)} items are waiting for a person.`,
+      }
+    : (step && STEP_TITLES[step]) || heading || STEP_TITLES.ai;
   const showStates = step === "ai" || !step;
 
   const shown = ["kept", "discarded", "review", "pending"].reduce(
     (sum, key) => sum + (state && key !== state ? 0 : (counts[key] ?? 0)),
     0,
   );
-  const tabLabel =
-    tab === "emails"
+  const tabLabel = review
+    ? "Items"
+    : tab === "emails"
       ? "Emails"
       : tab === "attachments"
         ? "Attachments"
@@ -286,14 +295,26 @@ export function DecisionsPanel({
         actions={
           <button
             type="button"
-            onClick={() => setExporting(true)}
+            onClick={() => (review ? void runExport() : setExporting(true))}
             className="inline-flex items-center gap-2 rounded-[10px] bg-aida-primary px-3.5 py-2 text-[13px] font-semibold text-white hover:brightness-110"
           >
             <Download className="size-4" strokeWidth={2} /> Export CSV
           </button>
         }
       />
-      <div className="mt-4 flex gap-6 border-b border-aida-line px-6">
+      {review ? (
+        <p className="mx-6 mt-4 rounded-[10px] border border-aida-primary-line bg-[#0f1830] px-3.5 py-3 text-[13px] leading-5 text-aida-text-2">
+          A person must check these before delivery. For employee cases the
+          folder is delivered to the HR review folder on SharePoint; for client
+          cases it stays on disk for a person outside this app.
+        </p>
+      ) : null}
+      <div
+        className={cn(
+          "mt-4 flex gap-6 border-b border-aida-line px-6",
+          review && "hidden",
+        )}
+      >
         {(
           [
             ["emails", "Emails"],
@@ -317,10 +338,12 @@ export function DecisionsPanel({
         ))}
       </div>
       <div className="flex flex-wrap items-center gap-2 px-6 pt-4">
-        <FilterChip active={state === ""} onClick={() => setState("")}>
-          All {count(total)}
-        </FilterChip>
-        {showStates ? (
+        {review ? null : (
+          <FilterChip active={state === ""} onClick={() => setState("")}>
+            All {count(total)}
+          </FilterChip>
+        )}
+        {showStates && !review ? (
           <>
             <FilterChip
               active={state === "kept"}
@@ -373,6 +396,37 @@ export function DecisionsPanel({
         ) : (
           listing?.items.map((item) => {
             const pill = STATE_PILL[item.state];
+            if (review) {
+              const kind =
+                item.kind === "email"
+                  ? "Email"
+                  : item.kind === "chat_message"
+                    ? "Chat"
+                    : /\.(jpe?g|png|gif|bmp|tiff?|webp|heic)(\b|$)/i.test(
+                          item.label,
+                        )
+                      ? "Image"
+                      : "File";
+              return (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    onClick={() => onOpenItem(item.id)}
+                    className="grid w-full grid-cols-[minmax(0,1fr)_minmax(0,1fr)_56px] items-center gap-3 rounded-[10px] border border-aida-card-line bg-aida-surface px-3.5 py-3 text-left hover:border-aida-primary-line/70"
+                  >
+                    <span className="block truncate text-[13px] text-aida-text-2">
+                      {item.label}
+                    </span>
+                    <span className="block truncate text-[13px] text-aida-muted">
+                      {item.reason ?? "—"}
+                    </span>
+                    <Pill tone="amber" className="w-fit justify-self-end">
+                      {kind}
+                    </Pill>
+                  </button>
+                </li>
+              );
+            }
             return (
               <li key={item.id}>
                 <button
