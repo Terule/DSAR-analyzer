@@ -6,7 +6,17 @@ import {
   isOneTrustDeliverablePath,
   renumberDeliverables,
 } from "./deliverable-sequence";
-import { resultSummaryBody, resultSummaryPath } from "./onetrust-attachments";
+import {
+  attachedFileIds,
+  type EmailAttachmentMetadata,
+  emailMetadata,
+  emailNumberFromPath,
+  ledgerHashesByNumber,
+  MAX_RATE_LIMIT_RETRIES,
+  resultSummaryBody,
+  resultSummaryPath,
+  retryDelayMs,
+} from "./onetrust-attachments";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
@@ -75,12 +85,26 @@ function delay(milliseconds: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 }
 
+/** fetch that waits and retries when OneTrust answers 429 (Retry-After). */
+async function fetchOneTrust(
+  url: string,
+  init: RequestInit,
+): Promise<Response> {
+  for (let attempt = 0; ; attempt++) {
+    const response = await fetch(url, init);
+    if (response.status !== 429 || attempt >= MAX_RATE_LIMIT_RETRIES) {
+      return response;
+    }
+    await delay(retryDelayMs(response.headers.get("Retry-After"), attempt));
+  }
+}
+
 async function accessToken(settings: Settings): Promise<string> {
   const credentials = await runtimeCredentials();
   if (!credentials.oneTrustClientId || !credentials.oneTrustClientSecret) {
     throw new Error("Configure OneTrust OAuth credentials in System Settings.");
   }
-  const response = await fetch(
+  const response = await fetchOneTrust(
     `${settings.oneTrustTenantUrl}/api/access/v1/oauth/token`,
     {
       method: "POST",
@@ -111,11 +135,14 @@ async function oneTrustJson<T>(
   endpoint: string,
   init: RequestInit,
 ): Promise<T> {
-  const response = await fetch(`${settings.oneTrustTenantUrl}${endpoint}`, {
-    ...init,
-    headers: { Authorization: `Bearer ${token}`, ...init.headers },
-    cache: "no-store",
-  });
+  const response = await fetchOneTrust(
+    `${settings.oneTrustTenantUrl}${endpoint}`,
+    {
+      ...init,
+      headers: { Authorization: `Bearer ${token}`, ...init.headers },
+      cache: "no-store",
+    },
+  );
   const raw = await response.text();
   let body: {
     message?: string;
@@ -560,7 +587,7 @@ async function uploadDocument(
       Comments: "AIDA client-case deliverable.",
     }),
   );
-  const response = await fetch(
+  const response = await fetchOneTrust(
     `${settings.oneTrustTenantUrl}/api/document/v2/attachments`,
     {
       method: "POST",
@@ -607,14 +634,93 @@ async function attachToResultSummary(
   requestId: string,
   attachmentName: string,
   fileId: string,
+  metadata?: EmailAttachmentMetadata,
 ) {
   await oneTrustJson(settings, token, resultSummaryPath(requestId), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(
-      resultSummaryBody(settings.oneTrustSystemLabel, attachmentName, fileId),
+      resultSummaryBody(
+        settings.oneTrustSystemLabel,
+        attachmentName,
+        fileId,
+        metadata,
+      ),
     ),
   });
+}
+
+/**
+ * File ids OneTrust already shows on this request (read-back of every group), so
+ * a retry never attaches the same file twice. A failed read returns an empty
+ * set: the upload still proceeds, as before.
+ */
+async function alreadyAttachedFileIds(
+  settings: Settings,
+  token: string,
+  requestRef: string,
+): Promise<Set<string>> {
+  try {
+    const ref = encodeURIComponent(requestRef);
+    const groups = await oneTrustJson<Array<{ groupId?: string }>>(
+      settings,
+      token,
+      `/api/datasubject/v2/datadiscovery/requestqueues/${ref}`,
+      { method: "GET" },
+    );
+    const details = [];
+    for (const group of Array.isArray(groups) ? groups : []) {
+      if (!group.groupId) continue;
+      details.push(
+        await oneTrustJson<{
+          dataDiscoveryAttachmentListDtos?: Array<{ fileId?: string }>;
+        }>(
+          settings,
+          token,
+          `/api/datasubject/v2/datadiscovery/groups/${encodeURIComponent(group.groupId)}/requestqueues/${ref}?includeAttachments=true`,
+          { method: "GET" },
+        ),
+      );
+    }
+    return attachedFileIds(details);
+  } catch (error) {
+    console.warn("[OneTrust] Could not read back attached files:", error);
+    return new Set();
+  }
+}
+
+/** Subject and sent date of each `Email N` PDF, from the render ledger. */
+async function emailMetadataByNumber(
+  deliverablePath: string,
+): Promise<Map<number, EmailAttachmentMetadata>> {
+  const result = new Map<number, EmailAttachmentMetadata>();
+  try {
+    const ledger = path.join(
+      deliverablePath,
+      ".work",
+      "PST",
+      ".unique-emails",
+      "render-ledger.jsonl",
+    );
+    const hashes = ledgerHashesByNumber(await fs.readFile(ledger, "utf8"));
+    const emails = await prisma.email.findMany({
+      where: { email_hash: { in: [...hashes.values()] } },
+      select: { email_hash: true, sent_date: true },
+    });
+    const items = await prisma.item.findMany({
+      where: { id: { in: [...hashes.values()] } },
+      select: { id: true, label: true },
+    });
+    const sent = new Map(emails.map((e) => [e.email_hash, e.sent_date]));
+    const labels = new Map(items.map((i) => [i.id, i.label]));
+    for (const [number, hash] of hashes) {
+      const metadata = emailMetadata(labels.get(hash), sent.get(hash));
+      if (metadata) result.set(number, metadata);
+    }
+  } catch {
+    // No ledger (older request) or no database: send without metadata.
+  }
+  return result;
 }
 
 export async function sendCaseToOneTrust(caseId: string, formId?: string) {
@@ -772,8 +878,18 @@ export async function sendCaseToOneTrust(caseId: string, formId?: string) {
         OR: [{ status: "completed" }, { remote_file_id: { not: null } }],
       },
     });
-    if (alreadySent === 0)
-      renumberDeliverables(item.requests[0].deliverable_path);
+    const renamed =
+      alreadySent === 0
+        ? renumberDeliverables(item.requests[0].deliverable_path).renamed
+        : 0;
+    // Email numbers match the render ledger only when nothing was renamed by
+    // hand; a wrong subject next to a file is worse than none.
+    const metadataByNumber =
+      renamed === 0
+        ? await emailMetadataByNumber(item.requests[0].deliverable_path)
+        : new Map<number, EmailAttachmentMetadata>();
+    // Read back with the request reference, the id the attach call uses.
+    const attached = await alreadyAttachedFileIds(settings, token, requestId);
     const files = await collectFiles(item.requests[0].deliverable_path);
     const names = attachmentNames(files, item.requests[0].name);
     for (const [index, file] of files.entries()) {
@@ -853,13 +969,17 @@ export async function sendCaseToOneTrust(caseId: string, formId?: string) {
             },
           });
         }
-        await attachToResultSummary(
-          settings,
-          token,
-          requestId,
-          attachmentName,
-          fileId,
-        );
+        if (!attached.has(fileId)) {
+          const number = emailNumberFromPath(file.relativePath);
+          await attachToResultSummary(
+            settings,
+            token,
+            requestId,
+            attachmentName,
+            fileId,
+            number === null ? undefined : metadataByNumber.get(number),
+          );
+        }
         uploaded++;
         await prisma.oneTrustUploadArtifact.upsert({
           where: { local_path: file.localPath },
