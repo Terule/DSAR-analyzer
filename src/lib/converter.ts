@@ -1445,6 +1445,14 @@ export async function renderEmailAttachments(input: {
       if (!delivered && ext !== ".txt") {
         const why = REJECTION_TEXT[rejection ?? "error"];
         drop(file.filename, why.rule, why.reason);
+      } else if (delivered) {
+        // A delivered attachment is a kept item in the audit trail too.
+        keep(
+          file.filename,
+          "kept",
+          "attachment_delivered",
+          "Delivered as a PDF with its email.",
+        );
       }
     }
     finalizeAttachmentNames(directory, currentBaseName);
