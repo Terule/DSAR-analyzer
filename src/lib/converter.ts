@@ -1792,15 +1792,18 @@ export async function convertToPdfBatch(
     // These were tagged ai_decision = 'warning' during analysis and skipped AI.
     // Render them into Emails/Warning/ so reviewers can inspect them separately.
     const caseIdsForWarning = await getCasePstFileIds(fileId);
-    const warningRecords = await prisma.email.findMany({
-      where: {
-        file_id: { in: caseIdsForWarning },
-        ai_decision: "warning",
-        is_duplicate: 0,
-      },
-      select: { email_hash: true },
-      orderBy: { email_hash: "asc" },
-    });
+    const warningRecords = (
+      await prisma.item.findMany({
+        where: {
+          file_id: { in: caseIdsForWarning },
+          kind: "email",
+          state: "review",
+          decision_rule: "self_forward",
+        },
+        select: { id: true },
+        orderBy: { id: "asc" },
+      })
+    ).map((row) => ({ email_hash: row.id }));
 
     if (warningRecords.length > 0) {
       const warningDir = path.join(deliverablesDir, "Warning");

@@ -149,14 +149,17 @@ export async function gatherMailItems(input: {
   }
   // Self-forwards are rendered with their attachments too (employee cases).
   if (!input.isClient) {
-    const warnings = await prisma.email.findMany({
-      where: {
-        file_id: { in: await getCasePstFileIds(input.fileId) },
-        ai_decision: "warning",
-        is_duplicate: 0,
-      },
-      select: { email_hash: true },
-    });
+    const warnings = (
+      await prisma.item.findMany({
+        where: {
+          file_id: { in: await getCasePstFileIds(input.fileId) },
+          kind: "email",
+          state: "review",
+          decision_rule: "self_forward",
+        },
+        select: { id: true },
+      })
+    ).map((row) => ({ email_hash: row.id }));
     for (const { email_hash } of warnings) {
       const file = path.join(folders.rawEmails, `${email_hash}.eml`);
       if (fs.existsSync(file))

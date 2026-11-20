@@ -85,12 +85,13 @@ export async function GET(req: Request) {
             .map((file) => file.id);
           const audited =
             pstIds.length > 0
-              ? await prisma.email.groupBy({
+              ? await prisma.item.groupBy({
                   by: ["file_id"],
                   where: {
                     file_id: { in: pstIds },
-                    is_duplicate: 0,
-                    ai_decision: { not: null },
+                    kind: "email",
+                    state: { not: "pending" },
+                    decision_rule: { not: "dup" },
                   },
                   _count: { _all: true },
                 })

@@ -262,3 +262,22 @@ export async function createEmailRecord(options: {
     }),
   ]);
 }
+
+/** Kept and discarded emails of these files, counted from the audit trail (duplicates excluded). */
+export async function countEmailVerdicts(
+  fileIds: string[],
+): Promise<{ kept: number; discarded: number }> {
+  const groups = await prisma.item.groupBy({
+    by: ["state"],
+    where: {
+      file_id: { in: fileIds },
+      kind: "email",
+      state: { in: ["kept", "discarded"] },
+      decision_rule: { not: "dup" },
+    },
+    _count: { _all: true },
+  });
+  const count = (state: string) =>
+    groups.find((group) => group.state === state)?._count._all ?? 0;
+  return { kept: count("kept"), discarded: count("discarded") };
+}

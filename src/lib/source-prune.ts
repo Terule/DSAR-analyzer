@@ -76,14 +76,33 @@ export async function pruneWaveSourcePsts(
   );
   if (!delivered) return { deleted: 0, skipped: "no-output" };
 
-  const kept = await prisma.email.count({
-    where: {
-      file_id: { in: ids },
-      ai_decision: "keep",
-      is_attachment: 0,
-      is_duplicate: 0,
-    },
-  });
+  // The audit trail is the record now. The email rows are checked too, and the
+  // larger count wins: expecting fewer emails would let the PSTs be deleted
+  // while some are still undelivered.
+  const [keptItems, keptEmails] = await Promise.all([
+    prisma.item.count({
+      where: {
+        file_id: { in: ids },
+        kind: "email",
+        origin: "pst",
+        state: "kept",
+      },
+    }),
+    prisma.email.count({
+      where: {
+        file_id: { in: ids },
+        ai_decision: "keep",
+        is_attachment: 0,
+        is_duplicate: 0,
+      },
+    }),
+  ]);
+  if (keptItems !== keptEmails) {
+    console.warn(
+      `[Source Prune] ${fileId}: audit trail has ${keptItems} kept emails, the email rows ${keptEmails}; using the larger.`,
+    );
+  }
+  const kept = Math.max(keptItems, keptEmails);
   const deliveredEmails = countDeliveredEmails(
     path.join(request.deliverable_path, "Emails"),
     request.render_base ?? 0,

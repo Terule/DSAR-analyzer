@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import { after, before, describe, it } from "node:test";
 import {
+  countEmailVerdicts,
   createEmailRecord,
   decideEmail,
   decideEmails,
@@ -229,6 +230,41 @@ describe("email decisions (one writer)", () => {
       where: { email_hash: hash("atomic") },
     });
     assert.equal(email?.ai_decision, null);
+  });
+
+  it("counts kept and discarded emails from the audit trail, not the duplicates", async () => {
+    const before = await countEmailVerdicts([fileId]);
+    await plainEmail("count-a");
+    await plainEmail("count-b");
+    await decideEmail({
+      emailHash: hash("count-a"),
+      decision: "keep",
+      rule: "ai_email",
+      reason: "k",
+      decidedBy: "haiku-4.5",
+    });
+    await decideEmail({
+      emailHash: hash("count-b"),
+      decision: "discard",
+      rule: "ai_email",
+      reason: "d",
+      decidedBy: "haiku-4.5",
+    });
+    // A duplicate item and a self-forward are not counted as either.
+    await prisma.item.create({
+      data: {
+        id: hash("count-dup"),
+        file_id: fileId,
+        case_request_id: requestId,
+        kind: "email",
+        origin: "pst",
+        state: "discarded",
+        decision_rule: "dup",
+      },
+    });
+    const after = await countEmailVerdicts([fileId]);
+    assert.equal(after.kept, before.kept + 1);
+    assert.equal(after.discarded, before.discarded + 1);
   });
 
   it("leaves emails and items in agreement", async () => {

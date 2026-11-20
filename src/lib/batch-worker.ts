@@ -19,7 +19,7 @@ import {
 } from "./case-utils";
 import { enqueueFilePhase } from "./control-plane/pipeline";
 import { applyConfidentiality } from "./email-audit";
-import { planEmailDecisions } from "./email-decisions";
+import { countEmailVerdicts, planEmailDecisions } from "./email-decisions";
 import { configuredFilesAiClient } from "./files-ai-provider";
 import { startMailScreen } from "./mail-screen";
 import { getAiBatchSettings } from "./pipeline-settings";
@@ -717,22 +717,7 @@ async function pollSingleBatchStatus(
     // counter used for UI progress; keep the total >= done in case the initial
     // estimate was too low.
     const casePstIds = await getCasePstFileIds(fileId);
-    const [approved, discarded] = await Promise.all([
-      prisma.email.count({
-        where: {
-          file_id: { in: casePstIds },
-          is_duplicate: 0,
-          ai_decision: "keep",
-        },
-      }),
-      prisma.email.count({
-        where: {
-          file_id: { in: casePstIds },
-          is_duplicate: 0,
-          ai_decision: "discard",
-        },
-      }),
-    ]);
+    const { kept: approved, discarded } = await countEmailVerdicts(casePstIds);
     await prisma.$transaction(async (tx) => {
       const updated = await tx.processedFile.update({
         where: { id: fileId },

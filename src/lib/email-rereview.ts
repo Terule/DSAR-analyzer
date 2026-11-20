@@ -10,7 +10,7 @@ import { completeEmailAudit, emailRereviewPending } from "./batch-worker";
 import { CONVERSE_MODEL } from "./bedrock/config";
 import { getCasePstFileIds } from "./case-utils";
 import { applyConfidentiality } from "./email-audit";
-import { decideEmail } from "./email-decisions";
+import { countEmailVerdicts, decideEmail } from "./email-decisions";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 import {
@@ -88,14 +88,7 @@ function moveDiscardedToSelected(ctx: CaseContext, emailHash: string): void {
 /** Recomputes the case-level counters from the durable email rows. */
 async function recountEmailAudit(coordinatorId: string): Promise<void> {
   const ids = await getCasePstFileIds(coordinatorId);
-  const [approved, discarded] = await Promise.all([
-    prisma.email.count({
-      where: { file_id: { in: ids }, is_duplicate: 0, ai_decision: "keep" },
-    }),
-    prisma.email.count({
-      where: { file_id: { in: ids }, is_duplicate: 0, ai_decision: "discard" },
-    }),
-  ]);
+  const { kept: approved, discarded } = await countEmailVerdicts(ids);
   await prisma.processedFile.update({
     where: { id: coordinatorId },
     data: { ai_approved_count: approved, ai_discarded_count: discarded },
