@@ -184,6 +184,9 @@ model Email {
   is_duplicate      Int     @default(0)
   parent_email_hash String?
   is_attachment     Int     @default(0)
+  // The decision of record is the item (`items`, written by src/lib/email-decisions.ts).
+  // `ai_decision` stays as the AI work queue (null = waiting for the AI) and a mirror
+  // of the verdict; do not write it directly.
   ai_decision       String?
   ai_reason         String?
   ai_batch_run_id   String?

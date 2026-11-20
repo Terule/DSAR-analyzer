@@ -108,7 +108,45 @@ async function main() {
     },
   });
 
+  // The audit trail follows the decisions that are cleared: items the AI (or
+  // the mail screening) decided go back to pending, with an event, so the
+  // trail and the queue agree.
+  const resettableWhere = {
+    file_id: { in: targetPstIds },
+    kind: "email",
+    decision_rule: {
+      notIn: ["dup", "keyword", "subject_absent", "draft", "self_forward"],
+    },
+    state: { not: "pending" },
+  };
+  const resettableIds = (
+    await prisma.item.findMany({
+      where: resettableWhere,
+      select: { id: true },
+    })
+  ).map((item) => item.id);
+  const eventChunks = [];
+  for (let start = 0; start < resettableIds.length; start += 5_000) {
+    eventChunks.push(
+      prisma.itemEvent.createMany({
+        data: resettableIds
+          .slice(start, start + 5_000)
+          .map((id) => ({ item_id: id, state: "pending" })),
+      }),
+    );
+  }
+
   await prisma.$transaction([
+    ...eventChunks,
+    prisma.item.updateMany({
+      where: resettableWhere,
+      data: {
+        state: "pending",
+        decision_rule: null,
+        reason: null,
+        decided_by: null,
+      },
+    }),
     // Clear durable Batch claims before allowing a new AI run.  Any remote
     // batches from the previous run must be cancelled separately; this reset
     // intentionally never reuses their request ownership.
