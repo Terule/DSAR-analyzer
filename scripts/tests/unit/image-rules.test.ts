@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import zlib from "node:zlib";
 import type { Attachment } from "mailparser";
 import { renderEmailAttachments } from "../../../src/lib/converter";
+import { imageHash } from "../../../src/lib/image-recurrence";
 import {
   classifyImage,
   isImageFilename,
@@ -212,5 +213,79 @@ describe("images in a Files folder", () => {
     const documents = fs.readdirSync(path.join(out, "Documents"));
     assert.equal(documents.length, 1);
     assert.match(documents[0], /\.pdf$/);
+  });
+});
+
+describe("embedded, recurring and repeated images", () => {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), "image-recur-"));
+  const att = (
+    filename: string,
+    content: Buffer,
+    extra: Record<string, unknown> = {},
+  ) => ({ filename, content, ...extra }) as unknown as Attachment;
+
+  async function run(
+    attachments: Attachment[],
+    options: {
+      bodyHtml?: string;
+      imageRecurrence?: Map<string, number>;
+      seenImages?: Set<string>;
+    } = {},
+  ) {
+    const outputDir = fs.mkdtempSync(path.join(work, "out-"));
+    const reviewDir = fs.mkdtempSync(path.join(work, "review-"));
+    const drops: { filename: string; rule: string; reason: string }[] = [];
+    const keeps: { filename: string; state: string; rule: string }[] = [];
+    await renderEmailAttachments({
+      attachments,
+      currentBaseName: "Email 0001",
+      outputDir,
+      reviewDir,
+      criteria: ["jonathan wheeler"],
+      onDrop: (d) => drops.push(d),
+      onKeep: (k) => keeps.push(k),
+      ...options,
+    });
+    return { review: fs.readdirSync(reviewDir).sort(), drops, keeps };
+  }
+
+  it("skips an image the email body already shows (Content-ID), and says so", async () => {
+    const result = await run(
+      [att("photo.png", png(300, 300, true), { contentId: "<abc@x>" })],
+      { bodyHtml: '<p>Hello</p><img src="cid:abc@x">' },
+    );
+    assert.deepEqual(result.review, []);
+    assert.deepEqual(result.drops, []);
+    assert.equal(result.keeps[0].rule, "embedded_in_email");
+    assert.equal(result.keeps[0].state, "kept");
+  });
+
+  it("an image that recurs across emails is a signature, unless it is document-sized", async () => {
+    const small = png(200, 150);
+    const counts = new Map([[imageHash(small), 5]]);
+    const dropped = await run([att("banner-x.png", small)], {
+      imageRecurrence: counts,
+    });
+    assert.deepEqual(dropped.review, []);
+    assert.equal(dropped.drops[0].rule, "signature_image");
+    assert.match(dropped.drops[0].reason, /attached to 5 emails/);
+
+    const big = png(300, 300, true);
+    const kept = await run([att("scan.png", big)], {
+      imageRecurrence: new Map([[imageHash(big), 9]]),
+    });
+    assert.equal(kept.review.length, 1);
+  });
+
+  it("sends a repeated image for review only once", async () => {
+    const image = png(300, 300, true);
+    const seen = new Set<string>();
+    const first = await run([att("scan.png", image)], { seenImages: seen });
+    const second = await run([att("scan.png", image)], { seenImages: seen });
+    assert.equal(first.review.length, 1);
+    assert.equal(first.keeps[0].rule, "image_review");
+    assert.equal(first.keeps[0].state, "review");
+    assert.deepEqual(second.review, []);
+    assert.equal(second.drops[0].rule, "dup");
   });
 });

@@ -17,8 +17,10 @@ import { discardedForKeyword } from "./email-rules";
 import {
   hasPrivilegedKeyword,
   hasPrivilegedKeywordInDocument,
+  hasPrivilegedKeywordInFileName,
 } from "./exclusions";
 import { classifyImage, IMAGE_EXTENSIONS, readImageFacts } from "./image-rules";
+import type { ChildItemDecision } from "./items";
 import { fileDiscardRule } from "./items";
 import {
   isPasswordProtectedFile,
@@ -78,6 +80,8 @@ export interface FileDecision {
   reason: string;
   /** For a kept file: where it was delivered, as `Documents/<name>` or `Messages/<name>`. */
   deliveredRel?: string;
+  /** For a chat export: what happened to each message that cites the subject. */
+  messages?: ChildItemDecision[];
 }
 
 export interface StandaloneBatchResult {
@@ -872,6 +876,9 @@ export async function runStandaloneBatch(
 
   // Every filter discard goes through here: it keeps the log line the operators
   // read and tells the audit trail which rule decided.
+  // Per-message decisions of the chat export being judged, handed to the next
+  // decision reported for that file.
+  let chatMessageDecisions: ChildItemDecision[] | undefined;
   const recordDiscard = (filePath: string, text: string) => {
     console.log(`[Standalone Filter] ${text}`);
     try {
@@ -880,6 +887,9 @@ export async function runStandaloneBatch(
         state: "discarded",
         rule: fileDiscardRule(text),
         reason: text.replace(/^Discarded\s+/, ""),
+        ...(chatMessageDecisions?.length
+          ? { messages: chatMessageDecisions }
+          : {}),
       });
     } catch (error) {
       console.warn("[Standalone Filter] Audit trail callback failed:", error);
@@ -928,6 +938,7 @@ export async function runStandaloneBatch(
   for (const filePath of allFiles) {
     fileIndex++;
     const file = path.basename(filePath);
+    chatMessageDecisions = undefined;
 
     // Skip hidden system files and JSON metadata files
     if (file.startsWith(".") || file.toLowerCase().endsWith(".json")) continue;
@@ -968,6 +979,22 @@ export async function runStandaloneBatch(
         recordDiscard(
           filePath,
           `Discarded ${file}: Password-protected/encrypted file.`,
+        );
+        skippedCount++;
+        continue;
+      }
+
+      // A privileged/confidential keyword in the name of a document discards it,
+      // as it does in the name of an email attachment. Chat and mail exports are
+      // judged by their content instead.
+      if (
+        !bypassFilters &&
+        !MESSAGE_EXTENSIONS.has(ext) &&
+        hasPrivilegedKeywordInFileName(file)
+      ) {
+        recordDiscard(
+          filePath,
+          `Discarded ${ext.toUpperCase()} ${file}: Contains excluded keyword in the file name.`,
         );
         skippedCount++;
         continue;
@@ -1113,6 +1140,7 @@ export async function runStandaloneBatch(
         const rawPlainText = toPlainTextFromHtml(rawHtml);
         const plainText = stripEmailSignature(rawPlainText);
         const chatMessages = bypassFilters ? [] : parseChatMessages(rawHtml);
+        chatMessageDecisions = undefined;
         let htmlToRender = rawHtml;
         let discardNote: string | null = null;
 
@@ -1140,6 +1168,44 @@ export async function runStandaloneBatch(
               hasPrivilegedKeywordInDocument(text) &&
               !textShowsSentToPersonalAddress(text, subjectEmail)
             );
+          });
+          // What happened to each message that cites the subject, for the audit trail.
+          const keptIds = new Set<string>();
+          const droppedIds = new Set<string>();
+          for (const excerpt of excerpts) {
+            const target = kept.includes(excerpt) ? keptIds : droppedIds;
+            for (const id of excerpt.candidateIds) target.add(id);
+          }
+          chatMessageDecisions = [];
+          chatMessages.forEach((message, index) => {
+            if (!messageCitesSubject(message, subjectNameTokens)) return;
+            const base = {
+              key: messageKey(message),
+              label: `Message ${index + 1} of ${chatMessages.length}`,
+            };
+            if (keptIds.has(message.id)) {
+              chatMessageDecisions?.push({
+                ...base,
+                state: "kept",
+                rule: "chat_excerpt",
+                reason: "Cites the subject; kept with the messages around it.",
+              });
+            } else if (droppedIds.has(message.id)) {
+              chatMessageDecisions?.push({
+                ...base,
+                state: "discarded",
+                rule: "keyword",
+                reason: "Contains excluded keyword.",
+              });
+            } else {
+              chatMessageDecisions?.push({
+                ...base,
+                state: "discarded",
+                rule: "dup",
+                reason:
+                  "The same message was already delivered from another export.",
+              });
+            }
           });
           if (excerpts.length === 0) {
             discardNote = chatMessages.some((message) =>
@@ -1610,6 +1676,9 @@ export async function runStandaloneBatch(
               rule: "files_filter",
               reason: "Passed the file filters.",
               deliveredRel: `${path.basename(path.dirname(producedPath))}/${path.basename(producedPath)}`,
+              ...(chatMessageDecisions?.length
+                ? { messages: chatMessageDecisions }
+                : {}),
             });
           } catch (error) {
             console.warn(

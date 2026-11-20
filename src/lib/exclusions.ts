@@ -49,3 +49,14 @@ export function hasPrivilegedKeyword(subject: string, body: string): boolean {
 export function hasPrivilegedKeywordInDocument(text: string): boolean {
   return PRIVILEGED_KEYWORDS_RE.test(stripConfidentialityNotice(text));
 }
+
+/**
+ * A privileged/confidential keyword in a document's file name ("Confidential -
+ * board minutes.docx", "Privileged_advice.pdf"). Separators count as spaces so
+ * the whole-word match still finds the word. Messages are judged by their
+ * content, not by the name of the export.
+ */
+export function hasPrivilegedKeywordInFileName(fileName: string): boolean {
+  const base = fileName.replace(/\.[A-Za-z0-9]{1,5}$/, "");
+  return PRIVILEGED_KEYWORDS_RE.test(base.replace(/[_.\-+]+/g, " "));
+}

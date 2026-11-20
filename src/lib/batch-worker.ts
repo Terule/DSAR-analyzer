@@ -158,6 +158,27 @@ function moveEmailToBucket(
   if (fs.existsSync(sameBucketPath)) return;
 }
 
+/**
+ * The subject's own address is in From or To of the first email. This is what
+ * sends a Haiku 4.5 discard to the second review ("the subject is plainly
+ * involved"); a name in the subject line or twice in the body is not enough,
+ * because that opened the second review for most discards.
+ */
+export function subjectIsDirectParty(
+  payloadText: string,
+  criteria: SubjectCriteria,
+): boolean {
+  const from = extractHeader(payloadText, "From");
+  const to = extractHeader(payloadText, "To");
+  for (const address of [criteria.email, criteria.personalEmail]) {
+    const value = (address || "").trim().toLowerCase();
+    if (!value) continue;
+    const pattern = new RegExp(`\\b${escapeRegExp(value)}\\b`, "i");
+    if (pattern.test(from) || pattern.test(to)) return true;
+  }
+  return false;
+}
+
 export function hasStrongSubjectSignal(
   payloadText: string,
   criteria: SubjectCriteria,
@@ -607,7 +628,7 @@ async function pollSingleBatchStatus(
             sensitivity: decisionData.sensitivity ?? null,
             subjectInvolved:
               !!payloadText &&
-              hasStrongSubjectSignal(payloadText, subjectCriteria),
+              subjectIsDirectParty(payloadText, subjectCriteria),
           },
           rereviewConfig,
         );

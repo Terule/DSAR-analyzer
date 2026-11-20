@@ -320,6 +320,95 @@ describe("items audit trail (shadow mode)", () => {
     );
   });
 
+  it("records the messages of a chat export as children, once", async () => {
+    const relPath = "Messages/Message abc.pdf";
+    const decision = {
+      relPath,
+      label: "Items/Chat_1.html",
+      state: "kept" as const,
+      rule: "files_filter",
+      reason: "Passed the file filters.",
+      decidedBy: "rule",
+      children: [
+        {
+          key: "k1",
+          label: "Message 2 of 12",
+          state: "discarded" as const,
+          rule: "keyword",
+          reason: "Contains excluded keyword.",
+        },
+        {
+          key: "k2",
+          label: "Message 11 of 12",
+          state: "kept" as const,
+          rule: "chat_excerpt",
+          reason: "Cites the subject; kept with the messages around it.",
+        },
+      ],
+    };
+    await recordFileItems(fileId, [decision]);
+    await recordFileItems(fileId, [decision]);
+    const parentId = fileItemId(fileId, relPath);
+    const kids = await prisma.item.findMany({
+      where: { parent_id: parentId },
+      orderBy: { label: "asc" },
+    });
+    assert.deepEqual(
+      kids.map((k) => [k.kind, k.label, k.state, k.decision_rule]),
+      [
+        ["chat_message", "Message 11 of 12", "kept", "chat_excerpt"],
+        ["chat_message", "Message 2 of 12", "discarded", "keyword"],
+      ],
+    );
+    assert.equal(
+      await prisma.itemEvent.count({
+        where: { item_id: { in: kids.map((k) => k.id) } },
+      }),
+      2,
+      "idempotent: one event per child",
+    );
+  });
+
+  it("records attachment decisions in bulk and updates only what changed", async () => {
+    await email("bulk");
+    const base = {
+      state: "discarded" as const,
+      rule: "signature_image",
+      reason: "Signature or decoration image.",
+      decidedBy: "rule",
+    };
+    const names = Array.from({ length: 5 }, (_, i) => `img-${i}.png`);
+    await recordAttachmentItems(
+      fileId,
+      hash("bulk"),
+      names.map((filename) => ({ filename, ...base })),
+    );
+    await recordAttachmentItems(
+      fileId,
+      hash("bulk"),
+      names.map((filename, i) => ({
+        filename,
+        ...base,
+        ...(i === 0
+          ? {
+              state: "review" as const,
+              rule: "image_review",
+              reason: "A person decides.",
+            }
+          : {}),
+      })),
+    );
+    const rows = await prisma.item.findMany({
+      where: { parent_id: hash("bulk") },
+    });
+    assert.equal(rows.length, 5);
+    assert.equal(rows.filter((r) => r.state === "review").length, 1);
+    const events = await prisma.itemEvent.count({
+      where: { item_id: { in: rows.map((r) => r.id) } },
+    });
+    assert.equal(events, 6, "five creations and one change");
+  });
+
   it("never throws, even for hashes that do not exist", async () => {
     await syncEmailItems(["missing", ""]);
     assert.equal(

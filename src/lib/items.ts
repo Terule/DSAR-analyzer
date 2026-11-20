@@ -213,6 +213,19 @@ export interface FileItemDecision {
   rule: string;
   reason: string | null;
   decidedBy: string;
+  /** Items inside this one, such as the messages of a chat export. */
+  children?: ChildItemDecision[];
+}
+
+/** A part of a file that was judged on its own (a chat message). */
+export interface ChildItemDecision {
+  /** Stable key inside the parent, for example the message key. */
+  key: string;
+  /** A neutral name: a position, never an author or text. */
+  label: string;
+  state: ItemState;
+  rule: string;
+  reason: string | null;
 }
 
 /**
@@ -240,13 +253,21 @@ export async function recordFileItems(
           decided_by: true,
         },
       });
-      if (
+      const unchanged =
         previous &&
         previous.state === decision.state &&
         previous.decision_rule === decision.rule &&
         previous.reason === decision.reason &&
-        previous.decided_by === decision.decidedBy
-      ) {
+        previous.decided_by === decision.decidedBy;
+      if (unchanged) {
+        if (decision.children?.length) {
+          await recordChildItems(
+            fileId,
+            row?.case_request_id ?? null,
+            id,
+            decision.children,
+          );
+        }
         continue;
       }
       await prisma.$transaction([
@@ -282,9 +303,74 @@ export async function recordFileItems(
           },
         }),
       ]);
+      if (decision.children?.length) {
+        await recordChildItems(
+          fileId,
+          row?.case_request_id ?? null,
+          id,
+          decision.children,
+        );
+      }
     }
   } catch (error) {
     console.warn("[Items] Could not record the audit trail:", error);
+  }
+}
+
+/** Records the parts of one item (chat messages) in bulk; idempotent. Never throws. */
+async function recordChildItems(
+  fileId: string,
+  caseRequestId: string | null,
+  parentId: string,
+  children: ChildItemDecision[],
+): Promise<void> {
+  try {
+    const prepared = children.map((child) => ({
+      id: crypto
+        .createHash("sha256")
+        .update(`child:${parentId}:${child.key}`)
+        .digest("hex"),
+      child,
+    }));
+    const existing = new Set(
+      (
+        await prisma.item.findMany({
+          where: { id: { in: prepared.map((entry) => entry.id) } },
+          select: { id: true },
+        })
+      ).map((item) => item.id),
+    );
+    const fresh = prepared.filter((entry) => !existing.has(entry.id));
+    if (fresh.length === 0) return;
+    await prisma.$transaction([
+      prisma.item.createMany({
+        skipDuplicates: true,
+        data: fresh.map(({ id, child }) => ({
+          id,
+          case_request_id: caseRequestId,
+          file_id: fileId,
+          parent_id: parentId,
+          kind: "chat_message",
+          origin: "files_folder",
+          label: child.label,
+          state: child.state,
+          decision_rule: child.rule,
+          reason: child.reason,
+          decided_by: "rule",
+        })),
+      }),
+      prisma.itemEvent.createMany({
+        data: fresh.map(({ id, child }) => ({
+          item_id: id,
+          state: child.state,
+          decision_rule: child.rule,
+          reason: child.reason,
+          decided_by: "rule",
+        })),
+      }),
+    ]);
+  } catch (error) {
+    console.warn("[Items] Could not record chat messages:", error);
   }
 }
 
@@ -297,6 +383,7 @@ export function fileDecisionToItem(
     rule: string;
     reason: string;
     deliveredRel?: string;
+    messages?: ChildItemDecision[];
   },
 ): FileItemDecision {
   const inputRel = path.relative(inputDir, decision.filePath);
@@ -307,6 +394,7 @@ export function fileDecisionToItem(
     rule: decision.rule,
     reason: decision.reason,
     decidedBy: "rule",
+    ...(decision.messages?.length ? { children: decision.messages } : {}),
   };
 }
 
@@ -320,7 +408,9 @@ export interface AttachmentDecision {
 
 /**
  * Records what happened to an email's attachments, as items whose parent is the
- * email. A zip entry carries its path inside the archive in `filename`. Never throws.
+ * email. A zip entry carries its path inside the archive in `filename`. Written
+ * in bulk (one read, one insert, updates only for what changed) because a case
+ * can have tens of thousands of attachments. Never throws.
  */
 export async function recordAttachmentItems(
   fileId: string,
@@ -333,52 +423,90 @@ export async function recordAttachmentItems(
       where: { id: fileId },
       select: { case_request_id: true },
     });
-    for (const decision of decisions) {
-      const id = crypto
+    const prepared = decisions.map((decision) => ({
+      id: crypto
         .createHash("sha256")
         .update(`attachment:${parentHash}:${decision.filename}`)
-        .digest("hex");
-      const data = {
-        state: decision.state,
-        decision_rule: decision.rule,
-        reason: decision.reason,
-        decided_by: decision.decidedBy,
-      };
-      const previous = await prisma.item.findUnique({
-        where: { id },
-        select: {
-          state: true,
-          decision_rule: true,
-          reason: true,
-          decided_by: true,
-        },
-      });
+        .digest("hex"),
+      decision,
+    }));
+    const existing = new Map(
+      (
+        await prisma.item.findMany({
+          where: { id: { in: prepared.map((entry) => entry.id) } },
+          select: {
+            id: true,
+            state: true,
+            decision_rule: true,
+            reason: true,
+            decided_by: true,
+          },
+        })
+      ).map((item) => [item.id, item]),
+    );
+    const fresh: typeof prepared = [];
+    for (const entry of prepared) {
+      const previous = existing.get(entry.id);
+      const d = entry.decision;
+      if (!previous) {
+        fresh.push(entry);
+        continue;
+      }
       if (
-        previous &&
-        previous.state === data.state &&
-        previous.decision_rule === data.decision_rule &&
-        previous.reason === data.reason &&
-        previous.decided_by === data.decided_by
+        previous.state === d.state &&
+        previous.decision_rule === d.rule &&
+        previous.reason === d.reason &&
+        previous.decided_by === d.decidedBy
       ) {
         continue;
       }
       await prisma.$transaction([
-        prisma.item.upsert({
-          where: { id },
-          create: {
+        prisma.item.update({
+          where: { id: entry.id },
+          data: {
+            state: d.state,
+            decision_rule: d.rule,
+            reason: d.reason,
+            decided_by: d.decidedBy,
+          },
+        }),
+        prisma.itemEvent.create({
+          data: {
+            item_id: entry.id,
+            state: d.state,
+            decision_rule: d.rule,
+            reason: d.reason,
+            decided_by: d.decidedBy,
+          },
+        }),
+      ]);
+    }
+    if (fresh.length > 0) {
+      await prisma.$transaction([
+        prisma.item.createMany({
+          skipDuplicates: true,
+          data: fresh.map(({ id, decision: d }) => ({
             id,
             case_request_id: row?.case_request_id ?? null,
             file_id: fileId,
             parent_id: parentHash,
             kind: "file",
             origin: "attachment",
-            label: decision.filename,
-            ...data,
-          },
-          update: data,
+            label: d.filename,
+            state: d.state,
+            decision_rule: d.rule,
+            reason: d.reason,
+            decided_by: d.decidedBy,
+          })),
         }),
-        prisma.itemEvent.create({
-          data: { item_id: id, ...data, state: data.state },
+        prisma.itemEvent.createMany({
+          data: fresh.map(({ id, decision: d }) => ({
+            item_id: id,
+            state: d.state,
+            decision_rule: d.rule,
+            reason: d.reason,
+            decided_by: d.decidedBy,
+          })),
         }),
       ]);
     }

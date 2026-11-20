@@ -13,9 +13,18 @@ import mammoth from "mammoth";
 import * as xlsx from "xlsx";
 import { getCasePstFileIds } from "./case-utils";
 import { type AttachmentDrop, flattenAttachments } from "./email-attachments";
-import { hasPrivilegedKeywordInDocument } from "./exclusions";
+import {
+  hasPrivilegedKeywordInDocument,
+  hasPrivilegedKeywordInFileName,
+} from "./exclusions";
 import { listHumanReviewDeliverables } from "./files-ai-apply";
 import { archiveCompletedCase } from "./history";
+import {
+  countImageRecurrence,
+  imageHash,
+  isEmbeddedInBody,
+  RECURRENCE_MIN_EMAILS,
+} from "./image-recurrence";
 import { classifyImage, isImageFilename, readImageFacts } from "./image-rules";
 import {
   type AttachmentDecision,
@@ -657,6 +666,28 @@ function generateEmailHtml(
   return sanitizeFontsForPdf(html);
 }
 
+export type DocumentRejection =
+  | "keyword"
+  | "subject_absent"
+  | "duplicate"
+  | "error";
+
+const REJECTION_TEXT: Record<
+  DocumentRejection,
+  { rule: string; reason: string }
+> = {
+  keyword: { rule: "keyword", reason: "Contains excluded keyword." },
+  subject_absent: {
+    rule: "subject_absent",
+    reason: "Data subject not mentioned.",
+  },
+  duplicate: { rule: "dup", reason: "Duplicate content." },
+  error: {
+    rule: "unreadable",
+    reason: "The document could not be read or converted.",
+  },
+};
+
 export async function processDocxToPdf(
   buffer: Buffer,
   outputPath: string,
@@ -665,6 +696,7 @@ export async function processDocxToPdf(
   processedHashes?: Set<string>,
   bypassKeywordFilter = false,
   personalEmail?: string,
+  onReject?: (reason: DocumentRejection) => void,
 ): Promise<boolean> {
   try {
     const textExtraction = await mammoth.extractRawText({ buffer });
@@ -675,17 +707,25 @@ export async function processDocxToPdf(
       !bypassKeywordFilter &&
       hasPrivilegedKeywordInDocument(rawText) &&
       !textShowsSentToPersonalAddress(sourceText, personalEmail)
-    )
+    ) {
+      onReject?.("keyword");
       return false;
+    }
 
-    if (!mentionsSubject(rawText, criteria)) return false;
+    if (!mentionsSubject(rawText, criteria)) {
+      onReject?.("subject_absent");
+      return false;
+    }
 
     if (processedHashes) {
       const contentHash = crypto
         .createHash("sha256")
         .update(rawText)
         .digest("hex");
-      if (processedHashes.has(contentHash)) return false;
+      if (processedHashes.has(contentHash)) {
+        onReject?.("duplicate");
+        return false;
+      }
       processedHashes.add(contentHash);
     }
 
@@ -704,6 +744,7 @@ export async function processDocxToPdf(
 
     return true;
   } catch (_err) {
+    onReject?.("error");
     return false;
   }
 }
@@ -716,6 +757,7 @@ export async function processExcelToPdf(
   processedHashes?: Set<string>,
   bypassKeywordFilter = false,
   personalEmail?: string,
+  onReject?: (reason: DocumentRejection) => void,
 ): Promise<boolean> {
   try {
     const escapeHtml = (value: string): string =>
@@ -794,8 +836,10 @@ export async function processExcelToPdf(
       !bypassKeywordFilter &&
       hasPrivilegedKeywordInDocument(workbookText) &&
       !textShowsSentToPersonalAddress(workbookText, personalEmail)
-    )
+    ) {
+      onReject?.("keyword");
       return false;
+    }
 
     let htmlContent = `
       <html><head><title>${docTitle}</title><style>
@@ -922,14 +966,20 @@ export async function processExcelToPdf(
       }
     }
 
-    if (!foundMatches) return false;
+    if (!foundMatches) {
+      onReject?.("subject_absent");
+      return false;
+    }
 
     if (processedHashes) {
       const contentHash = crypto
         .createHash("sha256")
         .update(htmlContent)
         .digest("hex");
-      if (processedHashes.has(contentHash)) return false;
+      if (processedHashes.has(contentHash)) {
+        onReject?.("duplicate");
+        return false;
+      }
       processedHashes.add(contentHash);
     }
 
@@ -945,6 +995,7 @@ export async function processExcelToPdf(
 
     return true;
   } catch (_err) {
+    onReject?.("error");
     return false;
   }
 }
@@ -957,6 +1008,7 @@ export async function processPdfAttachment(
   processedHashes?: Set<string>,
   bypassKeywordFilter = false,
   personalEmail?: string,
+  onReject?: (reason: DocumentRejection) => void,
 ): Promise<boolean> {
   try {
     const rawText = (await extractPdfText(buffer)).toLowerCase();
@@ -964,23 +1016,32 @@ export async function processPdfAttachment(
       !bypassKeywordFilter &&
       hasPrivilegedKeywordInDocument(rawText) &&
       !textShowsSentToPersonalAddress(rawText, personalEmail)
-    )
+    ) {
+      onReject?.("keyword");
       return false;
+    }
 
-    if (!mentionsSubject(rawText, criteria)) return false;
+    if (!mentionsSubject(rawText, criteria)) {
+      onReject?.("subject_absent");
+      return false;
+    }
 
     if (processedHashes) {
       const contentHash = crypto
         .createHash("sha256")
         .update(rawText)
         .digest("hex");
-      if (processedHashes.has(contentHash)) return false;
+      if (processedHashes.has(contentHash)) {
+        onReject?.("duplicate");
+        return false;
+      }
       processedHashes.add(contentHash);
     }
 
     fs.writeFileSync(outputPath, buffer);
     return true;
   } catch (_err) {
+    onReject?.("error");
     return false;
   }
 }
@@ -1133,9 +1194,23 @@ export async function renderEmailAttachments(input: {
    */
   screen?: Map<string, { verdict: string; reason: string }> | null;
   reviewDir?: string;
+  /** The message's HTML, to tell images embedded in the body from real attachments. */
+  bodyHtml?: string;
+  /** Image hash -> number of emails carrying it (see image-recurrence.ts). */
+  imageRecurrence?: Map<string, number>;
+  /** Images already sent for review in this Render run, so a repeat is not sent again. */
+  seenImages?: Set<string>;
   /** Audit trail: told about every attachment that is not delivered, and why. */
   onDrop?: (drop: {
     filename: string;
+    rule: string;
+    reason: string;
+    decidedBy: string;
+  }) => void;
+  /** Audit trail: told about images that stay (embedded in the email, or sent for review). */
+  onKeep?: (keep: {
+    filename: string;
+    state: "kept" | "review";
     rule: string;
     reason: string;
     decidedBy: string;
@@ -1155,6 +1230,18 @@ export async function renderEmailAttachments(input: {
       console.warn("[Attachments] Audit trail callback failed:", error);
     }
   };
+  const keep = (
+    filename: string,
+    state: "kept" | "review",
+    rule: string,
+    reason: string,
+  ) => {
+    try {
+      input.onKeep?.({ filename, state, rule, reason, decidedBy: "rule" });
+    } catch (error) {
+      console.warn("[Attachments] Audit trail callback failed:", error);
+    }
+  };
   // Images are judged on their own: a signature or decoration is dropped with
   // the signal that decided, anything else is rendered for a person to look at.
   const imageAttachments: Array<{ filename: string; content: Buffer }> = [];
@@ -1163,7 +1250,20 @@ export async function renderEmailAttachments(input: {
     const name = attachment?.filename || "attachment";
     if (attachment?.content && isImageFilename(name)) {
       // An image embedded in the message body is already part of the email PDF.
-      if ((attachment as { related?: boolean }).related === true) continue;
+      if (
+        isEmbeddedInBody(
+          attachment as { contentId?: string; cid?: string; related?: boolean },
+          input.bodyHtml,
+        )
+      ) {
+        keep(
+          name,
+          "kept",
+          "embedded_in_email",
+          "Shown inside the email itself (referenced by the message body).",
+        );
+        continue;
+      }
       imageAttachments.push({
         filename: name,
         content: Buffer.isBuffer(attachment.content)
@@ -1182,6 +1282,8 @@ export async function renderEmailAttachments(input: {
       continue;
     }
     const verdict = classifyImage(image.filename, facts);
+    const hash = imageHash(image.content);
+    const recurs = input.imageRecurrence?.get(hash) ?? 0;
     if (verdict.kind === "signature") {
       console.log(
         `[Attachments] Dropped ${image.filename}: signature image (${verdict.signal}).`,
@@ -1191,7 +1293,21 @@ export async function renderEmailAttachments(input: {
         "signature_image",
         `Signature or decoration image: ${verdict.signal}.`,
       );
+    } else if (recurs >= RECURRENCE_MIN_EMAILS && verdict.kind !== "content") {
+      // The same picture in many emails and not document-sized: a signature.
+      drop(
+        image.filename,
+        "signature_image",
+        `Signature or decoration image: the same picture is attached to ${recurs} emails.`,
+      );
+    } else if (input.seenImages?.has(hash)) {
+      drop(
+        image.filename,
+        "dup",
+        "The same image was already sent for review from another email.",
+      );
     } else {
+      input.seenImages?.add(hash);
       imagesForReview.push(image);
     }
   }
@@ -1233,7 +1349,22 @@ export async function renderEmailAttachments(input: {
       const ext = path.extname(file.filename).toLowerCase();
       const attSeqName = `${currentBaseName} Attachment ${String(counter).padStart(padLen, "0")}`;
       counter++;
+      if (
+        !bypassKeywordFilter &&
+        hasPrivilegedKeywordInFileName(file.filename)
+      ) {
+        drop(
+          file.filename,
+          "keyword",
+          "Contains excluded keyword in the file name.",
+        );
+        continue;
+      }
       let delivered = true;
+      let rejection: DocumentRejection | undefined;
+      const onReject = (reason: DocumentRejection) => {
+        rejection = reason;
+      };
       if (ext === ".docx" || ext === ".doc") {
         delivered = await processDocxToPdf(
           file.content,
@@ -1243,6 +1374,7 @@ export async function renderEmailAttachments(input: {
           undefined,
           bypassKeywordFilter,
           input.personalEmail,
+          onReject,
         );
       } else if (ext === ".xlsx" || ext === ".xls" || ext === ".csv") {
         delivered = await processExcelToPdf(
@@ -1253,6 +1385,7 @@ export async function renderEmailAttachments(input: {
           undefined,
           bypassKeywordFilter,
           input.personalEmail,
+          onReject,
         );
       } else if (ext === ".txt") {
         const textReason = await processTextToPdf(
@@ -1289,14 +1422,12 @@ export async function renderEmailAttachments(input: {
           undefined,
           bypassKeywordFilter,
           input.personalEmail,
+          onReject,
         );
       }
       if (!delivered && ext !== ".txt") {
-        drop(
-          file.filename,
-          "attachment_filter",
-          "Not delivered by the document filters (excluded keyword, subject not cited, duplicate or empty output).",
-        );
+        const why = REJECTION_TEXT[rejection ?? "error"];
+        drop(file.filename, why.rule, why.reason);
       }
     }
     finalizeAttachmentNames(directory, currentBaseName);
@@ -1324,6 +1455,12 @@ export async function renderEmailAttachments(input: {
       let n = 1;
       for (const image of imagesForReview) {
         const imageName = `${currentBaseName} Image ${String(n++).padStart(pad, "0")}`;
+        keep(
+          image.filename,
+          "review",
+          "image_review",
+          "An image that is not a signature: nothing reads images yet, so a person decides.",
+        );
         await processImageToPdf(
           image.content,
           path.join(input.reviewDir, `${imageName}.pdf`),
@@ -1445,6 +1582,12 @@ export async function convertToPdfBatch(
     });
     let lastProgressWrite = 0;
 
+    // The same picture in many emails is a signature: count before rendering.
+    const imageRecurrence = await countImageRecurrence(
+      emlFiles.map((name) => path.join(selectedDir, name)),
+    );
+    const seenImages = new Set<string>();
+
     // One token set for every item type (see src/lib/subject-rules.ts).
     const filterCriteria = buildSubjectTokens({
       name: row.subject_name || "",
@@ -1477,9 +1620,13 @@ export async function convertToPdfBatch(
       outputDir: string,
       bypassKeywordFilter = false,
       parentHash?: string,
+      bodyHtml?: string,
     ) => {
       const drops: AttachmentDecision[] = [];
       return renderEmailAttachments({
+        bodyHtml,
+        imageRecurrence,
+        seenImages,
         onDrop: (d) =>
           drops.push({
             filename: d.filename,
@@ -1487,6 +1634,14 @@ export async function convertToPdfBatch(
             rule: d.rule,
             reason: d.reason,
             decidedBy: d.decidedBy,
+          }),
+        onKeep: (k) =>
+          drops.push({
+            filename: k.filename,
+            state: k.state,
+            rule: k.rule,
+            reason: k.reason,
+            decidedBy: k.decidedBy,
           }),
         attachments,
         currentBaseName,
@@ -1559,6 +1714,7 @@ export async function convertToPdfBatch(
                 deliverablesDir,
                 bypassAttachmentKeywords,
                 emailHash,
+                parsed.html || "",
               );
             };
 
@@ -1695,6 +1851,7 @@ export async function convertToPdfBatch(
                   warningDir,
                   true, // self-forwards are addressed to personal email — bypass keyword filter
                   email_hash,
+                  parsed.html || "",
                 );
               }
 
@@ -1784,6 +1941,9 @@ export async function convertToPdfBatch(
                   personalEmail: subjectPersonalEmail,
                   bypassKeywordFilter: true,
                   screen: mailVerdicts,
+                  bodyHtml: parsed.html || "",
+                  imageRecurrence,
+                  seenImages,
                 });
               }
               rendered =

@@ -171,6 +171,25 @@ describe("email attachments", () => {
     ]);
   });
 
+  it("says why a document was not delivered (keyword, subject not cited)", async () => {
+    const drops: { rule: string; reason: string }[] = [];
+    const onDrop = (d: { rule: string; reason: string }) => drops.push(d);
+    assert.deepEqual(
+      await render(
+        [
+          attachment("a.pdf", unrelated()),
+          attachment("b.pdf", pdf("Privileged advice for Jonathan Wheeler")),
+        ],
+        { onDrop },
+      ),
+      [],
+    );
+    assert.deepEqual(drops.map((d) => d.rule).sort(), [
+      "keyword",
+      "subject_absent",
+    ]);
+  });
+
   it("expands a zip, delivers only converted entries, never the zip or raw files", async () => {
     const archive = zip({
       "a/memo.pdf": relevant(),

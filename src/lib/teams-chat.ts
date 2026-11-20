@@ -13,8 +13,17 @@
 import crypto from "node:crypto";
 import { mentionsSubject } from "./subject-rules";
 
-/** Messages kept on each side of a candidate. */
-export const CHAT_CONTEXT_MESSAGES = 2;
+/**
+ * Messages kept on each side of a candidate: 2 by default, 0 to 10 through the
+ * CHAT_CONTEXT_MESSAGES environment variable.
+ */
+export function chatContextMessages(): number {
+  const value = Number(process.env.CHAT_CONTEXT_MESSAGES);
+  if (!Number.isFinite(value)) return 2;
+  return Math.min(10, Math.max(0, Math.round(value)));
+}
+
+export const CHAT_CONTEXT_MESSAGES = chatContextMessages();
 
 export interface ChatMessage {
   id: string;

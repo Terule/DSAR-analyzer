@@ -65,3 +65,17 @@ test("documents: a sign-off in the middle does not hide the rest", () => {
   // The email rule would cut at "Thanks," and miss it: that is why documents differ.
   assert.equal(hasPrivilegedKeyword("", text), false);
 });
+
+test("a keyword in a file name counts, with separators as spaces", async () => {
+  const { hasPrivilegedKeywordInFileName } = await import(
+    "../../../src/lib/exclusions"
+  );
+  assert.equal(
+    hasPrivilegedKeywordInFileName("Confidential - minutes.docx"),
+    true,
+  );
+  assert.equal(hasPrivilegedKeywordInFileName("Privileged_advice.pdf"), true);
+  assert.equal(hasPrivilegedKeywordInFileName("CRO report.xlsx"), true);
+  assert.equal(hasPrivilegedKeywordInFileName("Microsoft roadmap.pdf"), false);
+  assert.equal(hasPrivilegedKeywordInFileName("Quarterly review.docx"), false);
+});

@@ -247,3 +247,63 @@ describe("the Files engine on Teams exports", () => {
     );
   });
 });
+
+describe("per-message audit decisions", () => {
+  it("reports each message that cites the subject, with neutral labels", async () => {
+    const input = fs.mkdtempSync(path.join(os.tmpdir(), "msgs-in-"));
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), "msgs-out-"));
+    const file = path.join(input, "a.html");
+    fs.writeFileSync(
+      file,
+      conversation({
+        1: "Maria, this is Privileged advice",
+        10: "Maria, lunch tomorrow?",
+      }),
+    );
+    const decisions: FileDecision[] = [];
+    const original = console.log;
+    console.log = () => {};
+    try {
+      await runStandaloneBatch({
+        inputDir: input,
+        filePaths: [file],
+        messagesDir: path.join(out, "Messages"),
+        documentsDir: path.join(out, "Documents"),
+        subjectCriteria: { name: "Maria Souza", email: "maria.souza@corp.com" },
+        onDecision: (d) => decisions.push(d),
+      });
+    } finally {
+      console.log = original;
+    }
+    assert.equal(decisions.length, 1);
+    assert.equal(decisions[0].state, "kept");
+    const messages = decisions[0].messages ?? [];
+    assert.deepEqual(
+      messages.map((m) => [m.label, m.state, m.rule]),
+      [
+        ["Message 2 of 12", "discarded", "keyword"],
+        ["Message 11 of 12", "kept", "chat_excerpt"],
+      ],
+    );
+    // No author, no text: labels are positions only.
+    for (const m of messages) assert.doesNotMatch(m.label, /Alice|lunch/i);
+  });
+
+  it("the context size is configurable and clamped", async () => {
+    const { chatContextMessages } = await import("../../../src/lib/teams-chat");
+    const previous = process.env.CHAT_CONTEXT_MESSAGES;
+    try {
+      process.env.CHAT_CONTEXT_MESSAGES = "4";
+      assert.equal(chatContextMessages(), 4);
+      process.env.CHAT_CONTEXT_MESSAGES = "99";
+      assert.equal(chatContextMessages(), 10);
+      process.env.CHAT_CONTEXT_MESSAGES = "-3";
+      assert.equal(chatContextMessages(), 0);
+      process.env.CHAT_CONTEXT_MESSAGES = "nope";
+      assert.equal(chatContextMessages(), 2);
+    } finally {
+      if (previous === undefined) delete process.env.CHAT_CONTEXT_MESSAGES;
+      else process.env.CHAT_CONTEXT_MESSAGES = previous;
+    }
+  });
+});

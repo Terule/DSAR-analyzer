@@ -169,3 +169,34 @@ test("a kept file is reported with where it was delivered", async () => {
     /^Documents\/Document [0-9a-f]+\.pdf$/,
   );
 });
+
+test("a keyword in the file name discards a document before it is read", async () => {
+  const input = fs.mkdtempSync(path.join(os.tmpdir(), "item-name-in-"));
+  const out = fs.mkdtempSync(path.join(os.tmpdir(), "item-name-out-"));
+  const named = path.join(input, "Confidential - board minutes.txt");
+  const plain = path.join(input, "Notes.txt");
+  fs.writeFileSync(named, "Lunch with Maria Souza tomorrow.");
+  fs.writeFileSync(plain, "Lunch with Maria Souza tomorrow, again.");
+  const decisions: FileDecision[] = [];
+  const original = console.log;
+  console.log = () => {};
+  try {
+    await runStandaloneBatch({
+      inputDir: input,
+      filePaths: [named, plain],
+      messagesDir: path.join(out, "Messages"),
+      documentsDir: path.join(out, "Documents"),
+      subjectCriteria: { name: "Maria Souza", email: "maria.souza@corp.com" },
+      onDecision: (d) => decisions.push(d),
+    });
+  } finally {
+    console.log = original;
+  }
+  const byName = Object.fromEntries(
+    decisions.map((d) => [path.basename(d.filePath), d]),
+  );
+  assert.equal(byName["Confidential - board minutes.txt"].state, "discarded");
+  assert.equal(byName["Confidential - board minutes.txt"].rule, "keyword");
+  assert.match(byName["Confidential - board minutes.txt"].reason, /file name/);
+  assert.equal(byName["Notes.txt"].state, "kept");
+});
