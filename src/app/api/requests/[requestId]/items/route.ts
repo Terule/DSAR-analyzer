@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { itemWhere } from "@/lib/item-query";
 import { prisma } from "@/lib/prisma";
-import { analysisLabel, type ItemTab, tabFilter } from "@/lib/request-insights";
+import { analysisLabel, type ItemTab } from "@/lib/request-insights";
 
 export const dynamic = "force-dynamic";
 

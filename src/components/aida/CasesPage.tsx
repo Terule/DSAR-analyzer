@@ -181,6 +181,7 @@ export function CasesPage() {
   const [filter, setFilter] = useState<"all" | "progress" | "completed">("all");
   const [query, setQuery] = useState("");
   const [creating, setCreating] = useState(false);
+  const [_scanning, setScanning] = useState(false);
   const [configure, setConfigure] = useState<CaseItem | null>(null);
   const [archive, setArchive] = useState<CaseItem | null>(null);
   const [remove, setRemove] = useState<CaseItem | null>(null);
@@ -280,6 +281,9 @@ export function CasesPage() {
         >
           <Btn kind="primary" onClick={() => setCreating(true)}>
             New case
+          </Btn>
+          <Btn kind="secondary" onClick={() => setScanning(true)}>
+            Scan input folder
           </Btn>
         </EmptyPanel>
       ) : visible.length === 0 ? (

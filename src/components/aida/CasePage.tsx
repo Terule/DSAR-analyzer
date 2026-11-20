@@ -24,6 +24,7 @@ import {
   ResetRequestModal,
   StopWorkModal,
 } from "./RequestDialogs";
+import { ScanInputModal } from "./ScanInputModal";
 import type { CaseItem, RequestItem } from "./types";
 import { Btn, Card, Dot, EmptyPanel, Page } from "./ui";
 import { type Insights, useInsights } from "./use-insights";
@@ -682,7 +683,7 @@ export function CasePage({ caseId }: { caseId: string }) {
     return (
       item.requests.find((entry) => entry.name === requestName) ??
       item.requests.find((entry) => requestStage(entry).tone === "running") ??
-      item.requests[item.requests.length - 1] ??
+      item.requests[0] ??
       null
     );
   }, [item, requestName]);
@@ -694,6 +695,7 @@ export function CasePage({ caseId }: { caseId: string }) {
   const [remove, setRemove] = useState<CaseItem | null>(null);
   const [stop, setStop] = useState<CaseItem | null>(null);
   const [newRequest, setNewRequest] = useState<CaseItem | null>(null);
+  const [scanFor, setScanFor] = useState<CaseItem | null>(null);
   const [continueFor, setContinueFor] = useState<RequestItem | null>(null);
   const [resetFor, setResetFor] = useState<RequestItem | null>(null);
   const [deleteFor, setDeleteFor] = useState<RequestItem | null>(null);
@@ -787,7 +789,7 @@ export function CasePage({ caseId }: { caseId: string }) {
           ? `${count(reviewed)} of ${count(split.total)} emails analysed`
           : null,
         reviewCount ? `${count(reviewCount)} for human review` : null,
-        insights && insights.reanalysing
+        insights?.reanalysing
           ? `${count(insights.reanalysing)} being reanalysed`
           : null,
       ]
@@ -822,11 +824,16 @@ export function CasePage({ caseId }: { caseId: string }) {
     banner = {
       tone: "neutral",
       title: "No requests yet",
-      text: "A request is one delivery of PSTs or files. Create one to start.",
+      text: "A request is one delivery of PSTs or files. Create one, or scan the input folder to find what was delivered.",
       actions: (
-        <Btn kind="primary" onClick={() => setNewRequest(item)}>
-          New request
-        </Btn>
+        <>
+          <Btn kind="primary" onClick={() => setNewRequest(item)}>
+            New request
+          </Btn>
+          <Btn kind="secondary" onClick={() => setScanFor(item)}>
+            Scan input folder
+          </Btn>
+        </>
       ),
     };
   } else if (stage?.tone === "failed") {
@@ -1150,7 +1157,7 @@ export function CasePage({ caseId }: { caseId: string }) {
         ))}
       </div>
 
-      {request && configured ? (
+      {request && configured && stage?.tone !== "idle" ? (
         <>
           <Funnel
             insights={insights}
@@ -1207,6 +1214,12 @@ export function CasePage({ caseId }: { caseId: string }) {
         onClose={() => {
           setRemove(null);
         }}
+      />
+      <ScanInputModal
+        open={!!scanFor}
+        caseTarget={scanFor}
+        onClose={() => setScanFor(null)}
+        onDone={(id) => id === item.id && router.replace(`/cases/${id}`)}
       />
       <StopWorkModal target={stop} onClose={() => setStop(null)} />
       <NewRequestModal

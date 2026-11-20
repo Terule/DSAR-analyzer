@@ -293,7 +293,7 @@ export function SettingsPage() {
 
   const errors = useMemo(() => {
     const result: Record<string, string> = {};
-    const range = (key: string, label: string, min: number, max: number) => {
+    const range = (key: string, _label: string, min: number, max: number) => {
       if (!(key in draft)) return;
       const number = Number(draft[key]);
       if (

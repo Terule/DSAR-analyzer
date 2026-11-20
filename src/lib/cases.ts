@@ -269,7 +269,7 @@ export async function continueRequest(requestId: string, addRaw: string) {
   return prisma.caseRequest.findUniqueOrThrow({ where: { id: requestId } });
 }
 
-async function summary(
+export async function summary(
   directory: string,
   test: (name: string) => boolean,
   skipDirectories: readonly string[] = [],
