@@ -51,7 +51,12 @@ export function Page({
   className?: string;
 }) {
   return (
-    <div className={cn("flex flex-col gap-6 px-9 py-7", className)}>
+    <div
+      className={cn(
+        "flex flex-col gap-5 px-4 py-5 md:gap-6 md:px-9 md:py-7",
+        className,
+      )}
+    >
       {children}
     </div>
   );
@@ -67,9 +72,9 @@ export function PageHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="flex items-center justify-between gap-6">
+    <header className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between md:gap-6">
       <div className="flex flex-col gap-1">
-        <h1 className="text-[28px] font-bold leading-[34px] text-aida-text">
+        <h1 className="text-2xl font-bold leading-[34px] text-aida-text md:text-[28px]">
           {title}
         </h1>
         {subtitle ? (
@@ -93,7 +98,7 @@ export function SearchBox({
   placeholder: string;
 }) {
   return (
-    <label className="flex w-[260px] items-center gap-2 rounded-[10px] border border-aida-input-line bg-aida-sidebar px-3 py-[9px] focus-within:border-aida-primary-line">
+    <label className="flex w-full items-center md:w-[260px] gap-2 rounded-[10px] border border-aida-input-line bg-aida-sidebar px-3 py-[9px] focus-within:border-aida-primary-line">
       <Search className="size-4 text-aida-dim" strokeWidth={1.5} />
       <input
         value={value}

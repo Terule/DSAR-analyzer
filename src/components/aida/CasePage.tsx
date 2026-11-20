@@ -218,7 +218,7 @@ function Stage({
       disabled={!onClick || (idle && card.key !== "ai")}
       onClick={onClick}
       className={cn(
-        "flex min-w-0 flex-1 flex-col gap-2 rounded-[14px] border p-4 text-left",
+        "grid min-w-0 flex-1 grid-cols-[1fr_auto] items-center gap-x-3 gap-y-1 rounded-[14px] border p-3.5 text-left md:flex md:flex-col md:items-stretch md:gap-2 md:p-4",
         selected
           ? "border-[1.5px] border-aida-primary bg-[#111a33]"
           : idle
@@ -252,7 +252,7 @@ function Stage({
       </span>
       <span
         className={cn(
-          "text-[26px] font-bold leading-[31px]",
+          "text-xl font-bold leading-[31px] md:text-[26px]",
           selected ? "text-white" : idle ? "text-[#3a4560]" : "text-aida-text",
         )}
       >
@@ -366,8 +366,8 @@ function Funnel({
     (row) => !(client && row.key === "subject"),
   );
   return (
-    <Card className="flex flex-col gap-3.5 p-6">
-      <div className="flex items-center justify-between gap-6">
+    <Card className="flex flex-col gap-3.5 p-4 md:p-6">
+      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:gap-6">
         <div className="flex flex-col gap-1">
           <h2 className="text-[17px] font-semibold text-aida-text">
             From what came in to what will be delivered
@@ -420,7 +420,7 @@ function Funnel({
               disabled={!clickable}
               onClick={() => onOpen(row.key)}
               className={cn(
-                "group grid grid-cols-[190px_minmax(0,1fr)_80px_200px_14px] items-center gap-4 text-left",
+                "group grid grid-cols-[110px_minmax(0,1fr)_56px] items-center gap-x-3 gap-y-0.5 text-left md:grid-cols-[190px_minmax(0,1fr)_80px_200px_14px] md:gap-4",
                 clickable ? "cursor-pointer" : "cursor-default",
               )}
             >
@@ -510,7 +510,7 @@ function Activity({ insights }: { insights: Insights | null }) {
   return (
     <Card className="flex flex-col gap-4 px-6 py-5">
       <h2 className="text-[15px] font-semibold text-aida-text">Activity</h2>
-      <div className="flex">
+      <div className="flex flex-col gap-3 md:flex-row md:gap-0">
         {events.map((event, index) => {
           const last = index === events.length - 1;
           const next = events[index + 1];
@@ -1040,7 +1040,7 @@ export function CasePage({ caseId }: { caseId: string }) {
 
   return (
     <Page className="pb-12">
-      <header className="flex items-start justify-between gap-6">
+      <header className="flex flex-col gap-4 md:flex-row md:items-start md:justify-between md:gap-6">
         <div className="flex min-w-0 flex-col gap-2">
           <div className="text-[13px] leading-4 text-aida-muted">
             <Link href="/" className="hover:text-aida-text-2">
@@ -1051,7 +1051,7 @@ export function CasePage({ caseId }: { caseId: string }) {
             {request ? `  /  ${request.name}` : ""}
           </div>
           <div className="flex items-center gap-3">
-            <h1 className="truncate text-[28px] font-bold leading-[34px] text-aida-text">
+            <h1 className="truncate text-2xl font-bold leading-[34px] text-aida-text md:text-[28px]">
               {caseName}
               {request ? ` · ${request.name}` : ""}
             </h1>
@@ -1064,7 +1064,7 @@ export function CasePage({ caseId }: { caseId: string }) {
             {statusLine}
           </div>
         </div>
-        <div className="flex shrink-0 items-center gap-2.5">
+        <div className="flex shrink-0 flex-wrap items-center gap-2.5">
           {item.requests.length > 0 ? (
             <Menu
               width={150}
@@ -1132,7 +1132,7 @@ export function CasePage({ caseId }: { caseId: string }) {
 
       {banner ? <Banner spec={banner} /> : null}
 
-      <div className="flex gap-3">
+      <div className="flex flex-col gap-2 md:flex-row md:gap-3">
         {(stages.length ? stages : placeholderStages()).map((card) => (
           <Stage
             key={card.key}

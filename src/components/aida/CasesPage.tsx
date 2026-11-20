@@ -2,7 +2,7 @@
 
 import { MoreHorizontal, Plus } from "lucide-react";
 import Link from "next/link";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { maskCaseName } from "@/lib/format";
 import { cn } from "@/lib/utils";
@@ -185,6 +185,13 @@ export function CasesPage() {
   const [archive, setArchive] = useState<CaseItem | null>(null);
   const [remove, setRemove] = useState<CaseItem | null>(null);
 
+  const opening = useSearchParams();
+  useEffect(() => {
+    if (opening.get("new") === "1") {
+      setCreating(true);
+      router.replace("/");
+    }
+  }, [opening, router]);
   useEffect(() => {
     const open = () => setCreating(true);
     window.addEventListener("aida:new-case", open);

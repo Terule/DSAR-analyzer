@@ -2,11 +2,12 @@
 
 import { Download, Search } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import type { ItemTab } from "@/lib/request-insights";
 import { cn } from "@/lib/utils";
 import { count } from "./case-view";
 import { Drawer, DrawerHeader, Pill } from "./Drawer";
-import { FilterChip } from "./ui";
+import { Btn, FilterChip, Modal } from "./ui";
 
 export interface DecisionRow {
   id: string;
@@ -102,6 +103,9 @@ export function DecisionsPanel({
   const [query, setQuery] = useState("");
   const [listing, setListing] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(true);
+  const [exporting, setExporting] = useState(false);
+  const [exportScope, setExportScope] = useState<"screen" | "tab">("screen");
+  const [exportBusy, setExportBusy] = useState(false);
   const timer = useRef<number | null>(null);
 
   const params = useMemo(() => {
@@ -144,6 +148,41 @@ export function DecisionsPanel({
     return () => window.clearInterval(interval);
   }, [load]);
 
+  const runExport = async () => {
+    setExportBusy(true);
+    try {
+      const query = new URLSearchParams(params);
+      if (exportScope === "tab") query.set("scope", "tab");
+      const response = await fetch(`/api/requests/${requestId}/audit?${query}`);
+      if (!response.ok) throw new Error("export failed");
+      const blob = await response.blob();
+      const name = `aida-${title.split(" · ").pop()?.toLowerCase() ?? "request"}-${tab}.csv`;
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = name;
+      link.click();
+      URL.revokeObjectURL(url);
+      toast.success("Export ready", {
+        description: `${name} · ${(blob.size / 1024).toFixed(blob.size > 1_048_576 ? 0 : 1)} KB saved to Downloads.`,
+      });
+      setExporting(false);
+    } catch {
+      toast.error("Export failed", {
+        description:
+          "The file could not be written. Check free disk space and try again.",
+      });
+    } finally {
+      setExportBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    const open = () => setExporting(true);
+    window.addEventListener("aida:export", open);
+    return () => window.removeEventListener("aida:export", open);
+  }, []);
+
   const counts = listing?.counts ?? {};
   const total = ["kept", "discarded", "review", "pending"].reduce(
     (sum, key) => sum + (counts[key] ?? 0),
@@ -152,20 +191,106 @@ export function DecisionsPanel({
   const info = (step && STEP_TITLES[step]) || heading || STEP_TITLES.ai;
   const showStates = step === "ai" || !step;
 
+  const shown = ["kept", "discarded", "review", "pending"].reduce(
+    (sum, key) => sum + (state && key !== state ? 0 : (counts[key] ?? 0)),
+    0,
+  );
+  const tabLabel =
+    tab === "emails"
+      ? "Emails"
+      : tab === "attachments"
+        ? "Attachments"
+        : "Files";
+  const screenDescription = [
+    tabLabel,
+    state
+      ? `tab ${STATE_PILL[state as keyof typeof STATE_PILL]?.label ?? state}`
+      : null,
+    query.trim() ? `search “${query.trim()}”` : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+
   return (
     <div className="flex min-h-full flex-col">
+      <Modal
+        open={exporting}
+        onClose={() => setExporting(false)}
+        title="Export CSV"
+        description="Saved to your Downloads folder."
+        width={520}
+        footer={
+          <>
+            <Btn kind="ghost" onClick={() => setExporting(false)}>
+              Cancel
+            </Btn>
+            <Btn
+              kind="primary"
+              disabled={exportBusy}
+              onClick={() => void runExport()}
+            >
+              {exportScope === "screen"
+                ? `Export ${count(shown)} rows`
+                : `Export ${count(listing?.tabs[tab] ?? 0)} rows`}
+            </Btn>
+          </>
+        }
+      >
+        <div className="flex flex-col gap-4">
+          <div className="text-[13px] font-medium text-aida-text-2">
+            What to export
+          </div>
+          {(
+            [
+              [
+                "screen",
+                "What is on screen",
+                `${screenDescription} · ${count(shown)} rows`,
+              ],
+              [
+                "tab",
+                "Everything in this tab",
+                `All ${count(listing?.tabs[tab] ?? 0)} ${tabLabel.toLowerCase()} with their decisions`,
+              ],
+            ] as const
+          ).map(([key, label, detail]) => (
+            <button
+              type="button"
+              key={key}
+              onClick={() => setExportScope(key)}
+              aria-pressed={exportScope === key}
+              className={cn(
+                "flex flex-col gap-1 rounded-xl border p-4 text-left",
+                exportScope === key
+                  ? "border-aida-primary bg-[#111a33]"
+                  : "border-aida-input-line hover:bg-aida-nav-active/40",
+              )}
+            >
+              <span className="text-sm font-semibold text-aida-text">
+                {label}
+              </span>
+              <span className="text-[13px] text-aida-muted">{detail}</span>
+            </button>
+          ))}
+          <p className="text-xs leading-4 text-aida-dim">
+            Same format as the audit trail file delivered with the request.
+            Columns: time, decision, item (email subject or file name), kind,
+            origin, parent, rule, reason and who decided.
+          </p>
+        </div>
+      </Modal>
       <DrawerHeader
         title={info.title}
         subtitle={`${title} · ${info.subtitle}`}
         onClose={onClose}
         actions={
-          <a
-            href={`/api/requests/${requestId}/audit?${params}`}
-            download
+          <button
+            type="button"
+            onClick={() => setExporting(true)}
             className="inline-flex items-center gap-2 rounded-[10px] bg-aida-primary px-3.5 py-2 text-[13px] font-semibold text-white hover:brightness-110"
           >
             <Download className="size-4" strokeWidth={2} /> Export CSV
-          </a>
+          </button>
         }
       />
       <div className="mt-4 flex gap-6 border-b border-aida-line px-6">

@@ -1,12 +1,19 @@
 "use client";
 
-import { Clock, Folder, SlidersHorizontal } from "lucide-react";
+import {
+  Clock,
+  Folder,
+  Menu as MenuIcon,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { type ReactNode, useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { ConnectionLost } from "./ConnectionLost";
 import { CasesProvider, useCases } from "./cases-context";
+import { Shortcuts } from "./Shortcuts";
 
 const NAV = [
   {
@@ -125,14 +132,62 @@ function Sidebar() {
   );
 }
 
+/** Below the tablet width the sidebar becomes a bar with a menu that opens over the page. */
+function MobileBar() {
+  const pathname = usePathname();
+  const [open, setOpen] = useState(false);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: close the menu after every navigation
+  useEffect(() => setOpen(false), [pathname]);
+  return (
+    <div className="md:hidden">
+      <div className="flex items-center justify-between border-b border-aida-line bg-aida-sidebar px-4 py-3">
+        <span className="text-[17px] font-bold tracking-[0.5px] text-aida-text">
+          AIDA
+        </span>
+        <button
+          type="button"
+          aria-label={open ? "Close menu" : "Open menu"}
+          onClick={() => setOpen((value) => !value)}
+          className="rounded-lg p-2 text-aida-text-3 hover:bg-aida-nav-active"
+        >
+          {open ? <X className="size-5" /> : <MenuIcon className="size-5" />}
+        </button>
+      </div>
+      {open ? (
+        <div className="fixed inset-x-0 bottom-0 top-[53px] z-40 flex flex-col gap-4 bg-aida-bg p-4">
+          <nav className="flex flex-col gap-1">
+            {NAV.map((item) => (
+              <Link
+                key={item.href}
+                href={item.href}
+                className={cn(
+                  "rounded-xl px-4 py-3.5 text-base",
+                  item.match(pathname)
+                    ? "bg-aida-nav-active font-semibold text-white"
+                    : "font-medium text-aida-text-3",
+                )}
+              >
+                {item.label}
+              </Link>
+            ))}
+          </nav>
+          <SystemStatus />
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function Frame({ children }: { children: ReactNode }) {
   const { offline } = useCases();
   return (
-    <div className="flex h-full">
+    <div className="flex h-full flex-col md:flex-row">
+      <MobileBar />
       <Sidebar />
-      <main className="relative h-full min-w-0 flex-1 overflow-y-auto">
+      <main className="relative min-h-0 min-w-0 flex-1 overflow-y-auto">
         {children}
         {offline ? <ConnectionLost /> : null}
+        <Shortcuts />
       </main>
     </div>
   );
