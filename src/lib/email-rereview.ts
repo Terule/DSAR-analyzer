@@ -281,6 +281,7 @@ export async function rereviewEmailDiscards(
           prisma.aiBatchRun.count({
             where: {
               coordinator_id: coordinatorId,
+              kind: "email",
               status: { in: ["claiming", "submitted", "processing"] },
             },
           }),

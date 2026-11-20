@@ -61,7 +61,6 @@ model ProcessedFile {
 
   emails Email[] @relation("ProcessedFileEmails")
   ai_batch_runs AiBatchRun[] @relation("CoordinatorAiBatchRuns")
-  files_ai_batch_runs FilesAiBatchRun[] @relation("FilesAiBatchRuns")
   files_ai_verdicts FilesAiVerdict[] @relation("FilesAiVerdicts")
   sharepoint_upload_artifacts SharePointUploadArtifact[]
   case_request CaseRequest? @relation(fields: [case_request_id], references: [id], onDelete: Cascade)
@@ -220,6 +219,10 @@ model AiBatchRun {
   request_count  Int      @default(0)
   estimated_tokens Int    @default(0)
   retry_count    Int      @default(0)
+  // email = the email audit; files = Files, attachments and mail screening.
+  kind           String   @default("email")
+  // 1 = first submission; 2 = the one automatic resubmission (files runs).
+  attempt        Int      @default(1)
   error          String?
   created_at     DateTime @default(now())
   submitted_at   DateTime?
@@ -231,34 +234,15 @@ model AiBatchRun {
   coordinator ProcessedFile @relation("CoordinatorAiBatchRuns", fields: [coordinator_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   emails Email[] @relation("AiBatchRunEmails")
   items  Item[]  @relation("AiBatchRunItems")
+  verdicts FilesAiVerdict[]
 
   @@index([coordinator_id, status])
+  @@index([kind, status])
   @@map("ai_batch_runs")
 }
 
 // The Files AI relevance check: one verdict per converted file of a Files row,
 // judged in Bedrock Batch runs. Kept separate from the email AI tables.
-model FilesAiBatchRun {
-  id             String   @id
-  file_id        String
-  openai_batch_id String? @unique
-  status         String   @default("submitted")
-  request_count  Int      @default(0)
-  estimated_tokens Int    @default(0)
-  // 1 = first submission; 2 = the one automatic resubmission of a batch the service
-  // failed, expired or cancelled.
-  attempt        Int      @default(1)
-  error          String?
-  created_at     DateTime @default(now())
-  submitted_at   DateTime?
-  completed_at   DateTime?
-
-  file ProcessedFile @relation("FilesAiBatchRuns", fields: [file_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  verdicts FilesAiVerdict[]
-
-  @@index([file_id, status])
-  @@map("files_ai_batch_runs")
-}
 
 model FilesAiVerdict {
   id           String   @id
@@ -287,7 +271,7 @@ model FilesAiVerdict {
   reviewed_by_model String?
 
   file ProcessedFile @relation("FilesAiVerdicts", fields: [file_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
-  run  FilesAiBatchRun? @relation(fields: [batch_run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
+  run  AiBatchRun? @relation(fields: [batch_run_id], references: [id], onDelete: SetNull, onUpdate: NoAction)
 
   @@index([file_id, verdict])
   @@index([rereview_status])

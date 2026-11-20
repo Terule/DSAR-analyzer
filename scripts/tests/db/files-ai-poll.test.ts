@@ -20,10 +20,11 @@ async function makeRun(opts: { ageMinutes: number; batchId: string }) {
     data: { id: fileId, filename: "Files", kind: "files" },
   });
   const runId = `run-${fileId}`;
-  await prisma.filesAiBatchRun.create({
+  await prisma.aiBatchRun.create({
     data: {
       id: runId,
-      file_id: fileId,
+      kind: "files",
+      coordinator_id: fileId,
       status: "submitted",
       openai_batch_id: `${tag}-${opts.batchId}`,
       submitted_at: new Date(Date.now() - opts.ageMinutes * 60_000),
@@ -69,7 +70,7 @@ describe("Files AI poller", () => {
   it("leaves a recent run alone when there is no AWS credentials", async () => {
     const { fileId, runId } = await makeRun({ ageMinutes: 1, batchId: "b" });
     await pollFilesAiRuns(noKey, fileIds);
-    const run = await prisma.filesAiBatchRun.findUniqueOrThrow({
+    const run = await prisma.aiBatchRun.findUniqueOrThrow({
       where: { id: runId },
     });
     assert.equal(run.status, "submitted");
@@ -86,7 +87,7 @@ describe("Files AI poller", () => {
   it("gives up on a stale run when there is still no key, and sends its files to human review", async () => {
     const { fileId, runId } = await makeRun({ ageMinutes: 90, batchId: "c" });
     await pollFilesAiRuns(noKey, fileIds);
-    const run = await prisma.filesAiBatchRun.findUniqueOrThrow({
+    const run = await prisma.aiBatchRun.findUniqueOrThrow({
       where: { id: runId },
     });
     assert.equal(run.status, "failed");
@@ -109,15 +110,21 @@ describe("Files AI poller", () => {
     });
     const stale = `run-stale-${fileId}`;
     const fresh = `run-fresh-${fileId}`;
-    await prisma.filesAiBatchRun.createMany({
+    await prisma.aiBatchRun.createMany({
       data: [
         {
           id: stale,
-          file_id: fileId,
+          kind: "files",
+          coordinator_id: fileId,
           status: "claiming",
           created_at: new Date(Date.now() - 90 * 60_000),
         },
-        { id: fresh, file_id: fileId, status: "claiming" },
+        {
+          id: fresh,
+          kind: "files",
+          coordinator_id: fileId,
+          status: "claiming",
+        },
       ],
     });
     await prisma.filesAiVerdict.createMany({
@@ -137,8 +144,8 @@ describe("Files AI poller", () => {
       ],
     });
     await pollFilesAiRuns(async () => doneClient, fileIds);
-    const runs = await prisma.filesAiBatchRun.findMany({
-      where: { file_id: fileId },
+    const runs = await prisma.aiBatchRun.findMany({
+      where: { kind: "files", coordinator_id: fileId },
     });
     assert.equal(runs.find((r) => r.id === stale)?.status, "failed");
     assert.equal(runs.find((r) => r.id === fresh)?.status, "claiming");

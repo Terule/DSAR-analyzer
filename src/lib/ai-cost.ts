@@ -43,33 +43,20 @@ export async function aiUsageByRequest(
     entry.records += records;
     totals.set(requestId, entry);
   };
-  const [emailRuns, fileRuns] = await Promise.all([
-    prisma.aiBatchRun.findMany({
-      where: { coordinator: { case_request_id: { in: requestIds } } },
-      select: {
-        estimated_tokens: true,
-        request_count: true,
-        coordinator: { select: { case_request_id: true } },
-      },
-    }),
-    prisma.filesAiBatchRun.findMany({
-      where: { file: { case_request_id: { in: requestIds } } },
-      select: {
-        estimated_tokens: true,
-        request_count: true,
-        file: { select: { case_request_id: true } },
-      },
-    }),
-  ]);
-  for (const run of emailRuns) {
+  const runs = await prisma.aiBatchRun.findMany({
+    where: { coordinator: { case_request_id: { in: requestIds } } },
+    select: {
+      estimated_tokens: true,
+      request_count: true,
+      coordinator: { select: { case_request_id: true } },
+    },
+  });
+  for (const run of runs) {
     add(
       run.coordinator.case_request_id,
       run.estimated_tokens,
       run.request_count,
     );
-  }
-  for (const run of fileRuns) {
-    add(run.file.case_request_id, run.estimated_tokens, run.request_count);
   }
   return new Map(
     [...totals].map(([id, value]) => [

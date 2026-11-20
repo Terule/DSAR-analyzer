@@ -187,8 +187,8 @@ export async function POST(request: Request) {
       // Screening verdicts belong to the run being wiped: a new subject must
       // be judged afresh, not inherit the old relevance verdicts.
       prisma.filesAiVerdict.deleteMany({ where: { file_id: { in: fileIds } } }),
-      prisma.filesAiBatchRun.deleteMany({
-        where: { file_id: { in: fileIds } },
+      prisma.aiBatchRun.deleteMany({
+        where: { coordinator_id: { in: fileIds }, kind: "files" },
       }),
 
       // 2a. Reset PST rows completely back to zero.

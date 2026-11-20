@@ -162,7 +162,7 @@ async function main() {
       },
     }),
     prisma.aiBatchRun.deleteMany({
-      where: { coordinator_id: coordinator },
+      where: { coordinator_id: coordinator, kind: "email" },
     }),
     // Reset AI/PDF states so orchestration resumes from AI for these PST rows.
     prisma.processedFile.updateMany({

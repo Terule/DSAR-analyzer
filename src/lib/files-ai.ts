@@ -241,8 +241,13 @@ async function submitChunk(
   const jsonlPath = runJsonlPath(runId, batchDir);
   fs.mkdirSync(path.dirname(jsonlPath), { recursive: true });
   // The run row exists before the claim so the verdict foreign key holds.
-  await prisma.filesAiBatchRun.create({
-    data: { id: runId, file_id: fileId, status: "claiming" },
+  await prisma.aiBatchRun.create({
+    data: {
+      id: runId,
+      coordinator_id: fileId,
+      kind: "files",
+      status: "claiming",
+    },
   });
   try {
     const ids = chunk.map((item) => item.id);
@@ -263,7 +268,7 @@ async function submitChunk(
     };
     if (!submitNow) {
       // Waits for a free job slot; the poller submits it from the request file.
-      await prisma.filesAiBatchRun.update({
+      await prisma.aiBatchRun.update({
         where: { id: runId },
         data: { status: "queued", ...sizes },
       });
@@ -271,7 +276,7 @@ async function submitChunk(
     }
     const inputFileId = await client.uploadBatchFile(jsonlPath);
     const batchId = await client.createBatch(inputFileId);
-    await prisma.filesAiBatchRun.update({
+    await prisma.aiBatchRun.update({
       where: { id: runId },
       data: {
         status: "submitted",
@@ -285,7 +290,7 @@ async function submitChunk(
       where: { batch_run_id: runId, verdict: null },
       data: { batch_run_id: null },
     });
-    await prisma.filesAiBatchRun.delete({ where: { id: runId } });
+    await prisma.aiBatchRun.delete({ where: { id: runId } });
     fs.rmSync(jsonlPath, { force: true });
     throw error;
   }
@@ -295,8 +300,8 @@ async function submitChunk(
 
 /** Jobs on Bedrock right now, across every case. */
 async function activeFilesAiJobs(): Promise<number> {
-  return prisma.filesAiBatchRun.count({
-    where: { status: { in: ["submitted", "processing"] } },
+  return prisma.aiBatchRun.count({
+    where: { kind: "files", status: { in: ["submitted", "processing"] } },
   });
 }
 
@@ -312,8 +317,8 @@ export async function submitQueuedFilesAiRuns(
 ): Promise<number> {
   let free = maxActive - (await activeFilesAiJobs());
   if (free <= 0) return 0;
-  const queued = await prisma.filesAiBatchRun.findMany({
-    where: { status: "queued" },
+  const queued = await prisma.aiBatchRun.findMany({
+    where: { kind: "files", status: "queued" },
     orderBy: { created_at: "asc" },
     take: free,
   });
@@ -329,7 +334,7 @@ export async function submitQueuedFilesAiRuns(
       const batchId = await client.createBatch(
         await client.uploadBatchFile(jsonlPath),
       );
-      const claimed = await prisma.filesAiBatchRun.updateMany({
+      const claimed = await prisma.aiBatchRun.updateMany({
         where: { id: run.id, status: "queued" },
         data: {
           status: "submitted",
@@ -385,7 +390,7 @@ const MAX_RUN_ATTEMPTS = 2;
 async function retryOrFailRun(
   run: {
     id: string;
-    file_id: string;
+    coordinator_id: string;
     attempt: number;
     request_count: number;
     estimated_tokens: number;
@@ -403,10 +408,11 @@ async function retryOrFailRun(
   const newPath = runJsonlPath(newId, batchDir);
   try {
     fs.copyFileSync(oldPath, newPath);
-    await prisma.filesAiBatchRun.create({
+    await prisma.aiBatchRun.create({
       data: {
         id: newId,
-        file_id: run.file_id,
+        coordinator_id: run.coordinator_id,
+        kind: "files",
         status: "claiming",
         attempt: run.attempt + 1,
       },
@@ -420,7 +426,7 @@ async function retryOrFailRun(
         where: { batch_run_id: run.id, verdict: null },
         data: { batch_run_id: newId },
       }),
-      prisma.filesAiBatchRun.update({
+      prisma.aiBatchRun.update({
         where: { id: newId },
         data: {
           status: "submitted",
@@ -430,7 +436,7 @@ async function retryOrFailRun(
           submitted_at: new Date(),
         },
       }),
-      prisma.filesAiBatchRun.update({
+      prisma.aiBatchRun.update({
         where: { id: run.id },
         data: {
           status: "failed",
@@ -445,7 +451,7 @@ async function retryOrFailRun(
     );
   } catch (error) {
     console.warn(`[Files AI] Could not resubmit run ${run.id}: ${error}`);
-    await prisma.filesAiBatchRun.deleteMany({
+    await prisma.aiBatchRun.deleteMany({
       where: { id: newId, status: "claiming" },
     });
     fs.rmSync(newPath, { force: true });
@@ -466,7 +472,7 @@ export async function failFilesAiRun(
       resolved_at: new Date(),
     },
   });
-  await prisma.filesAiBatchRun.update({
+  await prisma.aiBatchRun.update({
     where: { id: runId },
     data: { status: "failed", error, completed_at: new Date() },
   });
@@ -505,9 +511,10 @@ export async function pollFilesAiBatches(
     sampleRate:
       (settings.rereviewSamplePercent ?? REREVIEW_DEFAULT_SAMPLE_PERCENT) / 100,
   };
-  const runs = await prisma.filesAiBatchRun.findMany({
+  const runs = await prisma.aiBatchRun.findMany({
     where: {
-      file_id: fileId,
+      coordinator_id: fileId,
+      kind: "files",
       status: { in: ["submitted", "processing"] },
       openai_batch_id: { not: null },
     },
@@ -610,7 +617,7 @@ export async function pollFilesAiBatches(
         resolved_at: new Date(),
       },
     });
-    await prisma.filesAiBatchRun.update({
+    await prisma.aiBatchRun.update({
       where: { id: run.id },
       data: { status: "completed", completed_at: new Date() },
     });
@@ -639,14 +646,15 @@ export async function getFilesAiState(fileId: string): Promise<{
     prisma.filesAiVerdict.count({
       where: { file_id: fileId, verdict: "discard" },
     }),
-    prisma.filesAiBatchRun.count({
+    prisma.aiBatchRun.count({
       where: {
-        file_id: fileId,
+        coordinator_id: fileId,
+        kind: "files",
         status: { in: ["claiming", "queued", "submitted", "processing"] },
       },
     }),
-    prisma.filesAiBatchRun.count({
-      where: { file_id: fileId, status: "failed" },
+    prisma.aiBatchRun.count({
+      where: { coordinator_id: fileId, kind: "files", status: "failed" },
     }),
   ]);
   return {

@@ -138,7 +138,7 @@ async function main() {
       })}`,
     );
     const runs = await prisma.aiBatchRun.findMany({
-      where: { coordinator_id: fileId },
+      where: { coordinator_id: fileId, kind: "email" },
       select: { openai_batch_id: true, request_count: true },
     });
     console.log(
@@ -170,6 +170,7 @@ async function main() {
       const active = await prisma.aiBatchRun.count({
         where: {
           coordinator_id: fileId,
+          kind: "email",
           status: { in: ["claiming", "submitted", "processing"] },
         },
       });
@@ -254,9 +255,6 @@ async function main() {
     });
     await prisma.aiBatchRun.deleteMany({ where: { coordinator_id: fileId } });
     await prisma.filesAiVerdict
-      .deleteMany({ where: { file_id: fileId } })
-      .catch(() => undefined);
-    await prisma.filesAiBatchRun
       .deleteMany({ where: { file_id: fileId } })
       .catch(() => undefined);
     await prisma.processedFile.deleteMany({ where: { id: fileId } });

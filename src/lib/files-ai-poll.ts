@@ -21,10 +21,13 @@ export async function pollFilesAiRuns(
   /** Limits the poll to these Files rows. Tests use it so they never touch real runs. */
   onlyFileIds?: string[],
 ): Promise<number> {
-  const scope = onlyFileIds ? { file_id: { in: onlyFileIds } } : {};
+  const scope = {
+    kind: "files",
+    ...(onlyFileIds ? { coordinator_id: { in: onlyFileIds } } : {}),
+  };
   // A run whose submitter died between creating the run and submitting it has
   // no batch to wait for: give up on it so the Files AI step can settle.
-  const stuck = await prisma.filesAiBatchRun.findMany({
+  const stuck = await prisma.aiBatchRun.findMany({
     where: {
       ...scope,
       status: "claiming",
@@ -42,15 +45,18 @@ export async function pollFilesAiRuns(
   // Queued runs wait for a free job slot; submit what fits before polling.
   if (
     !onlyFileIds &&
-    (await prisma.filesAiBatchRun.count({ where: { status: "queued" } })) > 0
+    (await prisma.aiBatchRun.count({
+      where: { kind: "files", status: "queued" },
+    })) > 0
   ) {
     try {
       await submitQueuedFilesAiRuns(await clientFactory());
     } catch (error) {
       console.error("[Files AI] Could not submit queued runs:", error);
       // Without AWS credentials a queued run never leaves; give up on old ones.
-      const old = await prisma.filesAiBatchRun.findMany({
+      const old = await prisma.aiBatchRun.findMany({
         where: {
+          kind: "files",
           status: "queued",
           created_at: { lt: new Date(Date.now() - STALE_RUN_MS) },
         },
@@ -65,13 +71,18 @@ export async function pollFilesAiRuns(
     }
   }
 
-  const runs = await prisma.filesAiBatchRun.findMany({
+  const runs = await prisma.aiBatchRun.findMany({
     where: {
       ...scope,
       status: { in: ["submitted", "processing"] },
       openai_batch_id: { not: null },
     },
-    select: { id: true, file_id: true, submitted_at: true, created_at: true },
+    select: {
+      id: true,
+      coordinator_id: true,
+      submitted_at: true,
+      created_at: true,
+    },
   });
   if (runs.length === 0) return stuck.length;
 
@@ -82,7 +93,7 @@ export async function pollFilesAiRuns(
     console.error("[Files AI] No AI client for polling:", error);
   }
 
-  const fileIds = [...new Set(runs.map((run) => run.file_id))];
+  const fileIds = [...new Set(runs.map((run) => run.coordinator_id))];
   if (client) {
     for (const fileId of fileIds) {
       try {
@@ -109,8 +120,9 @@ export async function pollFilesAiRuns(
 
 /** True while any Files AI batch is being prepared or is awaiting its result. */
 export async function filesAiWorkRemains(): Promise<boolean> {
-  const active = await prisma.filesAiBatchRun.findFirst({
+  const active = await prisma.aiBatchRun.findFirst({
     where: {
+      kind: "files",
       status: { in: ["claiming", "queued", "submitted", "processing"] },
     },
     select: { id: true },

@@ -327,7 +327,7 @@ async function completedAiElapsedMs(
   fallbackMs: number,
 ): Promise<number> {
   const timings = await prisma.aiBatchRun.aggregate({
-    where: { coordinator_id: coordinatorId },
+    where: { coordinator_id: coordinatorId, kind: "email" },
     _min: { submitted_at: true },
     _max: { openai_completed_at: true },
   });
@@ -761,6 +761,7 @@ async function pollSingleBatchStatus(
     const activeBatchCount = await prisma.aiBatchRun.count({
       where: {
         coordinator_id: fileId,
+        kind: "email",
         status: { in: ["claiming", "submitted", "processing"] },
       },
     });
@@ -845,6 +846,7 @@ export async function pollBatchStatus(fileId: string) {
   const runs = await prisma.aiBatchRun.findMany({
     where: {
       coordinator_id: fileId,
+      kind: "email",
       status: "submitted",
       openai_batch_id: { not: null },
     },

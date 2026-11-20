@@ -27,6 +27,7 @@ export async function POST(request: Request) {
       const activeRun = await prisma.aiBatchRun.findFirst({
         where: {
           coordinator_id: fileId,
+          kind: "email",
           status: { in: ["claiming", "submitted", "processing"] },
         },
         select: { id: true },

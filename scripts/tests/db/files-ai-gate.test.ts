@@ -193,13 +193,18 @@ describe("Files AI gate", () => {
       const fileId = await makeFilesRow(employeeCase);
       await advanceFilesAi(fileId, "run-1");
       await setStage(fileId, "run-1", "filesAiPrepare", "completed");
-      await prisma.filesAiBatchRun.create({
-        data: { id: `run-${fileId}`, file_id: fileId, status: "submitted" },
+      await prisma.aiBatchRun.create({
+        data: {
+          id: `run-${fileId}`,
+          kind: "files",
+          coordinator_id: fileId,
+          status: "submitted",
+        },
       });
       assert.equal(await advanceFilesAi(fileId, "run-1"), "waiting");
       assert.equal((await stageJobs(fileId, "run-1")).length, 1); // no apply yet
 
-      await prisma.filesAiBatchRun.update({
+      await prisma.aiBatchRun.update({
         where: { id: `run-${fileId}` },
         data: { status: "completed" },
       });
@@ -227,8 +232,13 @@ describe("Files AI gate", () => {
       await advanceFilesAi(fileId, "run-1");
       await setStage(fileId, "run-1", "filesAiPrepare", "dead_letter");
       const runId = `run-dl-${fileId}`;
-      await prisma.filesAiBatchRun.create({
-        data: { id: runId, file_id: fileId, status: "submitted" },
+      await prisma.aiBatchRun.create({
+        data: {
+          id: runId,
+          kind: "files",
+          coordinator_id: fileId,
+          status: "submitted",
+        },
       });
       await prisma.filesAiVerdict.createMany({
         data: [
@@ -258,7 +268,7 @@ describe("Files AI gate", () => {
         where: { id: `${fileId}:Documents/Document 5555555555555555.pdf` },
         data: { verdict: "discard", reason: "r" },
       });
-      await prisma.filesAiBatchRun.update({
+      await prisma.aiBatchRun.update({
         where: { id: runId },
         data: { status: "completed" },
       });

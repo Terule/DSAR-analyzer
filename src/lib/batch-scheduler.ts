@@ -111,6 +111,40 @@ async function startReadyFilesPhases(): Promise<number> {
 }
 
 /**
+ * Polls every AI run awaiting its result. All runs live in `ai_batch_runs`:
+ * `kind = 'email'` are the email audit's (a coordinator can have several in
+ * flight, so `processed_files.batch_id` is only a compatibility pointer and must
+ * not control polling) and `kind = 'files'` are Files, attachment and mail
+ * screening runs. Returns how many email coordinators were polled.
+ */
+export async function pollAiRuns(): Promise<number> {
+  const pendingRuns = await prisma.aiBatchRun.findMany({
+    where: {
+      kind: "email",
+      status: "submitted",
+      openai_batch_id: { not: null },
+    },
+    select: { coordinator_id: true },
+    distinct: ["coordinator_id"],
+  });
+  for (const run of pendingRuns) {
+    try {
+      await pollBatchStatus(run.coordinator_id);
+    } catch (err) {
+      console.error(
+        `[Batch Scheduler] Failed to poll file ${run.coordinator_id}:`,
+        err,
+      );
+    }
+  }
+  // Files AI relevance batches are polled alongside the email batches.
+  await pollFilesAiRuns().catch((err) =>
+    console.error("[Batch Scheduler] Files AI poll failed:", err),
+  );
+  return pendingRuns.length;
+}
+
+/**
  * One sweep pass: triggers the render worker for finished-AI/pending-render
  * files and polls every AI batch awaiting sync. Returns whether any
  * AI/render work still remains (used to decide if polling should continue).
@@ -123,6 +157,7 @@ export async function runBatchSweep(): Promise<SweepResult> {
   const staleBefore = new Date(Date.now() - STALE_BATCH_APPLICATION_MS);
   const recoveredApplications = await prisma.aiBatchRun.updateMany({
     where: {
+      kind: "email",
       status: "processing",
       submitted_at: { lt: staleBefore },
       completed_at: null,
@@ -165,30 +200,9 @@ export async function runBatchSweep(): Promise<SweepResult> {
     console.log("[Batch Scheduler] Enqueued control-plane render job.");
   }
 
-  // 2. Poll every durable submitted Batch. A coordinator can now have several
-  // batches in flight, so processed_files.batch_id is only a compatibility
-  // pointer and must not control polling.
-  const pendingRuns = await prisma.aiBatchRun.findMany({
-    where: { status: "submitted", openai_batch_id: { not: null } },
-    select: { coordinator_id: true },
-    distinct: ["coordinator_id"],
-  });
+  // 2. Poll every AI run awaiting a result, email audit and Files alike.
+  const polledBatches = await pollAiRuns();
 
-  for (const run of pendingRuns) {
-    try {
-      await pollBatchStatus(run.coordinator_id);
-    } catch (err) {
-      console.error(
-        `[Batch Scheduler] Failed to poll file ${run.coordinator_id}:`,
-        err,
-      );
-    }
-  }
-
-  // Files AI relevance batches are polled alongside the email batches.
-  await pollFilesAiRuns().catch((err) =>
-    console.error("[Batch Scheduler] Files AI poll failed:", err),
-  );
   // Discards from the Haiku 4.5 batch that show doubt get a second opinion.
   await rereviewFilesAiDiscards().catch((err) =>
     console.error("[Batch Scheduler] Files AI second review failed:", err),
@@ -227,7 +241,7 @@ export async function runBatchSweep(): Promise<SweepResult> {
   });
 
   return {
-    polledBatches: pendingRuns.length,
+    polledBatches,
     renderWorkerStarted,
     workRemains:
       !!remaining ||

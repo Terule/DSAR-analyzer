@@ -186,8 +186,13 @@ describe("Files AI across waves and retries", () => {
       "y",
     );
     await discard(wave2, "Documents/Document 3333333333333333.pdf", "r");
-    await prisma.filesAiBatchRun.create({
-      data: { id: `run-${tag}`, file_id: wave2, status: "submitted" },
+    await prisma.aiBatchRun.create({
+      data: {
+        id: `run-${tag}`,
+        kind: "files",
+        coordinator_id: wave2,
+        status: "submitted",
+      },
     });
     await prisma.filesAiVerdict.create({
       data: {
@@ -206,7 +211,9 @@ describe("Files AI across waves and retries", () => {
       0,
     );
     assert.equal(
-      await prisma.filesAiBatchRun.count({ where: { file_id: wave2 } }),
+      await prisma.aiBatchRun.count({
+        where: { kind: "files", coordinator_id: wave2 },
+      }),
       0,
     );
     assert.equal(

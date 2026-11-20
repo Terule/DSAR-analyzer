@@ -29,6 +29,7 @@ export async function POST(request: Request) {
       prisma.aiBatchRun.count({
         where: {
           coordinator_id: coordinatorId,
+          kind: "email",
           status: { in: ["claiming", "submitted", "processing"] },
         },
       }),

@@ -49,10 +49,11 @@ async function makeRun(attempt = 1) {
   });
   const runId = `run-${fileId}`;
   const batchId = `${tag}-old-${n}`;
-  await prisma.filesAiBatchRun.create({
+  await prisma.aiBatchRun.create({
     data: {
       id: runId,
-      file_id: fileId,
+      kind: "files",
+      coordinator_id: fileId,
       status: "submitted",
       openai_batch_id: batchId,
       request_count: 1,
@@ -92,12 +93,12 @@ describe("Files AI batch resubmission", () => {
 
     assert.equal(client.created.length, 1);
     assert.ok(client.uploaded[0].includes(itemId), "same request lines");
-    const old = await prisma.filesAiBatchRun.findUniqueOrThrow({
+    const old = await prisma.aiBatchRun.findUniqueOrThrow({
       where: { id: runId },
     });
     assert.equal(old.status, "failed");
-    const runs = await prisma.filesAiBatchRun.findMany({
-      where: { file_id: fileId, status: "submitted" },
+    const runs = await prisma.aiBatchRun.findMany({
+      where: { kind: "files", coordinator_id: fileId, status: "submitted" },
     });
     assert.equal(runs.length, 1);
     assert.equal(runs[0].attempt, 2);
@@ -135,8 +136,8 @@ describe("Files AI batch resubmission", () => {
       where: { id: itemId },
     });
     assert.equal(item.verdict, "review");
-    const runs = await prisma.filesAiBatchRun.findMany({
-      where: { file_id: fileId },
+    const runs = await prisma.aiBatchRun.findMany({
+      where: { kind: "files", coordinator_id: fileId },
     });
     assert.equal(runs.length, 1, "no orphan claiming run is left behind");
     assert.equal(runs[0].id, runId);

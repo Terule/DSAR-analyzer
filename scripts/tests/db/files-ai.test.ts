@@ -278,7 +278,9 @@ describe("Files AI", () => {
       /boom/,
     );
     assert.equal(
-      await prisma.filesAiBatchRun.count({ where: { file_id: fileId } }),
+      await prisma.aiBatchRun.count({
+        where: { kind: "files", coordinator_id: fileId },
+      }),
       0,
     );
     const row = await prisma.filesAiVerdict.findFirstOrThrow({
@@ -330,7 +332,7 @@ describe("Files AI", () => {
     const fileId = await makeFile();
     const dirs = makeDirs([1, 2, 3].map((n) => `Document ${H(40 + n)}.pdf`));
     const client = new FakeClient();
-    const inFlight = await prisma.filesAiBatchRun.count({
+    const inFlight = await prisma.aiBatchRun.count({
       where: { status: { in: ["submitted", "processing"] } },
     });
     await prepare({
@@ -345,8 +347,8 @@ describe("Files AI", () => {
     });
     const statuses = async () =>
       (
-        await prisma.filesAiBatchRun.findMany({
-          where: { file_id: fileId },
+        await prisma.aiBatchRun.findMany({
+          where: { kind: "files", coordinator_id: fileId },
           select: { status: true },
         })
       )
@@ -362,8 +364,8 @@ describe("Files AI", () => {
       0,
     );
     // The first job finishes; its slot goes to the next queued run.
-    await prisma.filesAiBatchRun.updateMany({
-      where: { file_id: fileId, status: "submitted" },
+    await prisma.aiBatchRun.updateMany({
+      where: { kind: "files", coordinator_id: fileId, status: "submitted" },
       data: { status: "completed" },
     });
     assert.equal(

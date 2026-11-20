@@ -16,8 +16,13 @@ describe("Files AI tables", () => {
     await prisma.processedFile.create({
       data: { id: fileId, filename: "Files", kind: "files" },
     });
-    await prisma.filesAiBatchRun.create({
-      data: { id: `run-${tag}`, file_id: fileId, status: "submitted" },
+    await prisma.aiBatchRun.create({
+      data: {
+        id: `run-${tag}`,
+        kind: "files",
+        coordinator_id: fileId,
+        status: "submitted",
+      },
     });
     await prisma.filesAiVerdict.createMany({
       data: [
@@ -49,7 +54,9 @@ describe("Files AI tables", () => {
       0,
     );
     assert.equal(
-      await prisma.filesAiBatchRun.count({ where: { file_id: fileId } }),
+      await prisma.aiBatchRun.count({
+        where: { kind: "files", coordinator_id: fileId },
+      }),
       0,
     );
   });
@@ -58,8 +65,8 @@ describe("Files AI tables", () => {
     await prisma.processedFile.create({
       data: { id: fileId, filename: "Files", kind: "files" },
     });
-    await prisma.filesAiBatchRun.create({
-      data: { id: `run2-${tag}`, file_id: fileId },
+    await prisma.aiBatchRun.create({
+      data: { id: `run2-${tag}`, kind: "files", coordinator_id: fileId },
     });
     await prisma.filesAiVerdict.create({
       data: {
@@ -69,7 +76,7 @@ describe("Files AI tables", () => {
         batch_run_id: `run2-${tag}`,
       },
     });
-    await prisma.filesAiBatchRun.delete({ where: { id: `run2-${tag}` } });
+    await prisma.aiBatchRun.delete({ where: { id: `run2-${tag}` } });
     const verdict = await prisma.filesAiVerdict.findUniqueOrThrow({
       where: { id: `${fileId}:Documents/c.pdf` },
     });

@@ -89,8 +89,8 @@ async function main() {
     console.log(
       `prepared: ${JSON.stringify(prepared)} in ${Math.round((Date.now() - started) / 1000)}s`,
     );
-    const runs = await prisma.filesAiBatchRun.findMany({
-      where: { file_id: fileId },
+    const runs = await prisma.aiBatchRun.findMany({
+      where: { kind: "files", coordinator_id: fileId },
       select: { openai_batch_id: true, request_count: true },
     });
     console.log(

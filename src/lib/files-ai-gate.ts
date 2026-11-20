@@ -309,6 +309,8 @@ export async function clearFilesAiState(input: {
   }
   await prisma.$transaction([
     prisma.filesAiVerdict.deleteMany({ where: { file_id: input.fileId } }),
-    prisma.filesAiBatchRun.deleteMany({ where: { file_id: input.fileId } }),
+    prisma.aiBatchRun.deleteMany({
+      where: { coordinator_id: input.fileId, kind: "files" },
+    }),
   ]);
 }

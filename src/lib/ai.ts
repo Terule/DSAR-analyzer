@@ -240,7 +240,12 @@ export async function generateBatchFile(
 
   const batchRunId = randomUUID();
   await prisma.aiBatchRun.create({
-    data: { id: batchRunId, coordinator_id: fileId, status: "claiming" },
+    data: {
+      id: batchRunId,
+      coordinator_id: fileId,
+      kind: "email",
+      status: "claiming",
+    },
   });
 
   const batchFilePath = path.join(
@@ -321,6 +326,7 @@ export async function generateBatchFile(
     const activeBatches = await prisma.aiBatchRun.count({
       where: {
         coordinator_id: fileId,
+        kind: "email",
         status: { in: ["claiming", "submitted", "processing"] },
       },
     });
@@ -403,6 +409,7 @@ export async function fillAiBatchSlots(
   const active = await prisma.aiBatchRun.count({
     where: {
       coordinator_id: fileId,
+      kind: "email",
       status: { in: ["claiming", "submitted", "processing"] },
     },
   });
