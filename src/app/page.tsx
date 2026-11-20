@@ -1,5 +1,5 @@
-import { CaseManager } from "@/components/dashboard/CaseManager";
+import { CasesPage } from "@/components/aida/CasesPage";
 
 export default function Home() {
-  return <CaseManager />;
+  return <CasesPage />;
 }

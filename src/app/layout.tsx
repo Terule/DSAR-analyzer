@@ -1,16 +1,11 @@
 import type { Metadata } from "next";
-import { Figtree, Geist, Geist_Mono } from "next/font/google";
+import { Geist_Mono, Inter } from "next/font/google";
 import "./globals.css";
+import { AppShell } from "@/components/aida/AppShell";
 import { Toaster } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
 
-const figtree = Figtree({ subsets: ["latin"], variable: "--font-sans" });
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
+const inter = Inter({ subsets: ["latin"], variable: "--font-inter" });
 const geistMono = Geist_Mono({
   variable: "--font-geist-mono",
   subsets: ["latin"],
@@ -29,21 +24,20 @@ export default function RootLayout({
 }>) {
   return (
     <html
-      lang="en"
+      lang="en-GB"
       className={cn(
         "h-full",
         "antialiased",
-        geistSans.variable,
+        inter.variable,
         geistMono.variable,
         "font-sans",
-        figtree.variable,
       )}
     >
       <body
-        className="min-h-full flex flex-col bg-slate-900 text-slate-100 antialiased"
+        className="h-full bg-aida-bg text-aida-text antialiased"
         suppressHydrationWarning={true}
       >
-        {children}
+        <AppShell>{children}</AppShell>
         <Toaster />
       </body>
     </html>

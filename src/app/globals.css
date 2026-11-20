@@ -4,45 +4,90 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* AIDA design tokens (design/aida-dashboard.figcraft). The interface is dark only. */
 :root {
   color-scheme: dark;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
-  --card: oklch(1 0 0);
-  --card-foreground: oklch(0.145 0 0);
-  --popover: oklch(1 0 0);
-  --popover-foreground: oklch(0.145 0 0);
-  --primary: oklch(0.205 0 0);
-  --primary-foreground: oklch(0.985 0 0);
-  --secondary: oklch(0.97 0 0);
-  --secondary-foreground: oklch(0.205 0 0);
-  --muted: oklch(0.97 0 0);
-  --muted-foreground: oklch(0.556 0 0);
-  --accent: oklch(0.97 0 0);
-  --accent-foreground: oklch(0.205 0 0);
-  --destructive: oklch(0.577 0.245 27.325);
-  --border: oklch(0.922 0 0);
-  --input: oklch(0.922 0 0);
-  --ring: oklch(0.708 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
+  --aida-bg: #0b0f17;
+  --aida-sidebar: #0e1320;
+  --aida-surface: #121826;
+  --aida-surface-2: #0f1522;
+  --aida-nav-active: #151d31;
+  --aida-line: #1b2438;
+  --aida-card-line: #1f2940;
+  --aida-input-line: #263045;
+  --aida-track: #1e2638;
+  --aida-primary: #5b8cff;
+  --aida-primary-soft: #1e2a4d;
+  --aida-primary-line: #3b5bb0;
+  --aida-primary-text: #8fb0ff;
+  --aida-text: #e6eaf2;
+  --aida-text-2: #c5ccda;
+  --aida-text-3: #a9b2c3;
+  --aida-muted: #8a94a8;
+  --aida-dim: #5e6a82;
+  --aida-green: #2fbf8f;
+  --aida-green-dot: #34d399;
+  --aida-red: #f87171;
+  --aida-amber: #e6a94b;
+  --background: var(--aida-bg);
+  --foreground: var(--aida-text);
+  --card: var(--aida-surface);
+  --card-foreground: var(--aida-text);
+  --popover: var(--aida-surface);
+  --popover-foreground: var(--aida-text);
+  --primary: var(--aida-primary);
+  --primary-foreground: #ffffff;
+  --secondary: var(--aida-surface-2);
+  --secondary-foreground: var(--aida-text-2);
+  --muted: var(--aida-surface-2);
+  --muted-foreground: var(--aida-muted);
+  --accent: var(--aida-nav-active);
+  --accent-foreground: var(--aida-text);
+  --destructive: var(--aida-red);
+  --border: var(--aida-line);
+  --input: var(--aida-input-line);
+  --ring: var(--aida-primary-line);
+  --chart-1: var(--aida-primary);
+  --chart-2: var(--aida-green);
+  --chart-3: var(--aida-amber);
+  --chart-4: var(--aida-red);
+  --chart-5: var(--aida-muted);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
-  --sidebar-foreground: oklch(0.145 0 0);
-  --sidebar-primary: oklch(0.205 0 0);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.97 0 0);
-  --sidebar-accent-foreground: oklch(0.205 0 0);
-  --sidebar-border: oklch(0.922 0 0);
-  --sidebar-ring: oklch(0.708 0 0);
+  --sidebar: var(--aida-sidebar);
+  --sidebar-foreground: var(--aida-text-3);
+  --sidebar-primary: var(--aida-primary);
+  --sidebar-primary-foreground: #ffffff;
+  --sidebar-accent: var(--aida-nav-active);
+  --sidebar-accent-foreground: #ffffff;
+  --sidebar-border: var(--aida-line);
+  --sidebar-ring: var(--aida-primary-line);
 }
 
 @theme inline {
-  --font-heading: var(--font-sans);
-  --font-sans: var(--font-sans);
+  --color-aida-bg: var(--aida-bg);
+  --color-aida-sidebar: var(--aida-sidebar);
+  --color-aida-surface: var(--aida-surface);
+  --color-aida-surface-2: var(--aida-surface-2);
+  --color-aida-nav-active: var(--aida-nav-active);
+  --color-aida-line: var(--aida-line);
+  --color-aida-card-line: var(--aida-card-line);
+  --color-aida-input-line: var(--aida-input-line);
+  --color-aida-track: var(--aida-track);
+  --color-aida-primary: var(--aida-primary);
+  --color-aida-primary-soft: var(--aida-primary-soft);
+  --color-aida-primary-line: var(--aida-primary-line);
+  --color-aida-primary-text: var(--aida-primary-text);
+  --color-aida-text: var(--aida-text);
+  --color-aida-text-2: var(--aida-text-2);
+  --color-aida-text-3: var(--aida-text-3);
+  --color-aida-muted: var(--aida-muted);
+  --color-aida-dim: var(--aida-dim);
+  --color-aida-green: var(--aida-green);
+  --color-aida-green-dot: var(--aida-green-dot);
+  --color-aida-red: var(--aida-red);
+  --color-aida-amber: var(--aida-amber);
+  --font-heading: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --color-sidebar-ring: var(--sidebar-ring);
   --color-sidebar-border: var(--sidebar-border);
   --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
@@ -83,40 +128,6 @@
   --radius-4xl: calc(var(--radius) * 2.6);
 }
 
-.dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.87 0 0);
-  --chart-2: oklch(0.556 0 0);
-  --chart-3: oklch(0.439 0 0);
-  --chart-4: oklch(0.371 0 0);
-  --chart-5: oklch(0.269 0 0);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
-}
-
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -127,4 +138,13 @@
   html {
     @apply font-sans;
   }
+}
+
+/* Thin dark scrollbars to match the design. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--aida-input-line) transparent;
+}
+body {
+  font-feature-settings: "cv11", "ss01";
 }
