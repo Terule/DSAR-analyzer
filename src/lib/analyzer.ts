@@ -5,9 +5,10 @@ import path from "node:path";
 import type { FieldsData } from "@kenjiuno/msgreader";
 import MsgReader from "@kenjiuno/msgreader";
 import { type ParsedMail, simpleParser } from "mailparser";
+import { createEmailRecord } from "./email-decisions";
 import { computeEmailHash, dedupScope, isDuplicateEmail } from "./email-dedup";
 import { collectMailAddresses, discardedForKeyword } from "./email-rules";
-import { createDuplicateRecorder, syncEmailItems } from "./items";
+import { createDuplicateRecorder } from "./items";
 import { keepTail } from "./job-log";
 import { prisma } from "./prisma";
 import { getPstArtifactPaths } from "./pst-artifacts";
@@ -410,7 +411,7 @@ export async function analyzePstDuplicates(
     if (!isClientCase && discardedForKeyword(parsed, subjectEmail)) {
       const emailId = crypto.randomUUID();
       const sentDate = parsed.date ? parsed.date.toISOString() : "no-date";
-      await prisma.email.create({
+      await createEmailRecord({
         data: {
           id: emailId,
           file_id: fileId,
@@ -420,12 +421,16 @@ export async function analyzePstDuplicates(
           is_duplicate: 0,
           parent_email_hash: parentHash,
           is_attachment: parentHash ? 1 : 0,
-          ai_decision: "discard",
-          ai_reason:
+        },
+        label: subject,
+        decision: {
+          decision: "discard",
+          rule: "keyword",
+          reason:
             "Pre-filter: Subject or body contains privileged/confidential keyword",
+          decidedBy: "rule",
         },
       });
-      await syncEmailItems([emailHash], { labels: { [emailHash]: subject } });
       await prisma.processedFile.update({
         where: { id: fileId },
         data: { ai_discarded_count: { increment: 1 } },
@@ -444,7 +449,7 @@ export async function analyzePstDuplicates(
     fs.renameSync(filePath, finalEmlPath);
 
     // Insert into DB with relational logic (is it an attachment? does it have a parent?)
-    await prisma.email.create({
+    await createEmailRecord({
       data: {
         id: emailId,
         file_id: fileId,
@@ -454,16 +459,19 @@ export async function analyzePstDuplicates(
         is_duplicate: 0,
         parent_email_hash: parentHash,
         is_attachment: parentHash ? 1 : 0,
-        ...(!isClientCase && isSelfForward
-          ? {
-              ai_decision: "warning",
-              ai_reason:
-                "Self-forward: Subject sent from company email to personal email",
-            }
-          : {}),
       },
+      label: subject,
+      decision:
+        !isClientCase && isSelfForward
+          ? {
+              decision: "warning",
+              rule: "self_forward",
+              reason:
+                "Self-forward: Subject sent from company email to personal email",
+              decidedBy: "rule",
+            }
+          : undefined,
     });
-    await syncEmailItems([emailHash], { labels: { [emailHash]: subject } });
 
     // --- RECURSIVE ATTACHMENT FLATTENING ---
     if (parsed.attachments && parsed.attachments.length > 0) {

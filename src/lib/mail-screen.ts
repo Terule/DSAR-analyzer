@@ -6,6 +6,7 @@ import mammoth from "mammoth";
 import * as xlsx from "xlsx";
 import { getCasePstFileIds, markCaseAiCompleted } from "./case-utils";
 import { flattenAttachments } from "./email-attachments";
+import { decideEmail } from "./email-decisions";
 import {
   type FilesAiClient,
   isFilesAiSettled,
@@ -16,7 +17,6 @@ import {
 } from "./files-ai";
 import { type FilesAiCandidate, readPdfSample } from "./files-ai-extract";
 import { configuredFilesAiClient } from "./files-ai-provider";
-import { syncEmailItems } from "./items";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
@@ -346,17 +346,15 @@ export async function finishMailScreen(coordinatorId: string): Promise<void> {
         target === "discard" ? info.folders.discarded : info.folders.review,
         hash,
       );
-      const updated = await prisma.email.updateMany({
-        where: { email_hash: hash, ai_decision: "keep" },
-        data: { ai_decision: target, ai_reason: body.reason ?? "" },
+      const written = await decideEmail({
+        emailHash: hash,
+        decision: target,
+        rule: "mail_screen",
+        reason: body.reason ?? "",
+        decidedBy: "bedrock",
+        guard: { ai_decision: "keep" },
       });
-      if (updated.count > 0) {
-        await syncEmailItems([hash], {
-          rule: "mail_screen",
-          decidedBy: "bedrock",
-        });
-      }
-      if (target === "discard") discarded += updated.count;
+      if (target === "discard") discarded += written;
     }
     if (discarded > 0) {
       await prisma.processedFile.update({

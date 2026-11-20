@@ -59,6 +59,8 @@ export function emailDecision(row: EmailDecisionRow): ItemDecision {
         rule: rule ?? "ai_email",
         reason: reason || null,
       };
+    case "review":
+      return { state: "review", rule: "mail_screen", reason: reason || null };
     case "warning":
       return {
         state: "review",

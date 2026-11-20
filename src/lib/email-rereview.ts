@@ -10,7 +10,7 @@ import { completeEmailAudit, emailRereviewPending } from "./batch-worker";
 import { CONVERSE_MODEL } from "./bedrock/config";
 import { getCasePstFileIds } from "./case-utils";
 import { applyConfidentiality } from "./email-audit";
-import { syncEmailItems } from "./items";
+import { decideEmail } from "./email-decisions";
 import { prisma } from "./prisma";
 import { getPstWorkFolder } from "./pst-artifacts";
 import {
@@ -139,16 +139,15 @@ export async function rereviewEmailDiscards(
       const ctx = await getContext(row.rereview_coordinator_id);
       if (ctx) moveDiscardedToSelected(ctx, row.email_hash);
     }
-    await prisma.email.updateMany({
-      where: { email_hash: row.email_hash, rereview_status: "running" },
-      data: {
-        ai_decision: decision,
-        ai_reason: reason.slice(0, 240),
-        rereview_status: null,
-        rereview_started_at: null,
-      },
+    await decideEmail({
+      emailHash: row.email_hash,
+      decision,
+      rule: "ai_email",
+      reason: reason.slice(0, 240),
+      decidedBy: "haiku-5.5",
+      guard: { rereview_status: "running" },
+      emailData: { rereview_status: null, rereview_started_at: null },
     });
-    await syncEmailItems([row.email_hash], { decidedBy: "haiku-5.5" });
     if (row.rereview_coordinator_id) touched.add(row.rereview_coordinator_id);
   };
 

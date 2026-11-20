@@ -19,8 +19,8 @@ import {
 } from "./case-utils";
 import { enqueueFilePhase } from "./control-plane/pipeline";
 import { applyConfidentiality } from "./email-audit";
+import { planEmailDecisions } from "./email-decisions";
 import { configuredFilesAiClient } from "./files-ai-provider";
-import { syncEmailItems } from "./items";
 import { startMailScreen } from "./mail-screen";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
@@ -654,25 +654,33 @@ async function pollSingleBatchStatus(
       }
     }
 
+    const decidedBy = batchId.startsWith(BEDROCK_BATCH_PREFIX)
+      ? "haiku-4.5"
+      : "haiku-5.5";
+    // The decisions and their audit trail go in this same transaction.
+    const { ops: decisionOps } = await planEmailDecisions(
+      pendingUpdates.map((item) => ({
+        emailHash: item.emailHash,
+        decision: item.decision,
+        rule: "ai_email",
+        reason: item.reason,
+        decidedBy,
+        guard: { ai_batch_run_id: batchRunId },
+        emailData: {
+          ai_batch_run_id: null,
+          ai_p_keep: item.pKeep,
+          ...(item.rereview
+            ? {
+                rereview_status: "pending",
+                rereview_queued_at: new Date(),
+                rereview_coordinator_id: fileId,
+              }
+            : {}),
+        },
+      })),
+    );
     await prisma.$transaction([
-      ...pendingUpdates.map((item) =>
-        prisma.email.updateMany({
-          where: { email_hash: item.emailHash, ai_batch_run_id: batchRunId },
-          data: {
-            ai_decision: item.decision,
-            ai_reason: item.reason,
-            ai_batch_run_id: null,
-            ai_p_keep: item.pKeep,
-            ...(item.rereview
-              ? {
-                  rereview_status: "pending",
-                  rereview_queued_at: new Date(),
-                  rereview_coordinator_id: fileId,
-                }
-              : {}),
-          },
-        }),
-      ),
+      ...decisionOps,
       // A completed Batch may include failed request lines.  Successful lines
       // above have durable decisions; release only the unresolved claimed lines
       // so the next slot retries precisely those custom IDs.
@@ -685,15 +693,6 @@ async function pollSingleBatchStatus(
         data: { status: "completed", completed_at: new Date() },
       }),
     ]);
-
-    await syncEmailItems(
-      pendingUpdates.map((item) => item.emailHash),
-      {
-        decidedBy: batchId.startsWith(BEDROCK_BATCH_PREFIX)
-          ? "haiku-4.5"
-          : "haiku-5.5",
-      },
-    );
 
     // The decisions are durable: the run's local Bedrock files are no longer needed.
     removeBedrockArtifacts(batchId);
