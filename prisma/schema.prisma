@@ -406,6 +406,8 @@ model OneTrustForm {
   system_label        String   @default("AIDA")
   language            String   @default("en-gb")
   subject_type        String   @default("Customer")
+  // JSON array of the case details a request needs (see onetrust-forms.ts).
+  required_fields     String   @default("[\"subject_name\",\"work_email\"]")
   created_at          DateTime @default(now())
   updated_at          DateTime @updatedAt
 

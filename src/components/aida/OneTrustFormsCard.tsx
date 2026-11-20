@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
+import { RequiredFieldsModal } from "./RequiredFieldsModal";
 import { Btn, Card, Field, Modal, TextInput } from "./ui";
 
 interface FormSummary {
@@ -12,6 +13,7 @@ interface FormSummary {
   systemLabel: string;
   language: string;
   subjectType: string;
+  requiredFields: string[];
 }
 interface Draft extends Omit<FormSummary, "id"> {
   id: string | null;
@@ -23,6 +25,7 @@ const EMPTY: Draft = {
   name: "",
   templateId: "",
   apiToken: "",
+  requiredFields: ["subject_name", "work_email"],
   dateRaisedFieldKey: "formField81",
   systemLabel: "AIDA",
   language: "en-gb",
@@ -34,6 +37,7 @@ export function OneTrustFormsCard() {
   const [forms, setForms] = useState<FormSummary[]>([]);
   const [draft, setDraft] = useState<Draft | null>(null);
   const [removing, setRemoving] = useState<FormSummary | null>(null);
+  const [fieldsFor, setFieldsFor] = useState<FormSummary | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -140,7 +144,7 @@ export function OneTrustFormsCard() {
         </p>
       ) : (
         <div className="overflow-hidden rounded-xl border border-aida-line">
-          <div className="grid grid-cols-[1.4fr_1fr_0.7fr_120px] gap-4 bg-aida-surface-2 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-aida-dim">
+          <div className="grid grid-cols-[1.4fr_1fr_0.7fr_150px] gap-4 bg-aida-surface-2 px-4 py-3 text-[11px] font-semibold uppercase tracking-[0.08em] text-aida-dim">
             <span>Form</span>
             <span>Label</span>
             <span>Language</span>
@@ -149,7 +153,7 @@ export function OneTrustFormsCard() {
           {forms.map((form) => (
             <div
               key={form.id}
-              className="grid grid-cols-[1.4fr_1fr_0.7fr_120px] items-center gap-4 border-t border-aida-line px-4 py-3 text-sm"
+              className="grid grid-cols-[1.4fr_1fr_0.7fr_150px] items-center gap-4 border-t border-aida-line px-4 py-3 text-sm"
             >
               <span className="truncate font-medium text-aida-text">
                 {form.name}
@@ -157,6 +161,13 @@ export function OneTrustFormsCard() {
               <span className="text-aida-muted">{form.systemLabel}</span>
               <span className="text-aida-muted">{form.language}</span>
               <span className="flex justify-end gap-3 text-[13px]">
+                <button
+                  type="button"
+                  className="text-aida-primary-text hover:underline"
+                  onClick={() => setFieldsFor(form)}
+                >
+                  Fields
+                </button>
                 <button
                   type="button"
                   className="text-aida-primary-text hover:underline"
@@ -234,6 +245,11 @@ export function OneTrustFormsCard() {
             </Btn>
           </>
         }
+      />
+      <RequiredFieldsModal
+        form={fieldsFor}
+        onClose={() => setFieldsFor(null)}
+        onSaved={() => void load()}
       />
     </Card>
   );

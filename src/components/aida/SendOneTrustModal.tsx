@@ -3,6 +3,11 @@
 import { Loader2 } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
 import { toast } from "sonner";
+import {
+  fieldProblem,
+  ONETRUST_FIELDS,
+  parseRequiredFields,
+} from "@/lib/onetrust-forms";
 import { cn } from "@/lib/utils";
 import { useCases } from "./cases-context";
 import type { CaseItem } from "./types";
@@ -11,9 +16,8 @@ import { Btn, Modal } from "./ui";
 interface Form {
   id: string;
   name: string;
+  requiredFields: string[];
 }
-
-const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
 const STATUS: Record<string, string> = {
   idle: "Not sent",
@@ -67,33 +71,34 @@ export function SendOneTrustModal({
       .catch(() => setForms([]));
   }, [target]);
 
-  const words = (target?.subject_name ?? "")
-    .trim()
-    .split(/\s+/)
-    .filter(Boolean);
-  const fields = useMemo(
-    () => [
-      {
-        label: "Subject name",
-        value: words.join(" "),
-        problem: words.length < 2 ? "Needs a first name and a surname" : null,
-        required: true,
-      },
-      {
-        label: "Work email",
-        value: target?.subject_email ?? "",
-        problem: EMAIL.test(target?.subject_email ?? "") ? null : "Missing",
-        required: true,
-      },
-      {
-        label: "Matter number",
-        value: target?.matter_numbers ?? "",
-        problem: null,
-        required: false,
-      },
-    ],
-    [target, words.join, words.length],
+  const chosen = forms.find((form) => form.id === formId) ?? forms[0];
+  const required = useMemo(
+    () => parseRequiredFields(chosen?.requiredFields),
+    [chosen],
   );
+  const fields = useMemo(() => {
+    const subject = {
+      name: target?.subject_name ?? "",
+      email: target?.subject_email ?? "",
+      personalEmail: target?.subject_personal_email ?? null,
+      matterNumbers: target?.matter_numbers ?? null,
+    };
+    const values: Record<string, string> = {
+      subject_name: subject.name.trim().split(/\s+/).filter(Boolean).join(" "),
+      work_email: subject.email,
+      personal_email: subject.personalEmail ?? "",
+      matter_number: subject.matterNumbers ?? "",
+    };
+    return ONETRUST_FIELDS.map((field) => {
+      const isRequired = required.includes(field.key);
+      return {
+        label: field.label,
+        value: values[field.key],
+        problem: isRequired ? fieldProblem(field.key, subject) : null,
+        required: isRequired,
+      };
+    });
+  }, [target, required]);
   const blocked = fields.some((field) => field.required && field.problem);
   const needsForm = forms.length > 1 && !target?.onetrust_request_id && !formId;
   const sent =

@@ -17,6 +17,11 @@ import {
   resultSummaryPath,
   retryDelayMs,
 } from "./onetrust-attachments";
+import {
+  missingRequired,
+  type OneTrustFieldKey,
+  parseRequiredFields,
+} from "./onetrust-forms";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
@@ -168,6 +173,7 @@ interface OneTrustFormConfig {
   id: string;
   templateId: string;
   apiToken: string;
+  requiredFields: OneTrustFieldKey[];
 }
 
 type OneTrustFormRow = Awaited<
@@ -224,6 +230,7 @@ async function loadForm(formId?: string | null): Promise<OneTrustFormConfig> {
     id: form.id,
     templateId: form.template_id,
     apiToken: await decryptSetting(form.api_token_encrypted),
+    requiredFields: parseRequiredFields(form.required_fields),
   };
 }
 
@@ -273,6 +280,17 @@ async function createRequest(
   if (!item.subject_email.trim())
     throw new Error("The client case needs a subject email.");
   const formConfig = await loadForm(formId);
+  const missing = missingRequired(formConfig.requiredFields, {
+    name: item.subject_name,
+    email: item.subject_email,
+    personalEmail: item.subject_personal_email,
+    matterNumbers: item.matter_numbers,
+  });
+  if (missing.length > 0) {
+    throw new Error(
+      `This web form requires case details that are missing. ${missing.join("; ")}.`,
+    );
+  }
   const requestTraceId = crypto.randomUUID();
   const accepted = await createFormRequest(
     settings,
