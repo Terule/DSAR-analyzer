@@ -29,6 +29,7 @@ import { ScanInputModal } from "./ScanInputModal";
 import { SendOneTrustModal } from "./SendOneTrustModal";
 import { StatisticsModal } from "./StatisticsModal";
 import type { CaseItem, RequestItem } from "./types";
+import { UploadSharePointModal } from "./UploadSharePointModal";
 import { Btn, Card, Dot, EmptyPanel, Page } from "./ui";
 import { type Insights, useInsights } from "./use-insights";
 
@@ -702,6 +703,7 @@ export function CasePage({ caseId }: { caseId: string }) {
   const [scanFor, setScanFor] = useState<CaseItem | null>(null);
   const [sendFor, setSendFor] = useState<CaseItem | null>(null);
   const [wipeFor, setWipeFor] = useState<CaseItem | null>(null);
+  const [uploadFor, setUploadFor] = useState<RequestItem | null>(null);
   const [continueFor, setContinueFor] = useState<RequestItem | null>(null);
   const [resetFor, setResetFor] = useState<RequestItem | null>(null);
   const [deleteFor, setDeleteFor] = useState<RequestItem | null>(null);
@@ -983,6 +985,14 @@ export function CasePage({ caseId }: { caseId: string }) {
         ]
       : []),
     { label: "Configure case", onClick: () => setConfigure(item) },
+    ...(request && !client && stage?.tone === "done"
+      ? [
+          {
+            label: "Upload to SharePoint",
+            onClick: () => setUploadFor(request),
+          } as MenuEntry,
+        ]
+      : []),
     ...(request && stage?.tone === "done"
       ? [
           {
@@ -1204,6 +1214,10 @@ export function CasePage({ caseId }: { caseId: string }) {
         ) : null}
       </Drawer>
 
+      <UploadSharePointModal
+        target={uploadFor}
+        onClose={() => setUploadFor(null)}
+      />
       <StatisticsModal
         mode={stats}
         item={item}
