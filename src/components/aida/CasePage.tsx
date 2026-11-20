@@ -25,6 +25,7 @@ import {
   StopWorkModal,
 } from "./RequestDialogs";
 import { ScanInputModal } from "./ScanInputModal";
+import { SendOneTrustModal } from "./SendOneTrustModal";
 import type { CaseItem, RequestItem } from "./types";
 import { Btn, Card, Dot, EmptyPanel, Page } from "./ui";
 import { type Insights, useInsights } from "./use-insights";
@@ -696,6 +697,7 @@ export function CasePage({ caseId }: { caseId: string }) {
   const [stop, setStop] = useState<CaseItem | null>(null);
   const [newRequest, setNewRequest] = useState<CaseItem | null>(null);
   const [scanFor, setScanFor] = useState<CaseItem | null>(null);
+  const [sendFor, setSendFor] = useState<CaseItem | null>(null);
   const [continueFor, setContinueFor] = useState<RequestItem | null>(null);
   const [resetFor, setResetFor] = useState<RequestItem | null>(null);
   const [deleteFor, setDeleteFor] = useState<RequestItem | null>(null);
@@ -904,7 +906,7 @@ export function CasePage({ caseId }: { caseId: string }) {
                 disabled={
                   busy === `onetrust-${item.id}` || item.requests.length !== 1
                 }
-                onClick={() => void sendToOneTrust(item)}
+                onClick={() => setSendFor(item)}
               >
                 {item.onetrust_status === "completed"
                   ? "Sync OneTrust"
@@ -964,28 +966,6 @@ export function CasePage({ caseId }: { caseId: string }) {
     await call(key, "/api/cases?status=active");
   }
 
-  async function sendToOneTrust(target: CaseItem) {
-    const result = await call(
-      `onetrust-${target.id}`,
-      `/api/cases/${target.id}/onetrust`,
-      {
-        method: "POST",
-        body: JSON.stringify({}),
-      },
-    );
-    if (result) {
-      const parts = [
-        result.uploaded ? `${result.uploaded} uploaded` : null,
-        result.skipped ? `${result.skipped} oversized` : null,
-        result.failed ? `${result.failed} failed` : null,
-      ].filter(Boolean);
-      const detail = parts.join(", ") || "no files to upload";
-      if (result.status === "completed")
-        toast.success(`OneTrust completed: ${detail}.`);
-      else toast.warning(`OneTrust ${String(result.status)}: ${detail}.`);
-    }
-  }
-
   const actionEntries: MenuEntry[] = [
     {
       label: "Statistics",
@@ -1007,7 +987,7 @@ export function CasePage({ caseId }: { caseId: string }) {
               item.onetrust_status === "completed"
                 ? "Sync with OneTrust"
                 : "Send to OneTrust",
-            onClick: () => void sendToOneTrust(item),
+            onClick: () => setSendFor(item),
           } as MenuEntry,
         ]
       : []),
@@ -1220,6 +1200,15 @@ export function CasePage({ caseId }: { caseId: string }) {
         caseTarget={scanFor}
         onClose={() => setScanFor(null)}
         onDone={(id) => id === item.id && router.replace(`/cases/${id}`)}
+      />
+      <SendOneTrustModal
+        target={
+          sendFor
+            ? (cases.find((entry) => entry.id === sendFor.id) ?? sendFor)
+            : null
+        }
+        onClose={() => setSendFor(null)}
+        onFix={(entry) => setConfigure(entry)}
       />
       <StopWorkModal target={stop} onClose={() => setStop(null)} />
       <NewRequestModal

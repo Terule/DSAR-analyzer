@@ -55,6 +55,10 @@ export type CaseItem = {
   name: string;
   subject_name: string;
   subject_email: string;
+  subject_personal_email?: string | null;
+  subject_aliases?: string | null;
+  matter_numbers?: string | null;
+  updated_at?: string;
   status: string;
   case_type: "employee" | "client";
   onetrust_status: string;
