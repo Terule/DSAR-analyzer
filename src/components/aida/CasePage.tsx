@@ -11,6 +11,7 @@ import {
   ArchiveCaseModal,
   ConfigureCaseModal,
   DeleteCaseModal,
+  WipeCaseModal,
 } from "./CaseDialogs";
 import { count, formatClock, isConfigured, requestStage } from "./case-view";
 import { useCases } from "./cases-context";
@@ -698,6 +699,7 @@ export function CasePage({ caseId }: { caseId: string }) {
   const [newRequest, setNewRequest] = useState<CaseItem | null>(null);
   const [scanFor, setScanFor] = useState<CaseItem | null>(null);
   const [sendFor, setSendFor] = useState<CaseItem | null>(null);
+  const [wipeFor, setWipeFor] = useState<CaseItem | null>(null);
   const [continueFor, setContinueFor] = useState<RequestItem | null>(null);
   const [resetFor, setResetFor] = useState<RequestItem | null>(null);
   const [deleteFor, setDeleteFor] = useState<RequestItem | null>(null);
@@ -1009,6 +1011,14 @@ export function CasePage({ caseId }: { caseId: string }) {
           } as MenuEntry,
         ]
       : []),
+    ...(item.requests.length > 0 && !working
+      ? [
+          {
+            label: "Wipe data",
+            onClick: () => setWipeFor(item),
+          } as MenuEntry,
+        ]
+      : []),
     {
       label: "Archive",
       onClick: () => setArchive(item),
@@ -1210,6 +1220,7 @@ export function CasePage({ caseId }: { caseId: string }) {
         onClose={() => setSendFor(null)}
         onFix={(entry) => setConfigure(entry)}
       />
+      <WipeCaseModal target={wipeFor} onClose={() => setWipeFor(null)} />
       <StopWorkModal target={stop} onClose={() => setStop(null)} />
       <NewRequestModal
         target={newRequest}

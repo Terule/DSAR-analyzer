@@ -637,3 +637,67 @@ export function DeleteCaseModal({
     </Modal>
   );
 }
+
+/* ---------- Wipe the data of a case, keeping the case ---------- */
+
+export function WipeCaseModal({
+  target,
+  onClose,
+}: {
+  target: CaseItem | null;
+  onClose: () => void;
+}) {
+  const { call, busy } = useCases();
+  const [confirmation, setConfirmation] = useState("");
+  useEffect(() => {
+    if (target) setConfirmation("");
+  }, [target]);
+  const wiping = !!target && busy === `wipe-${target.id}`;
+  return (
+    <Modal
+      open={!!target}
+      onClose={onClose}
+      tone="danger"
+      title={`Wipe data ${target?.name ?? ""}?`}
+      description="Deletes the output of every request in this case, but keeps the case, its subject and its settings. The audit trail of each request is deleted too. Source PSTs stay in the input folder."
+      footer={
+        <>
+          <Btn kind="ghost" onClick={onClose}>
+            Cancel
+          </Btn>
+          <Btn
+            kind="danger"
+            disabled={!target || confirmation !== target.name || wiping}
+            onClick={async () => {
+              if (!target) return;
+              const result = await call(
+                `wipe-${target.id}`,
+                `/api/cases/${target.id}/wipe`,
+                {
+                  method: "POST",
+                  body: JSON.stringify({ confirmation }),
+                },
+              );
+              if (result) {
+                toast.success(`Data of ${target.name} wiped.`, {
+                  description: `${String(result.wiped)} ${result.wiped === 1 ? "request" : "requests"} are ready to run again.`,
+                });
+                onClose();
+              }
+            }}
+          >
+            Wipe data
+          </Btn>
+        </>
+      }
+    >
+      <Field label="Type the case name to confirm">
+        <TextInput
+          value={confirmation}
+          placeholder={target?.name}
+          onChange={(event) => setConfirmation(event.target.value)}
+        />
+      </Field>
+    </Modal>
+  );
+}
