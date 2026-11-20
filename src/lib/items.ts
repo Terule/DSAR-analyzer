@@ -10,6 +10,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { auditCsv, cleanAuditLabel } from "./audit-csv";
 import { prisma } from "./prisma";
 
 export type ItemState = "pending" | "kept" | "discarded" | "review";
@@ -74,6 +75,11 @@ export interface SyncEmailItemsOptions {
   decidedBy?: string;
   /** Names the rule when the reason text does not (for example the mail screening). */
   rule?: string;
+  /**
+   * What a person recognises, by `email_hash`: the email subject, given when the
+   * email is first recorded. Kept once set; later syncs need not repeat it.
+   */
+  labels?: Record<string, string>;
 }
 
 /**
@@ -148,12 +154,16 @@ export async function syncEmailItems(
             parent_id: row.parent_email_hash,
             kind: "email",
             origin: row.is_attachment ? "attachment" : "pst",
+            label: cleanAuditLabel(options.labels?.[row.email_hash]) || null,
             state: decision.state,
             decision_rule: decision.rule,
             reason: decision.reason,
             decided_by: by,
           },
           update: {
+            ...(options.labels?.[row.email_hash]
+              ? { label: cleanAuditLabel(options.labels[row.email_hash]) }
+              : {}),
             state: decision.state,
             decision_rule: decision.rule,
             reason: decision.reason,
@@ -515,15 +525,31 @@ export async function recordAttachmentItems(
   }
 }
 
-function csvCell(value: string): string {
-  return /[",\n\r]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+/**
+ * The audit trail of a request as the one CSV (`audit-csv.ts`). `states` limits
+ * what is listed; the decisions panel exports what is on screen through the same
+ * function. Returns null when the request has no items.
+ */
+export async function auditTrailCsv(
+  caseRequestId: string,
+  states?: ItemState[],
+): Promise<string | null> {
+  const items = await prisma.item.findMany({
+    where: {
+      case_request_id: caseRequestId,
+      ...(states ? { state: { in: states } } : {}),
+    },
+    orderBy: [{ kind: "asc" }, { origin: "asc" }, { id: "asc" }],
+  });
+  return items.length === 0 ? null : auditCsv(items);
 }
 
 /**
  * Writes `Discarded/audit-trail.csv` for a request that discarded something:
  * every item that was discarded or sent to a person (kept items stay in the
- * database only, so the file reads as a list of exceptions), with the rule and who decided. Never throws:
- * the trail is a record, not a stage.
+ * database only, so the file reads as a list of exceptions), in the same format
+ * as the export of the decisions panel. Never throws: the trail is a record,
+ * not a stage.
  */
 export async function exportAuditTrail(
   caseRequestId: string | null | undefined,
@@ -543,25 +569,7 @@ export async function exportAuditTrail(
     const directory = path.join(requestOutputDir, "Discarded");
     fs.mkdirSync(directory, { recursive: true });
     const file = path.join(directory, "audit-trail.csv");
-    const lines = [
-      "item,kind,origin,parent,state,rule,reason,decided_by,decided_at",
-      ...items.map((item) =>
-        [
-          item.label ?? item.id.slice(0, 16),
-          item.kind,
-          item.origin,
-          item.parent_id ? item.parent_id.slice(0, 16) : "",
-          item.state,
-          item.decision_rule ?? "",
-          item.reason ?? "",
-          item.decided_by ?? "",
-          item.updated_at.toISOString(),
-        ]
-          .map((cell) => csvCell(String(cell)))
-          .join(","),
-      ),
-    ];
-    fs.writeFileSync(file, `${lines.join("\n")}\n`);
+    fs.writeFileSync(file, auditCsv(items));
     return file;
   } catch (error) {
     console.warn("[Items] Could not export the audit trail:", error);
@@ -580,7 +588,7 @@ export function createDuplicateRecorder(
   chunkSize = 500,
 ) {
   const perHash = new Map<string, number>();
-  let buffer: Array<{ id: string; parent: string }> = [];
+  let buffer: Array<{ id: string; parent: string; label: string }> = [];
 
   const flush = async (): Promise<void> => {
     if (buffer.length === 0) return;
@@ -608,6 +616,7 @@ export function createDuplicateRecorder(
             parent_id: entry.parent,
             kind: "email",
             origin: "pst",
+            label: entry.label || null,
             state: "discarded",
             decision_rule: "dup",
             reason,
@@ -630,7 +639,7 @@ export function createDuplicateRecorder(
   };
 
   return {
-    async add(emailHash: string): Promise<void> {
+    async add(emailHash: string, subject?: string): Promise<void> {
       const n = (perHash.get(emailHash) ?? 0) + 1;
       perHash.set(emailHash, n);
       buffer.push({
@@ -639,6 +648,7 @@ export function createDuplicateRecorder(
           .update(`duplicate:${fileId}:${emailHash}:${n}`)
           .digest("hex"),
         parent: emailHash,
+        label: cleanAuditLabel(subject),
       });
       if (buffer.length >= chunkSize) await flush();
     },

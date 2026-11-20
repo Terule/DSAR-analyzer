@@ -235,20 +235,20 @@ describe("items audit trail (shadow mode)", () => {
       .split("\n");
     assert.equal(
       lines[0],
-      "item,kind,origin,parent,state,rule,reason,decided_by,decided_at",
+      "time,decision,item,kind,origin,parent,rule,reason,decided_by",
     );
     assert.equal(lines.length, 3);
     assert.ok(
       lines.some((l) =>
-        l.startsWith(
-          '"Docs/a, b.docx",file,files_folder,,discarded,keyword,"Contains ""excluded"" keyword.",rule,',
+        l.endsWith(
+          ',discarded,"Docs/a, b.docx",file,files_folder,,keyword,"Contains ""excluded"" keyword.",rule',
         ),
       ),
     );
     assert.ok(
       lines.some((l) =>
-        l.startsWith(
-          "Docs/ok.docx,file,files_folder,,review,ai_file,Needs a person,haiku-4.5,",
+        l.endsWith(
+          ",review,Docs/ok.docx,file,files_folder,,ai_file,Needs a person,haiku-4.5",
         ),
       ),
     );

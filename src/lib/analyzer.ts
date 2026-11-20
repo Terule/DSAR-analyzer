@@ -389,7 +389,7 @@ export async function analyzePstDuplicates(
 
     if (isDuplicate === 1) {
       metrics.duplicateCount++;
-      await duplicates.add(emailHash);
+      await duplicates.add(emailHash, subject);
       fs.unlinkSync(filePath); // Destroy the duplicate file instantly to free disk space!
       return null; // Skip attachment parsing for duplicates
     }
@@ -425,7 +425,7 @@ export async function analyzePstDuplicates(
             "Pre-filter: Subject or body contains privileged/confidential keyword",
         },
       });
-      await syncEmailItems([emailHash]);
+      await syncEmailItems([emailHash], { labels: { [emailHash]: subject } });
       await prisma.processedFile.update({
         where: { id: fileId },
         data: { ai_discarded_count: { increment: 1 } },
@@ -463,7 +463,7 @@ export async function analyzePstDuplicates(
           : {}),
       },
     });
-    await syncEmailItems([emailHash]);
+    await syncEmailItems([emailHash], { labels: { [emailHash]: subject } });
 
     // --- RECURSIVE ATTACHMENT FLATTENING ---
     if (parsed.attachments && parsed.attachments.length > 0) {

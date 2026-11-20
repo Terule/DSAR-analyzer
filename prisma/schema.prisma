@@ -422,8 +422,8 @@ model Item {
   parent_id       String?
   kind            String
   origin          String
-  // What a person recognises: the path of a file, the name of an attachment.
-  // Never an email subject, so the audit trail adds no new personal data.
+  // What a person recognises: the subject of an email, the path of a file, the
+  // name of an attachment. Shown in the audit trail CSV and the decisions panel.
   label           String?
   // pending | kept | discarded | review
   state           String   @default("pending")
