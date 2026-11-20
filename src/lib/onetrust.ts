@@ -99,7 +99,7 @@ async function fetchOneTrust(
   }
 }
 
-async function accessToken(settings: Settings): Promise<string> {
+export async function accessToken(settings: Settings): Promise<string> {
   const credentials = await runtimeCredentials();
   if (!credentials.oneTrustClientId || !credentials.oneTrustClientSecret) {
     throw new Error("Configure OneTrust OAuth credentials in System Settings.");
@@ -306,7 +306,7 @@ interface OneTrustRequestIdentity {
   requestQueueId: string;
 }
 
-async function resolvePublicRequestIdentity(
+export async function resolvePublicRequestIdentity(
   settings: Settings,
   token: string,
   firstName: string,
@@ -564,7 +564,7 @@ function attachmentNames(
   });
 }
 
-async function uploadDocument(
+export async function uploadDocument(
   settings: Settings,
   token: string,
   requestId: string,
@@ -628,7 +628,7 @@ async function uploadDocument(
   return id;
 }
 
-async function attachToResultSummary(
+export async function attachToResultSummary(
   settings: Settings,
   token: string,
   requestId: string,
@@ -655,7 +655,7 @@ async function attachToResultSummary(
  * a retry never attaches the same file twice. A failed read returns an empty
  * set: the upload still proceeds, as before.
  */
-async function alreadyAttachedFileIds(
+export async function alreadyAttachedFileIds(
   settings: Settings,
   token: string,
   requestRef: string,
