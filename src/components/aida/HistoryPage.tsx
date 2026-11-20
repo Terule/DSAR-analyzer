@@ -1,7 +1,9 @@
 "use client";
 
 import { ChevronDown } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
 import { fetchRunHistory } from "@/lib/api";
 import type { CaseHistoryItem } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -119,6 +121,38 @@ export function HistoryPage() {
   const [period, setPeriod] = useState<PeriodKey>("90");
   const [query, setQuery] = useState("");
   const [open, setOpen] = useState<CaseHistoryItem | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const router = useRouter();
+
+  const restore = async (item: CaseHistoryItem) => {
+    const name =
+      item.case_key.split(/[\\/]/).filter(Boolean)[0] ?? item.case_key;
+    setRestoring(true);
+    try {
+      const response = await fetch("/api/history/restore", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name }),
+      });
+      const body = (await response.json().catch(() => ({}))) as {
+        error?: string;
+        case?: { id: string };
+      };
+      if (!response.ok) throw new Error(body.error || "Could not restore.");
+      toast.success(`${name} restored`, {
+        description:
+          "It is back in Cases. Files removed when it was archived are not restored.",
+      });
+      setOpen(null);
+      if (body.case) router.push(`/cases/${body.case.id}`);
+    } catch (failure) {
+      toast.error(
+        failure instanceof Error ? failure.message : "Could not restore.",
+      );
+    } finally {
+      setRestoring(false);
+    }
+  };
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -347,6 +381,20 @@ export function HistoryPage() {
                   <span className="font-medium text-aida-text">{value}</span>
                 </div>
               ))}
+            </div>
+            <div className="mx-6 flex flex-col gap-2">
+              <Btn
+                kind="soft"
+                className="w-fit"
+                disabled={restoring}
+                onClick={() => void restore(open)}
+              >
+                Restore case
+              </Btn>
+              <p className="text-xs text-aida-dim">
+                The case returns to Cases. Files removed when it was archived
+                are not restored.
+              </p>
             </div>
           </div>
         ) : null}
