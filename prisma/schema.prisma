@@ -230,6 +230,7 @@ model AiBatchRun {
 
   coordinator ProcessedFile @relation("CoordinatorAiBatchRuns", fields: [coordinator_id], references: [id], onDelete: Cascade, onUpdate: NoAction)
   emails Email[] @relation("AiBatchRunEmails")
+  items  Item[]  @relation("AiBatchRunItems")
 
   @@index([coordinator_id, status])
   @@map("ai_batch_runs")
@@ -436,14 +437,25 @@ model Item {
   reason          String?
   decided_by      String?
   cascade         Boolean  @default(false)
+  // The AI work queue of an email item: pending = waiting for the AI. The Batch
+  // run that claimed it, the 4.5 confidence (0-100) and the second-review lease.
+  ai_batch_run_id         String?
+  ai_p_keep               Int?
+  rereview_status         String?
+  rereview_queued_at      DateTime?
+  rereview_started_at     DateTime?
+  rereview_coordinator_id String?
   created_at      DateTime @default(now())
   updated_at      DateTime @updatedAt
 
   case_request CaseRequest? @relation(fields: [case_request_id], references: [id], onDelete: Cascade)
+  ai_batch_run AiBatchRun?  @relation("AiBatchRunItems", fields: [ai_batch_run_id], references: [id], onDelete: SetNull, onUpdate: Cascade)
   events       ItemEvent[]
 
   @@index([case_request_id, state])
   @@index([file_id])
+  @@index([ai_batch_run_id])
+  @@index([rereview_status])
   @@map("items")
 }
 

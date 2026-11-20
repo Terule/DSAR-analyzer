@@ -30,10 +30,10 @@ export interface EmailDecisionInput {
   decidedBy: string;
   /** What a person recognises: the email subject. Kept once set. */
   label?: string;
-  /** Other `emails` columns written with the decision (batch release, second review). */
-  emailData?: Prisma.EmailUncheckedUpdateManyInput;
-  /** Only an email that still matches is written, in both tables. */
-  guard?: Prisma.EmailWhereInput;
+  /** Other queue columns of the item written with the decision (batch release, second review). */
+  itemData?: Prisma.ItemUncheckedUpdateManyInput;
+  /** Only an email whose item still matches is written, in both tables. */
+  guard?: Prisma.ItemWhereInput;
 }
 
 type Op = Prisma.PrismaPromise<unknown>;
@@ -59,9 +59,9 @@ export async function planEmailDecisions(
       string,
       {
         file_id: string | null;
-        parent_email_hash: string | null;
-        is_attachment: number;
-        processed_file: { case_request_id: string | null } | null;
+        parent_id: string | null;
+        origin: string;
+        case_request_id: string | null;
       }
     >();
     const byGuard = new Map<string, EmailDecisionInput[]>();
@@ -70,20 +70,42 @@ export async function planEmailDecisions(
       byGuard.set(key, [...(byGuard.get(key) ?? []), input]);
     }
     for (const group of byGuard.values()) {
-      const rows = await prisma.email.findMany({
-        where: {
-          email_hash: { in: group.map((input) => input.emailHash) },
-          ...(group[0].guard ?? {}),
-        },
+      const hashes = group.map((input) => input.emailHash);
+      const guard = group[0].guard;
+      const rows = await prisma.item.findMany({
+        where: { id: { in: hashes }, kind: "email", ...(guard ?? {}) },
         select: {
-          email_hash: true,
+          id: true,
           file_id: true,
-          parent_email_hash: true,
-          is_attachment: true,
-          processed_file: { select: { case_request_id: true } },
+          parent_id: true,
+          origin: true,
+          case_request_id: true,
         },
       });
-      for (const row of rows) matched.set(row.email_hash, row);
+      for (const row of rows) matched.set(row.id, row);
+      // An unguarded decision on an email that has no item yet (older data)
+      // still goes through: its item is created from the email row.
+      const missing = guard ? [] : hashes.filter((hash) => !matched.has(hash));
+      if (missing.length > 0) {
+        const emails = await prisma.email.findMany({
+          where: { email_hash: { in: missing } },
+          select: {
+            email_hash: true,
+            file_id: true,
+            parent_email_hash: true,
+            is_attachment: true,
+            processed_file: { select: { case_request_id: true } },
+          },
+        });
+        for (const email of emails) {
+          matched.set(email.email_hash, {
+            file_id: email.file_id,
+            parent_id: email.parent_email_hash,
+            origin: email.is_attachment ? "attachment" : "pst",
+            case_request_id: email.processed_file?.case_request_id ?? null,
+          });
+        }
+      }
     }
     const existing = new Map(
       (
@@ -106,13 +128,10 @@ export async function planEmailDecisions(
       const state = STATE[input.decision];
       const reason = input.reason?.trim() ? input.reason : null;
       ops.push(
+        // The email row keeps a mirror of the verdict until its columns are dropped.
         prisma.email.updateMany({
-          where: { email_hash: hash, ...(input.guard ?? {}) },
-          data: {
-            ai_decision: input.decision,
-            ai_reason: input.reason,
-            ...(input.emailData ?? {}),
-          },
+          where: { email_hash: hash },
+          data: { ai_decision: input.decision, ai_reason: input.reason },
         }),
       );
       const label = cleanAuditLabel(input.label) || null;
@@ -121,16 +140,17 @@ export async function planEmailDecisions(
           where: { id: hash },
           create: {
             id: hash,
-            case_request_id: row.processed_file?.case_request_id ?? null,
+            case_request_id: row.case_request_id,
             file_id: row.file_id,
-            parent_id: row.parent_email_hash,
+            parent_id: row.parent_id,
             kind: "email",
-            origin: row.is_attachment ? "attachment" : "pst",
+            origin: row.origin,
             label,
             state,
             decision_rule: input.rule,
             reason,
             decided_by: input.decidedBy,
+            ...(input.itemData as Prisma.ItemUncheckedCreateInput | undefined),
           },
           update: {
             ...(label ? { label } : {}),
@@ -138,6 +158,7 @@ export async function planEmailDecisions(
             decision_rule: input.rule,
             reason,
             decided_by: input.decidedBy,
+            ...(input.itemData ?? {}),
           },
         }),
       );

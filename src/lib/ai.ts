@@ -224,19 +224,17 @@ export async function generateBatchFile(
     .readdirSync(jsonFolder)
     .filter((f) => f.endsWith(".json"));
 
-  const unprocessedRecords = await prisma.email.findMany({
+  const unprocessedRecords = await prisma.item.findMany({
     where: {
       file_id: { in: casePstIds },
-      is_duplicate: 0,
-      ai_decision: null,
+      kind: "email",
+      state: "pending",
       ai_batch_run_id: null,
     },
-    select: { email_hash: true },
+    select: { id: true },
   });
 
-  const unprocessedHashes = new Set(
-    unprocessedRecords.map((r) => r.email_hash),
-  );
+  const unprocessedHashes = new Set(unprocessedRecords.map((r) => r.id));
 
   const systemPrompt = buildEmailAuditSystemPrompt(subjectCriteria);
 
@@ -267,10 +265,11 @@ export async function generateBatchFile(
   // parallel slot only selects rows whose claim is still null. Claims go in
   // groups, then the rows really owned by this run are read back.
   for (let i = 0; i < picked.length; i += 1000) {
-    await prisma.email.updateMany({
+    await prisma.item.updateMany({
       where: {
-        email_hash: { in: picked.slice(i, i + 1000) },
-        ai_decision: null,
+        id: { in: picked.slice(i, i + 1000) },
+        kind: "email",
+        state: "pending",
         ai_batch_run_id: null,
       },
       data: { ai_batch_run_id: batchRunId },
@@ -278,11 +277,11 @@ export async function generateBatchFile(
   }
   const owned = new Set(
     (
-      await prisma.email.findMany({
+      await prisma.item.findMany({
         where: { ai_batch_run_id: batchRunId },
-        select: { email_hash: true },
+        select: { id: true },
       })
-    ).map((row) => row.email_hash),
+    ).map((row) => row.id),
   );
 
   // Pass 2: write the request lines of the claimed emails.
@@ -369,8 +368,8 @@ export async function generateBatchFile(
     return "submitted";
   } catch (error) {
     await prisma.$transaction([
-      prisma.email.updateMany({
-        where: { ai_batch_run_id: batchRunId, ai_decision: null },
+      prisma.item.updateMany({
+        where: { ai_batch_run_id: batchRunId, state: "pending" },
         data: { ai_batch_run_id: null },
       }),
       prisma.aiBatchRun.delete({ where: { id: batchRunId } }),

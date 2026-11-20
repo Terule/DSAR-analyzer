@@ -341,9 +341,13 @@ async function completedAiElapsedMs(
 export async function emailRereviewPending(
   casePstIds: string[],
 ): Promise<boolean> {
-  const waiting = await prisma.email.findFirst({
-    where: { file_id: { in: casePstIds }, rereview_status: { not: null } },
-    select: { email_hash: true },
+  const waiting = await prisma.item.findFirst({
+    where: {
+      file_id: { in: casePstIds },
+      kind: "email",
+      rereview_status: { not: null },
+    },
+    select: { id: true },
   });
   return !!waiting;
 }
@@ -464,8 +468,8 @@ async function pollSingleBatchStatus(
         `[Batch Worker] ERROR: Batch ${batch.id} completed but provided NO output!`,
       );
       await prisma.$transaction([
-        prisma.email.updateMany({
-          where: { ai_batch_run_id: batchRunId, ai_decision: null },
+        prisma.item.updateMany({
+          where: { ai_batch_run_id: batchRunId, state: "pending" },
           data: { ai_batch_run_id: null },
         }),
         prisma.aiBatchRun.update({
@@ -666,7 +670,7 @@ async function pollSingleBatchStatus(
         reason: item.reason,
         decidedBy,
         guard: { ai_batch_run_id: batchRunId },
-        emailData: {
+        itemData: {
           ai_batch_run_id: null,
           ai_p_keep: item.pKeep,
           ...(item.rereview
@@ -684,8 +688,8 @@ async function pollSingleBatchStatus(
       // A completed Batch may include failed request lines.  Successful lines
       // above have durable decisions; release only the unresolved claimed lines
       // so the next slot retries precisely those custom IDs.
-      prisma.email.updateMany({
-        where: { ai_batch_run_id: batchRunId, ai_decision: null },
+      prisma.item.updateMany({
+        where: { ai_batch_run_id: batchRunId, state: "pending" },
         data: { ai_batch_run_id: null },
       }),
       prisma.aiBatchRun.update({
@@ -746,11 +750,11 @@ async function pollSingleBatchStatus(
       `[AI Audit] file=${fileId} first_pass_keep=${auditStats.firstPassKeep} first_pass_discard=${auditStats.firstPassDiscard} rereview_queued=${auditStats.rereviewQueued} second_pass_requested=${auditStats.secondPassRequested} second_pass_executed=${auditStats.secondPassExecuted} second_pass_rescued=${auditStats.secondPassRescued} invalid_outputs=${auditStats.invalidOutput} final_keep=${keepCount} final_discard=${discardCount}`,
     );
 
-    const remainingCount = await prisma.email.count({
+    const remainingCount = await prisma.item.count({
       where: {
         file_id: { in: casePstIds },
-        is_duplicate: 0,
-        ai_decision: null,
+        kind: "email",
+        state: "pending",
       },
     });
 
@@ -800,8 +804,8 @@ async function pollSingleBatchStatus(
       `[Batch Worker] Batch ${batch.id} did not complete. Status: ${batch.status}`,
     );
     await prisma.$transaction([
-      prisma.email.updateMany({
-        where: { ai_batch_run_id: batchRunId, ai_decision: null },
+      prisma.item.updateMany({
+        where: { ai_batch_run_id: batchRunId, state: "pending" },
         data: { ai_batch_run_id: null },
       }),
       prisma.aiBatchRun.update({

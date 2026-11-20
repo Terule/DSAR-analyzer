@@ -355,7 +355,7 @@ export async function finishMailScreen(coordinatorId: string): Promise<void> {
         rule: "mail_screen",
         reason: body.reason ?? "",
         decidedBy: "bedrock",
-        guard: { ai_decision: "keep" },
+        guard: { state: "kept" },
       });
       if (target === "discard") discarded += written;
     }

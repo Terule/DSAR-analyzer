@@ -56,11 +56,11 @@ export async function GET(
   // A provisional discard waiting for the 2nd analysis reads as "Reanalysing".
   const waiting = new Set(
     (
-      await prisma.email.findMany({
-        where: { email_hash: { in: hashes }, rereview_status: "pending" },
-        select: { email_hash: true },
+      await prisma.item.findMany({
+        where: { id: { in: hashes }, rereview_status: "pending" },
+        select: { id: true },
       })
-    ).map((row) => row.email_hash),
+    ).map((row) => row.id),
   );
   const counts: Record<string, number> = {};
   for (const group of byState) counts[group.state] = group._count._all;

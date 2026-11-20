@@ -31,7 +31,7 @@ interface CaseContext {
 }
 
 interface WaitingRow {
-  email_hash: string;
+  id: string;
   rereview_coordinator_id: string | null;
 }
 
@@ -130,16 +130,16 @@ export async function rereviewEmailDiscards(
   ): Promise<void> => {
     if (decision === "keep") {
       const ctx = await getContext(row.rereview_coordinator_id);
-      if (ctx) moveDiscardedToSelected(ctx, row.email_hash);
+      if (ctx) moveDiscardedToSelected(ctx, row.id);
     }
     await decideEmail({
-      emailHash: row.email_hash,
+      emailHash: row.id,
       decision,
       rule: "ai_email",
       reason: reason.slice(0, 240),
       decidedBy: "haiku-5.5",
       guard: { rereview_status: "running" },
-      emailData: { rereview_status: null, rereview_started_at: null },
+      itemData: { rereview_status: null, rereview_started_at: null },
     });
     if (row.rereview_coordinator_id) touched.add(row.rereview_coordinator_id);
   };
@@ -148,7 +148,7 @@ export async function rereviewEmailDiscards(
     name: "Email Rereview",
     testConverse: emailAiTestOverride.converse,
     async reclaimStale(cutoff) {
-      await prisma.email.updateMany({
+      await prisma.item.updateMany({
         where: {
           ...scope,
           rereview_status: "running",
@@ -159,18 +159,18 @@ export async function rereviewEmailDiscards(
     },
     async giveUpWithoutCredentials(cutoff) {
       // No credentials: keep waiting, but never strand an email forever.
-      const stranded = await prisma.email.findMany({
+      const stranded = await prisma.item.findMany({
         where: {
           ...scope,
           rereview_status: "pending",
           rereview_queued_at: { lt: cutoff },
         },
-        select: { email_hash: true, rereview_coordinator_id: true },
+        select: { id: true, rereview_coordinator_id: true },
       });
       let count = 0;
       for (const row of stranded) {
-        const claim = await prisma.email.updateMany({
-          where: { email_hash: row.email_hash, rereview_status: "pending" },
+        const claim = await prisma.item.updateMany({
+          where: { id: row.id, rereview_status: "pending" },
           data: { rereview_status: "running" },
         });
         if (claim.count === 0) continue;
@@ -184,32 +184,30 @@ export async function rereviewEmailDiscards(
       return count;
     },
     async claim(take, stamp) {
-      const candidates = await prisma.email.findMany({
-        where: { ...scope, rereview_status: "pending" },
+      const candidates = await prisma.item.findMany({
+        where: { ...scope, kind: "email", rereview_status: "pending" },
         orderBy: { rereview_queued_at: "asc" },
         take,
-        select: { email_hash: true },
+        select: { id: true },
       });
       if (candidates.length === 0) return null;
-      const hashes = candidates.map((row) => row.email_hash);
-      await prisma.email.updateMany({
-        where: { email_hash: { in: hashes }, rereview_status: "pending" },
+      const hashes = candidates.map((row) => row.id);
+      await prisma.item.updateMany({
+        where: { id: { in: hashes }, rereview_status: "pending" },
         data: { rereview_status: "running", rereview_started_at: stamp },
       });
-      return prisma.email.findMany({
+      return prisma.item.findMany({
         where: {
-          email_hash: { in: hashes },
+          id: { in: hashes },
           rereview_status: "running",
           rereview_started_at: stamp,
         },
-        select: { email_hash: true, rereview_coordinator_id: true },
+        select: { id: true, rereview_coordinator_id: true },
       });
     },
     async settle(row, call) {
       const ctx = await getContext(row.rereview_coordinator_id);
-      const jsonPath = ctx
-        ? path.join(ctx.jsonFolder, `${row.email_hash}.json`)
-        : "";
+      const jsonPath = ctx ? path.join(ctx.jsonFolder, `${row.id}.json`) : "";
       if (!ctx || !fs.existsSync(jsonPath)) {
         await settleRow(
           row,
@@ -227,7 +225,7 @@ export async function rereviewEmailDiscards(
         stripPayloadSignatures(content);
         raw = await call(
           {
-            customId: row.email_hash,
+            customId: row.id,
             system: ctx.system,
             user: JSON.stringify(content),
             toolName: "dsar_audit_decision",
@@ -277,8 +275,8 @@ export async function rereviewEmailDiscards(
         const ids = await getCasePstFileIds(coordinatorId);
         if (await emailRereviewPending(ids)) continue;
         const [undecided, active, coordinator] = await Promise.all([
-          prisma.email.count({
-            where: { file_id: { in: ids }, is_duplicate: 0, ai_decision: null },
+          prisma.item.count({
+            where: { file_id: { in: ids }, kind: "email", state: "pending" },
           }),
           prisma.aiBatchRun.count({
             where: {
@@ -307,9 +305,9 @@ export async function rereviewEmailDiscards(
 }
 
 export async function emailRereviewWorkRemains(): Promise<boolean> {
-  const waiting = await prisma.email.findFirst({
-    where: { rereview_status: { not: null } },
-    select: { email_hash: true },
+  const waiting = await prisma.item.findFirst({
+    where: { kind: "email", rereview_status: { not: null } },
+    select: { id: true },
   });
   return !!waiting;
 }

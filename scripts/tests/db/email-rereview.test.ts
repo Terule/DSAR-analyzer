@@ -7,6 +7,7 @@ import { after, describe, it } from "node:test";
 import { emailAiTestOverride, generateBatchFile } from "../../../src/lib/ai";
 import { pollBatchStatus } from "../../../src/lib/batch-worker";
 import { inControlSample } from "../../../src/lib/bedrock/rereview-gate";
+import { createEmailRecord } from "../../../src/lib/email-decisions";
 import { rereviewEmailDiscards } from "../../../src/lib/email-rereview";
 import type { FilesAiClient } from "../../../src/lib/files-ai";
 import { prisma } from "../../../src/lib/prisma";
@@ -173,7 +174,7 @@ describe("second review of Haiku 4.5 email discards", () => {
         }),
       );
       fs.writeFileSync(path.join(dirs.raw, `${hash}.eml`), "eml");
-      await prisma.email.create({
+      await createEmailRecord({
         data: {
           id: crypto.randomUUID(),
           file_id: fileId,
@@ -221,8 +222,18 @@ describe("second review of Haiku 4.5 email discards", () => {
 
     await pollBatchStatus(fileId);
 
-    const row = (hash: string) =>
-      prisma.email.findUniqueOrThrow({ where: { email_hash: hash } });
+    const row = async (hash: string) => {
+      const email = await prisma.email.findUniqueOrThrow({
+        where: { email_hash: hash },
+      });
+      const item = await prisma.item.findUniqueOrThrow({ where: { id: hash } });
+      return {
+        ai_decision: email.ai_decision,
+        ai_reason: email.ai_reason,
+        rereview_status: item.rereview_status,
+        rereview_coordinator_id: item.rereview_coordinator_id,
+      };
+    };
     // Only the discards with doubt wait; the sure one is final.
     assert.equal((await row(names.sure)).rereview_status, null);
     for (const hash of [names.rescued, names.confirmed, names.failed]) {

@@ -32,11 +32,11 @@ export async function POST(request: Request) {
           status: { in: ["claiming", "submitted", "processing"] },
         },
       }),
-      prisma.email.count({
+      prisma.item.count({
         where: {
           file_id: { in: caseIds },
-          is_duplicate: 0,
-          ai_decision: null,
+          kind: "email",
+          state: "pending",
         },
       }),
     ]);

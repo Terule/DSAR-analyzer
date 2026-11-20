@@ -112,7 +112,7 @@ describe("email decisions (one writer)", () => {
       rule: "mail_screen",
       reason: "x",
       decidedBy: "bedrock",
-      guard: { ai_decision: "keep" },
+      guard: { state: "kept" },
     });
     assert.equal(written, 0);
     const email = await prisma.email.findUnique({
@@ -124,9 +124,17 @@ describe("email decisions (one writer)", () => {
 
   it("applies extra email columns and records a review verdict", async () => {
     await plainEmail(3);
-    await prisma.email.update({
-      where: { email_hash: hash(3) },
-      data: { rereview_status: "running" },
+    await prisma.item.create({
+      data: {
+        id: hash(3),
+        file_id: fileId,
+        case_request_id: requestId,
+        kind: "email",
+        origin: "pst",
+        state: "discarded",
+        decision_rule: "ai_email",
+        rereview_status: "running",
+      },
     });
     await decideEmail({
       emailHash: hash(3),
@@ -135,12 +143,14 @@ describe("email decisions (one writer)", () => {
       reason: "Rescued",
       decidedBy: "haiku-5.5",
       guard: { rereview_status: "running" },
-      emailData: { rereview_status: null },
+      itemData: { rereview_status: null },
     });
+    const rescued = await prisma.item.findUnique({ where: { id: hash(3) } });
+    assert.equal(rescued?.rereview_status, null);
+    assert.equal(rescued?.state, "kept");
     const email = await prisma.email.findUnique({
       where: { email_hash: hash(3) },
     });
-    assert.equal(email?.rereview_status, null);
     assert.equal(email?.ai_decision, "keep");
     await plainEmail(4);
     await decideEmail({

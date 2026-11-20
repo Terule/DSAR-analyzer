@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 import { renderEmailAttachments } from "../../../src/lib/converter";
+import { createEmailRecord } from "../../../src/lib/email-decisions";
 import {
   type FilesAiClient,
   pollFilesAiBatches,
@@ -223,13 +224,18 @@ async function setup(
         attachments: email.attachments,
       }),
     );
-    await prisma.email.create({
+    await createEmailRecord({
       data: {
         id: crypto.randomUUID(),
         file_id: id,
         email_hash: `${prefix}${email.hash}`,
         is_duplicate: 0,
-        ai_decision: "keep",
+      },
+      decision: {
+        decision: "keep",
+        rule: "ai_email",
+        reason: null,
+        decidedBy: "haiku-4.5",
       },
     });
   }

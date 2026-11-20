@@ -150,9 +150,16 @@ async function main() {
     // Clear durable Batch claims before allowing a new AI run.  Any remote
     // batches from the previous run must be cancelled separately; this reset
     // intentionally never reuses their request ownership.
-    prisma.email.updateMany({
-      where: { file_id: { in: targetPstIds } },
-      data: { ai_batch_run_id: null },
+    prisma.item.updateMany({
+      where: { file_id: { in: targetPstIds }, kind: "email" },
+      data: {
+        ai_batch_run_id: null,
+        ai_p_keep: null,
+        rereview_status: null,
+        rereview_queued_at: null,
+        rereview_started_at: null,
+        rereview_coordinator_id: null,
+      },
     }),
     prisma.aiBatchRun.deleteMany({
       where: { coordinator_id: coordinator },

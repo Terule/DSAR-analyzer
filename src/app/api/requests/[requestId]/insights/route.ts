@@ -56,10 +56,11 @@ export async function GET(
       },
       _count: { _all: true },
     }),
-    prisma.email.count({
+    prisma.item.count({
       where: {
+        kind: "email",
         rereview_status: "pending",
-        processed_file: { case_request_id: requestId },
+        case_request_id: requestId,
       },
     }),
   ]);

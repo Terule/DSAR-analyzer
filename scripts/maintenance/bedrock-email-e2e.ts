@@ -151,15 +151,20 @@ async function main() {
       await pollBatchStatus(fileId);
       queued = Math.max(
         queued,
-        await prisma.email.count({
-          where: { file_id: fileId, rereview_status: { not: null } },
+        await prisma.item.count({
+          where: {
+            file_id: fileId,
+            kind: "email",
+            rereview_status: { not: null },
+          },
         }),
       );
       await rereviewEmailDiscards({ coordinatorId: fileId });
-      const open = await prisma.email.count({
+      const open = await prisma.item.count({
         where: {
           file_id: fileId,
-          OR: [{ ai_decision: null }, { rereview_status: { not: null } }],
+          kind: "email",
+          OR: [{ state: "pending" }, { rereview_status: { not: null } }],
         },
       });
       const active = await prisma.aiBatchRun.count({

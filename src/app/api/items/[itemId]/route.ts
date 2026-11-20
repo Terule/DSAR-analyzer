@@ -22,8 +22,6 @@ export async function GET(
       ? await prisma.email.findUnique({
           where: { email_hash: item.id },
           select: {
-            rereview_status: true,
-            ai_p_keep: true,
             sent_date: true,
             is_duplicate: true,
           },
@@ -41,7 +39,7 @@ export async function GET(
       label: item.label || item.id.slice(0, 16),
       kind: item.kind,
       origin: item.origin,
-      state: email?.rereview_status === "pending" ? "reanalysing" : item.state,
+      state: item.rereview_status === "pending" ? "reanalysing" : item.state,
       rule: item.decision_rule,
       reason: item.reason,
       decidedBy: item.decided_by,
@@ -49,9 +47,9 @@ export async function GET(
         item.decided_by,
         item.decision_rule,
         item.state,
-        email?.rereview_status === "pending",
+        item.rereview_status === "pending",
       ),
-      confidenceKeep: email?.ai_p_keep ?? null,
+      confidenceKeep: item.ai_p_keep ?? null,
       sentDate: email?.sent_date ?? null,
       parent: parent
         ? { id: parent.id, label: parent.label || parent.id.slice(0, 16) }

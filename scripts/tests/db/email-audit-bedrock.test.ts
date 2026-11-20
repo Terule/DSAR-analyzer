@@ -6,6 +6,7 @@ import path from "node:path";
 import { after, describe, it } from "node:test";
 import { emailAiTestOverride, generateBatchFile } from "../../../src/lib/ai";
 import { pollBatchStatus } from "../../../src/lib/batch-worker";
+import { createEmailRecord } from "../../../src/lib/email-decisions";
 import type { FilesAiClient } from "../../../src/lib/files-ai";
 import { prisma } from "../../../src/lib/prisma";
 import { getPstWorkFolder } from "../../../src/lib/pst-artifacts";
@@ -185,22 +186,22 @@ describe("employee email audit on Bedrock", () => {
         JSON.stringify(payload),
       );
       fs.writeFileSync(path.join(dirs.raw, `${hash(name)}.eml`), "eml");
-      await prisma.email.create({
+      await createEmailRecord({
         data: {
           id: crypto.randomUUID(),
           file_id: fileId,
           email_hash: hash(name),
           is_duplicate: 0,
-          // Extract drops an email that never cites the subject before the AI
-          // phase (see extract-subject-filter.test.ts); the AI phase just
-          // must not send it.
-          ...(name === "notAboutSubject"
-            ? {
-                ai_decision: "discard",
-                ai_reason: "Pre-filter: Data subject not mentioned",
-              }
-            : {}),
         },
+        decision:
+          name === "notAboutSubject"
+            ? {
+                decision: "discard",
+                rule: "subject_absent",
+                reason: "Pre-filter: Data subject not mentioned",
+                decidedBy: "rule",
+              }
+            : undefined,
       });
     }
 
