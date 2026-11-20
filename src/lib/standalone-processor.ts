@@ -20,6 +20,7 @@ import {
   hasPrivilegedKeywordInFileName,
 } from "./exclusions";
 import { classifyImage, IMAGE_EXTENSIONS, readImageFacts } from "./image-rules";
+import { judgeImageWithVision, visionEnabled } from "./image-vision";
 import type { ChildItemDecision } from "./items";
 import { fileDiscardRule } from "./items";
 import {
@@ -1575,6 +1576,19 @@ export async function runStandaloneBatch(
           );
           skippedCount++;
           continue;
+        }
+        if (verdict.kind === "ambiguous") {
+          const vision = await judgeImageWithVision(imageBuffer, {
+            enabled: await visionEnabled(),
+          });
+          if (vision.verdict === "decoration") {
+            recordDiscard(
+              filePath,
+              `Discarded ${ext.toUpperCase()} ${file}: signature image (vision model, ${vision.reason}).`,
+            );
+            skippedCount++;
+            continue;
+          }
         }
         await withTimeout(
           processImageToPdf(imageBuffer, pdfOutputPath, seqName),

@@ -26,6 +26,7 @@ import {
   RECURRENCE_MIN_EMAILS,
 } from "./image-recurrence";
 import { classifyImage, isImageFilename, readImageFacts } from "./image-rules";
+import { judgeImageWithVision, visionEnabled } from "./image-vision";
 import {
   type AttachmentDecision,
   exportAuditTrail,
@@ -1275,6 +1276,7 @@ export async function renderEmailAttachments(input: {
     }
   }
   const imagesForReview: typeof imageAttachments = [];
+  const imageVisionOn = imageAttachments.length > 0 && (await visionEnabled());
   for (const image of imageAttachments) {
     const facts = readImageFacts(image.content);
     if (!facts) {
@@ -1307,6 +1309,21 @@ export async function renderEmailAttachments(input: {
         "The same image was already sent for review from another email.",
       );
     } else {
+      // The cheap layers could not place it: a vision model may recognise a
+      // logo or decoration. Anything else (or any doubt) goes to a person.
+      if (verdict.kind === "ambiguous") {
+        const vision = await judgeImageWithVision(image.content, {
+          enabled: imageVisionOn,
+        });
+        if (vision.verdict === "decoration") {
+          drop(
+            image.filename,
+            "signature_image",
+            `Signature or decoration image: vision model, ${vision.reason}.`,
+          );
+          continue;
+        }
+      }
       input.seenImages?.add(hash);
       imagesForReview.push(image);
     }

@@ -86,7 +86,24 @@ export function awsBedrockDeps(): BedrockDeps {
             new ConverseCommand({
               modelId,
               system: [{ text: request.system }],
-              messages: [{ role: "user", content: [{ text: request.user }] }],
+              messages: [
+                {
+                  role: "user",
+                  content: [
+                    ...(request.image
+                      ? [
+                          {
+                            image: {
+                              format: request.image.format,
+                              source: { bytes: request.image.bytes },
+                            },
+                          },
+                        ]
+                      : []),
+                    { text: request.user },
+                  ],
+                },
+              ],
               inferenceConfig: { maxTokens: request.maxTokens },
               toolConfig: {
                 tools: [

@@ -8,6 +8,8 @@ export interface ParsedRequest {
   toolName: string;
   schema: Record<string, unknown>;
   maxTokens: number;
+  /** Sent before the text, for the vision check of an image. */
+  image?: { format: "png" | "jpeg" | "gif" | "webp"; bytes: Uint8Array };
 }
 
 export function parseRequestLine(line: string): ParsedRequest {
