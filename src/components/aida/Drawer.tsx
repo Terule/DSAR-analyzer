@@ -9,11 +9,14 @@ export function Drawer({
   open,
   onClose,
   width = 560,
+  crumb,
   children,
 }: {
   open: boolean;
   onClose: () => void;
   width?: number;
+  /** Phone only: the page the panel sits on, shown as a back link. */
+  crumb?: string;
   children: ReactNode;
 }) {
   useEffect(() => {
@@ -37,6 +40,15 @@ export function Drawer({
         style={{ width: `min(${width}px, 100vw)` }}
         className="absolute inset-y-0 right-0 flex flex-col overflow-y-auto border-l border-aida-primary-line/40 bg-aida-sidebar"
       >
+        {crumb ? (
+          <button
+            type="button"
+            onClick={onClose}
+            className="w-fit px-6 pt-5 text-[13px] font-medium text-aida-primary-text sm:hidden"
+          >
+            ‹ {crumb}
+          </button>
+        ) : null}
         {children}
       </aside>
     </div>

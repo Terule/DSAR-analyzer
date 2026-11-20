@@ -265,14 +265,15 @@ export function Modal({
     >
       <DialogPrimitive.Portal>
         <DialogPrimitive.Backdrop className="fixed inset-0 z-40 bg-[#05080f]/80" />
-        <DialogPrimitive.Viewport className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto p-4 py-[8vh]">
+        <DialogPrimitive.Viewport className="fixed inset-0 z-50 flex items-end justify-center overflow-y-auto sm:items-start sm:p-4 sm:py-[8vh]">
           <DialogPrimitive.Popup
-            style={{ maxWidth: width }}
+            style={{ ["--modal-width" as string]: `${width}px` }}
             className={cn(
-              "w-full rounded-[20px] border bg-aida-surface p-7 text-aida-text shadow-2xl outline-none",
+              "w-full rounded-b-none rounded-t-[20px] border bg-aida-surface p-5 pb-6 text-aida-text shadow-2xl outline-none sm:max-w-[var(--modal-width)] sm:rounded-[20px] sm:p-7",
               tone === "danger" ? "border-[#5a2a2c]" : "border-aida-card-line",
             )}
           >
+            <div className="mx-auto mb-3 h-1 w-9 rounded-full bg-aida-line sm:hidden" />
             <div className="flex items-start justify-between gap-4">
               <div className="flex min-w-0 flex-col gap-1">
                 <DialogPrimitive.Title className="text-[22px] font-bold leading-7 text-aida-text">
@@ -293,7 +294,7 @@ export function Modal({
             </div>
             {children ? <div className="mt-5">{children}</div> : null}
             {footer ? (
-              <div className="mt-6 flex items-center justify-end gap-3">
+              <div className="mt-6 flex flex-col-reverse items-start gap-3 sm:flex-row sm:items-center sm:justify-end">
                 {footer}
               </div>
             ) : null}

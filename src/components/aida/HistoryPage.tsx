@@ -331,7 +331,12 @@ export function HistoryPage() {
         </Card>
       )}
 
-      <Drawer open={!!open} onClose={() => setOpen(null)} width={560}>
+      <Drawer
+        open={!!open}
+        onClose={() => setOpen(null)}
+        width={560}
+        crumb="History"
+      >
         {open ? (
           <div className="flex flex-col gap-5 pb-8">
             <DrawerHeader

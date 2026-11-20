@@ -604,10 +604,13 @@ function Menu({
   trigger,
   entries,
   width = 218,
+  title,
 }: {
   trigger: (props: { open: boolean; toggle: () => void }) => React.ReactNode;
   entries: MenuEntry[];
   width?: number;
+  /** Heading of the bottom sheet on phones. */
+  title?: string;
 }) {
   const [open, setOpen] = useState(false);
   const close = useCallback(() => setOpen(false), []);
@@ -616,32 +619,53 @@ function Menu({
     <div ref={ref} className="relative">
       {trigger({ open, toggle: () => setOpen((value) => !value) })}
       {open ? (
-        <div
-          style={{ width }}
-          className="absolute right-0 top-[44px] z-20 flex flex-col rounded-xl border border-aida-input-line bg-aida-surface p-1.5 shadow-2xl"
-        >
-          {entries.map((entry) => (
-            <div key={entry.label}>
-              {entry.separatorBefore ? (
-                <div className="my-1 h-px bg-aida-line" />
-              ) : null}
-              <button
-                type="button"
-                disabled={entry.disabled}
-                onClick={() => {
-                  setOpen(false);
-                  entry.onClick();
-                }}
-                className={cn(
-                  "w-full rounded-md px-3 py-2 text-left text-[13px] hover:bg-aida-nav-active disabled:pointer-events-none disabled:opacity-40",
-                  entry.danger ? "text-aida-red" : "text-aida-text-2",
-                )}
-              >
-                {entry.label}
-              </button>
-            </div>
-          ))}
-        </div>
+        <>
+          <button
+            type="button"
+            aria-label="Close menu"
+            onClick={close}
+            className="fixed inset-0 z-20 cursor-default bg-[#05080f]/75 sm:hidden"
+          />
+          <div
+            style={{ ["--menu-width" as string]: `${width}px` }}
+            className="fixed inset-x-0 bottom-0 z-30 flex flex-col rounded-t-[20px] border border-aida-input-line bg-aida-surface p-5 pb-6 shadow-2xl sm:absolute sm:inset-x-auto sm:bottom-auto sm:right-0 sm:top-[44px] sm:z-20 sm:w-[var(--menu-width)] sm:rounded-xl sm:p-1.5"
+          >
+            <div className="mx-auto mb-3 h-1 w-9 rounded-full bg-aida-line sm:hidden" />
+            {title ? (
+              <div className="mb-1 text-lg font-bold text-aida-text sm:hidden">
+                {title}
+              </div>
+            ) : null}
+            {entries.map((entry) => (
+              <div key={entry.label}>
+                {entry.separatorBefore ? (
+                  <div className="my-1 h-px bg-aida-line" />
+                ) : null}
+                <button
+                  type="button"
+                  disabled={entry.disabled}
+                  onClick={() => {
+                    setOpen(false);
+                    entry.onClick();
+                  }}
+                  className={cn(
+                    "w-full rounded-md px-3 py-3 text-left text-[15px] hover:bg-aida-nav-active disabled:pointer-events-none disabled:opacity-40 sm:py-2 sm:text-[13px]",
+                    entry.danger ? "text-aida-red" : "text-aida-text-2",
+                  )}
+                >
+                  {entry.label}
+                </button>
+              </div>
+            ))}
+            <button
+              type="button"
+              onClick={close}
+              className="mt-3 w-fit rounded-[10px] border border-aida-input-line px-4 py-2.5 text-[13px] font-medium text-aida-text-2 sm:hidden"
+            >
+              Cancel
+            </button>
+          </div>
+        </>
       ) : null}
     </div>
   );
@@ -1018,6 +1042,7 @@ export function CasePage({ caseId }: { caseId: string }) {
             label: "Stop all work",
             onClick: () => setStop(item),
             separatorBefore: true,
+            danger: true,
           } as MenuEntry,
         ]
       : []),
@@ -1083,6 +1108,7 @@ export function CasePage({ caseId }: { caseId: string }) {
         <div className="flex shrink-0 flex-wrap items-center gap-2.5">
           {item.requests.length > 0 ? (
             <Menu
+              title="Request"
               width={150}
               entries={[
                 ...item.requests.map((entry) => ({
@@ -1131,6 +1157,7 @@ export function CasePage({ caseId }: { caseId: string }) {
             request
           </HeaderButton>
           <Menu
+            title="Actions"
             entries={actionEntries}
             trigger={({ open, toggle }) => (
               <HeaderButton onClick={toggle} aria-expanded={open}>
@@ -1179,6 +1206,7 @@ export function CasePage({ caseId }: { caseId: string }) {
       ) : null}
 
       <Drawer
+        crumb={`${caseName} · ${request?.name ?? ""}`}
         open={!!panel}
         onClose={closePanel}
         width={decisionsOpen ? 740 : 560}

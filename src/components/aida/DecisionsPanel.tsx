@@ -412,15 +412,18 @@ export function DecisionsPanel({
                   <button
                     type="button"
                     onClick={() => onOpenItem(item.id)}
-                    className="grid w-full grid-cols-[minmax(0,1fr)_minmax(0,1fr)_56px] items-center gap-3 rounded-[10px] border border-aida-card-line bg-aida-surface px-3.5 py-3 text-left hover:border-aida-primary-line/70"
+                    className="grid w-full grid-cols-[minmax(0,1fr)_56px] items-center gap-x-3 gap-y-0.5 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_56px] rounded-[10px] border border-aida-card-line bg-aida-surface px-3.5 py-3 text-left hover:border-aida-primary-line/70"
                   >
                     <span className="block truncate text-[13px] text-aida-text-2">
                       {item.label}
                     </span>
-                    <span className="block truncate text-[13px] text-aida-muted">
+                    <span className="col-start-1 row-start-2 block truncate text-xs text-aida-muted sm:col-start-2 sm:row-start-1 sm:text-[13px]">
                       {item.reason ?? "—"}
                     </span>
-                    <Pill tone="amber" className="w-fit justify-self-end">
+                    <Pill
+                      tone="amber"
+                      className="col-start-2 row-span-2 row-start-1 w-fit justify-self-end sm:col-start-3 sm:row-span-1"
+                    >
                       {kind}
                     </Pill>
                   </button>
