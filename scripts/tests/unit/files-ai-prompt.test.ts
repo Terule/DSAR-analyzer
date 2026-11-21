@@ -239,3 +239,16 @@ describe("large Teams conversations", () => {
     );
   });
 });
+
+describe("Teams chat rules", () => {
+  it("keep the subject's personal chats and treat work talk as work, in both modes", () => {
+    for (const mode of ["employee", "client"] as const) {
+      const prompt = buildFilesAiSystemPrompt(criteria, mode);
+      assert.match(prompt, /Excerpts of a Teams conversation/);
+      assert.match(prompt, /PERSONAL: the subject's own personal matters/);
+      assert.match(prompt, /even when the participants are lawyers/);
+      assert.match(prompt, /still "payroll_compensation"/);
+      assert.match(prompt, /treat it as personal/);
+    }
+  });
+});
