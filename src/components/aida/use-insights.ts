@@ -7,10 +7,15 @@ export interface Insights {
   caseType: "employee" | "client";
   funnel: Funnel;
   outcomes: OutcomeBar[];
+  /** Emails found inside attachments, left out of the bars. */
+  nestedEmails: number;
+  /** How many of those were already seen (duplicates). */
+  nestedDuplicates: number;
   reanalysing: number;
   pst: Array<{
     id: string;
     name: string;
+    folder: string;
     emails: number;
     attachments: number;
     sizeBytes: number;

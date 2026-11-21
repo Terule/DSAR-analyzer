@@ -18,7 +18,13 @@ import { useCases } from "./cases-context";
 import { DecisionsPanel } from "./DecisionsPanel";
 import { Drawer, DrawerHeader, SlideStack } from "./Drawer";
 import { ItemPanel } from "./ItemPanel";
-import { Outcomes, RulesPanel } from "./Outcomes";
+import {
+  GROUP_TONE,
+  type Group,
+  groupsOf,
+  Outcomes,
+  RulesPanel,
+} from "./Outcomes";
 import {
   ContinueWaveModal,
   DeleteRequestModal,
@@ -43,15 +49,32 @@ interface StageCard {
   value: string;
   sub: string;
   progress: number | null;
+  /** When set, the bar shows where the items went instead of how far the step is. */
+  segments?: Array<{ count: number; group: Group }>;
 }
 
 const ACTIVE = ["processing", "batch_ready", "extracting", "analyzed"];
+/** PST statuses while its emails are being listed. */
+const READING = ["scanning_metadata", "processing", "pending_analysis"];
 
 function phaseState(status: string | undefined): StageState {
   if (status === "completed") return "done";
   if (status === "failed") return "failed";
   if (status && ACTIVE.includes(status)) return "active";
   return "idle";
+}
+
+/**
+ * Every email read, the ones found inside attachments included, and how many
+ * of them were repeats. The Read card and the Read panel both use this.
+ */
+function emailsRead(insights: Insights | null) {
+  const bar = insights?.outcomes.find((entry) => entry.kind === "emails");
+  if (!bar) return null;
+  const nested = insights?.nestedEmails ?? 0;
+  const duplicates = bar.duplicates + (insights?.nestedDuplicates ?? 0);
+  const total = bar.received + nested;
+  return { total, duplicates, unique: total - duplicates };
 }
 
 function percent(done: number, total: number): number {
@@ -67,35 +90,74 @@ function buildStages(
   const mail = request.stats?.mail;
   const files = request.stats?.files;
   const cards: StageCard[] = [];
+  // What the audit trail says about the emails, live: it moves while a step runs.
+  const emailBar = insights?.outcomes.find((bar) => bar.kind === "emails");
+  const byGroup = (group: Group) =>
+    emailBar
+      ? (groupsOf(emailBar).find((entry) => entry.group === group)?.count ?? 0)
+      : 0;
   const parse = progress?.parse;
   const parseState = phaseState(parse?.status);
+  const readEmails =
+    emailBar && parseState !== "idle" ? emailsRead(insights) : null;
   cards.push({
     key: "parse",
     name: "Read",
     state: parseState,
-    value:
-      parse && parse.total > 0 && parseState !== "idle"
+    value: readEmails
+      ? count(readEmails.total)
+      : parse && parse.total > 0 && parseState !== "idle"
         ? `${parse.done} / ${parse.total}`
         : "—",
     sub:
       parseState === "idle"
         ? "not started"
-        : `PSTs · ${count(mail?.scanned ?? request.total_emails)} emails`,
+        : readEmails
+          ? `emails · ${parse?.done ?? 0} / ${parse?.total ?? 0} PSTs · ${count(readEmails.duplicates)} duplicates`
+          : `PSTs · ${count(mail?.scanned ?? request.total_emails)} emails`,
     progress:
       parse && parse.total > 0 ? percent(parse.done, parse.total) : null,
+    // Once everything is read: the unique emails against the repeated ones.
+    segments:
+      readEmails && parseState === "done"
+        ? [
+            { count: readEmails.unique, group: "kept" },
+            { count: readEmails.duplicates, group: "rules" },
+          ]
+        : undefined,
   });
   const extract = progress?.extract;
   const extractState = phaseState(extract?.status);
+  const toAi =
+    byGroup("ai") + byGroup("review") + byGroup("kept") + byGroup("waiting");
+  const removedBefore = byGroup("rules");
+  const prepared = extractState === "done" && emailBar;
   cards.push({
     key: "extract",
     name: "Prepare",
     state: extractState,
-    value: extractState === "idle" ? "—" : count(mail?.unique ?? 0),
-    sub: extractState === "idle" ? "not started" : "unique emails",
+    value:
+      extractState === "idle"
+        ? "—"
+        : prepared
+          ? count(toAi)
+          : count(mail?.unique ?? 0),
+    sub:
+      extractState === "idle"
+        ? "not started"
+        : prepared
+          ? `for the AI · ${count(emailBar.unique)} unique, ${count(removedBefore)} removed`
+          : "unique emails",
     progress:
       extract && extract.total > 0
         ? percent(extract.done, extract.total)
         : null,
+    segments: prepared
+      ? [
+          { count: toAi, group: "kept" },
+          { count: removedBefore, group: "rules" },
+        ]
+      : undefined,
   });
   const ai = progress?.ai;
   const aiState = phaseState(ai?.status);
@@ -103,30 +165,48 @@ function buildStages(
   const reviewed = split ? split.kept + split.discarded + split.review : 0;
   const aiTotal = split?.total ?? 0;
   const aiStarted = aiState !== "idle" || reviewed > 0;
+  // Employee cases: the emails the AI judged, kept against discarded, what waits in grey.
+  const judged = byGroup("ai") + byGroup("review") + byGroup("kept");
+  const aiScope = judged + byGroup("waiting");
+  const aiEmails = !client && aiStarted && emailBar && aiScope > 0;
   cards.push({
     key: "ai",
     name: "AI",
     state: aiState,
     value: !aiStarted
       ? "—"
-      : client
-        ? count(aiTotal)
-        : aiState === "done"
-          ? count(reviewed)
-          : `${count(reviewed)} / ${count(aiTotal)}`,
+      : aiEmails
+        ? aiState === "done"
+          ? count(judged)
+          : `${count(judged)} / ${count(aiScope)}`
+        : client
+          ? count(aiTotal)
+          : aiState === "done"
+            ? count(reviewed)
+            : `${count(reviewed)} / ${count(aiTotal)}`,
     sub: !aiStarted
       ? "not started"
-      : client
-        ? "items screened"
-        : aiState === "done"
-          ? "emails reviewed"
-          : `emails reviewed · ${percent(reviewed, aiTotal)}%`,
+      : aiEmails
+        ? `${count(byGroup("kept"))} kept · ${count(byGroup("ai"))} discarded${byGroup("review") ? ` · ${count(byGroup("review"))} to review` : ""}`
+        : client
+          ? "items screened"
+          : aiState === "done"
+            ? "emails reviewed"
+            : `emails reviewed · ${percent(reviewed, aiTotal)}%`,
     progress:
       aiStarted && aiTotal > 0 && aiState !== "done" && !client
         ? percent(reviewed, aiTotal)
         : aiStarted && aiState === "done"
           ? 100
           : null,
+    segments: aiEmails
+      ? [
+          { count: byGroup("kept"), group: "kept" },
+          { count: byGroup("ai"), group: "ai" },
+          { count: byGroup("review"), group: "review" },
+          { count: byGroup("waiting"), group: "waiting" },
+        ]
+      : undefined,
   });
   const render = progress?.render;
   const renderState = phaseState(render?.status);
@@ -185,10 +265,20 @@ function buildStages(
             ? "files queued"
             : "not started"
           : state === "done"
-            ? "files delivered"
+            ? `files delivered${files && files.found > files.delivered ? ` · ${count(files.found - files.delivered)} removed` : ""}`
             : state === "failed"
               ? "failed"
               : "files queued",
+      segments:
+        state === "done" && files && files.found > 0
+          ? [
+              { count: files.delivered, group: "kept" },
+              {
+                count: Math.max(0, files.found - files.delivered),
+                group: "rules",
+              },
+            ]
+          : undefined,
       progress:
         filesPhase && filesPhase.total > 0 && state !== "idle"
           ? percent(filesPhase.done, filesPhase.total)
@@ -276,7 +366,19 @@ function Stage({
       >
         {card.sub}
       </span>
-      {!idle && card.progress !== null ? (
+      {!idle && card.segments && card.segments.some((s) => s.count > 0) ? (
+        <span className="flex h-1.5 w-full gap-px overflow-hidden rounded-sm">
+          {card.segments
+            .filter((segment) => segment.count > 0)
+            .map((segment) => (
+              <span
+                key={segment.group}
+                style={{ flexGrow: segment.count, flexBasis: 0, minWidth: 2 }}
+                className={GROUP_TONE[segment.group]}
+              />
+            ))}
+        </span>
+      ) : !idle && card.progress !== null ? (
         <span
           className={cn(
             "h-1 w-full rounded-sm",
@@ -1250,26 +1352,45 @@ function StageDrawer({
               key={file.id}
               className="grid grid-cols-[1fr_80px_80px_70px] items-center gap-3 px-4 py-3 text-[13px] text-aida-text-2"
             >
-              <span className="truncate">{file.name}</span>
-              <span>{count(file.emails)}</span>
+              <span className="min-w-0">
+                <span className="block truncate">{file.name}</span>
+                {file.folder ? (
+                  <span className="block truncate text-[11px] text-aida-dim">
+                    {file.folder}
+                  </span>
+                ) : null}
+              </span>
+              <span>
+                {file.emails > 0 ||
+                ["completed", "analyzed", "extracting"].includes(file.status)
+                  ? count(file.emails)
+                  : "—"}
+              </span>
               <span>{formatBytes(file.sizeBytes)}</span>
               <span
                 className={cn(
                   "w-fit rounded-md px-2 py-0.5 text-[11px] font-medium",
                   ["completed", "analyzed", "extracting"].includes(file.status)
                     ? "bg-[#0f2a22] text-[#8de3c3]"
-                    : "bg-aida-nav-active text-aida-text-3",
+                    : READING.includes(file.status)
+                      ? "bg-aida-primary-soft text-[#c9d8ff]"
+                      : "bg-aida-nav-active text-aida-text-3",
                 )}
               >
                 {["completed", "analyzed", "extracting"].includes(file.status)
                   ? "Read"
-                  : "Waiting"}
+                  : READING.includes(file.status)
+                    ? "Reading…"
+                    : "Waiting"}
               </span>
             </div>
           ))}
         </div>
         <div className={box}>
-          <Row label="Emails read" value={count(mail?.scanned ?? 0)} />
+          <Row
+            label="Emails read"
+            value={count(emailsRead(insights)?.total ?? mail?.scanned ?? 0)}
+          />
           <Row
             label="Attachments found"
             value={count(pst.reduce((sum, file) => sum + file.attachments, 0))}

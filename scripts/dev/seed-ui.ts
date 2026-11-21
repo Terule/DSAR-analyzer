@@ -161,7 +161,9 @@ async function demoBulk(requestId: string) {
       rows.push({
         id: crypto
           .createHash("sha256")
-          .update(`bulk:${requestId}:${kind}:${rule}:${state}:${decidedBy}:${index}`)
+          .update(
+            `bulk:${requestId}:${kind}:${rule}:${state}:${decidedBy}:${index}`,
+          )
           .digest("hex"),
         case_request_id: requestId,
         kind,

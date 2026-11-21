@@ -27,6 +27,7 @@ export async function GET(
           id: true,
           kind: true,
           filename: true,
+          filepath: true,
           file_size_bytes: true,
           total_emails: true,
           total_attachments: true,
@@ -50,24 +51,42 @@ export async function GET(
   }
   // Mail and files together; chat messages are children of a chat file and
   // attachments of an email, so only top-level items count as "received".
-  const [groups, reanalysing] = await Promise.all([
-    prisma.item.groupBy({
-      by: ["state", "decision_rule", "origin"],
-      where: {
-        case_request_id: requestId,
-        origin: { in: ["pst", "files_folder"] },
-        kind: { not: "chat_message" },
-      },
-      _count: { _all: true },
-    }),
-    prisma.item.count({
-      where: {
-        kind: "email",
-        rereview_status: "pending",
-        case_request_id: requestId,
-      },
-    }),
-  ]);
+  const [groups, reanalysing, nestedEmails, nestedDuplicates] =
+    await Promise.all([
+      prisma.item.groupBy({
+        by: ["state", "decision_rule", "origin"],
+        where: {
+          case_request_id: requestId,
+          origin: { in: ["pst", "files_folder"] },
+          kind: { not: "chat_message" },
+        },
+        _count: { _all: true },
+      }),
+      prisma.item.count({
+        where: {
+          kind: "email",
+          rereview_status: "pending",
+          case_request_id: requestId,
+        },
+      }),
+      // Emails found inside attachments: judged like any email, but kept out of
+      // the bars so those count what came in through the PSTs.
+      prisma.item.count({
+        where: {
+          kind: "email",
+          origin: "attachment",
+          case_request_id: requestId,
+        },
+      }),
+      prisma.item.count({
+        where: {
+          kind: "email",
+          origin: "attachment",
+          decision_rule: "dup",
+          case_request_id: requestId,
+        },
+      }),
+    ]);
   const funnel = buildFunnel(
     groups.map((group) => ({
       state: group.state,
@@ -133,10 +152,15 @@ export async function GET(
     caseType: request.case.case_type,
     funnel,
     outcomes,
+    nestedEmails,
+    nestedDuplicates,
     reanalysing,
     pst: pst.map((file) => ({
       id: file.id,
       name: file.filename ?? "",
+      // The folder the PST sits in (two PSTs of one request can share a name).
+      folder:
+        file.filepath?.split(/[\\/]/).filter(Boolean).slice(-2, -1)[0] ?? "",
       emails: file.total_emails,
       attachments: file.total_attachments,
       sizeBytes: Number(file.file_size_bytes),

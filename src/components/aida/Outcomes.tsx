@@ -17,7 +17,7 @@ import type { Insights } from "./use-insights";
  * discarded it (dark red), a person who must look (amber) and what was kept
  * (green). Grey is only for what still waits for the AI.
  */
-type Group = "rules" | "ai" | "review" | "kept" | "waiting";
+export type Group = "rules" | "ai" | "review" | "kept" | "waiting";
 
 const GROUP_OF: Record<OutcomeKey, Group> = {
   type: "rules",
@@ -32,7 +32,7 @@ const GROUP_OF: Record<OutcomeKey, Group> = {
 
 const GROUP_ORDER: Group[] = ["rules", "ai", "review", "kept", "waiting"];
 
-const TONE: Record<Group, string> = {
+export const GROUP_TONE: Record<Group, string> = {
   rules: "bg-[#e0605f]",
   ai: "bg-[#a53b3a]",
   review: "bg-aida-amber",
@@ -75,13 +75,13 @@ export interface OpenOutcome {
   state?: string;
 }
 
-interface GroupTotal {
+export interface GroupTotal {
   group: Group;
   count: number;
   parts: OutcomeSegment[];
 }
 
-function groupsOf(bar: OutcomeBar): GroupTotal[] {
+export function groupsOf(bar: OutcomeBar): GroupTotal[] {
   return GROUP_ORDER.flatMap((group) => {
     const parts = bar.segments.filter(
       (segment) => GROUP_OF[segment.key] === group,
@@ -108,7 +108,7 @@ function targetOf(
   };
 }
 
-function Summary({ bar }: { bar: OutcomeBar }) {
+function Summary({ bar, nested }: { bar: OutcomeBar; nested: number }) {
   return (
     <div className="flex flex-wrap items-baseline justify-between gap-x-4 gap-y-1">
       <h3 className="text-[15px] font-semibold text-aida-text">
@@ -124,6 +124,12 @@ function Summary({ bar }: { bar: OutcomeBar }) {
           {count(bar.unique)}
         </span>{" "}
         unique
+        {bar.kind === "emails" && nested > 0 ? (
+          <span className="text-aida-dim">
+            {" "}
+            · +{count(nested)} inside attachments
+          </span>
+        ) : null}
       </p>
     </div>
   );
@@ -149,7 +155,7 @@ function StackedBar({
           key={entry.group}
           title={`${GROUP_LABEL[entry.group]}: ${count(entry.count)} (${percent(entry.count, bar.unique)})`}
           style={{ flexGrow: entry.count, flexBasis: 0, minWidth: 4 }}
-          className={cn("h-full", TONE[entry.group])}
+          className={cn("h-full", GROUP_TONE[entry.group])}
         />
       ))}
     </div>
@@ -183,7 +189,7 @@ function ReasonRows({
               <span
                 className={cn(
                   "size-2.5 rounded-sm",
-                  TONE[GROUP_OF[segment.key]],
+                  GROUP_TONE[GROUP_OF[segment.key]],
                 )}
               />
               <span className="truncate text-[13px] text-aida-text-2">
@@ -238,7 +244,10 @@ function OutcomeCards({
             className="relative flex flex-col gap-1 overflow-hidden rounded-xl border border-aida-card-line bg-aida-surface-2 px-4 py-3 text-left enabled:hover:border-aida-primary-line/70 disabled:cursor-default"
           >
             <span
-              className={cn("absolute inset-x-0 top-0 h-1", TONE[entry.group])}
+              className={cn(
+                "absolute inset-x-0 top-0 h-1",
+                GROUP_TONE[entry.group],
+              )}
             />
             <span className="mt-1 text-[24px] font-bold leading-7 text-aida-text">
               {count(entry.count)}
@@ -261,17 +270,19 @@ function OutcomeCards({
 
 function Panel({
   bar,
+  nested,
   onOpen,
   onOpenRules,
 }: {
   bar: OutcomeBar;
+  nested: number;
   onOpen: (target: OpenOutcome) => void;
   onOpenRules: () => void;
 }) {
   const groups = groupsOf(bar);
   return (
     <section className="flex min-w-0 flex-col gap-3">
-      <Summary bar={bar} />
+      <Summary bar={bar} nested={nested} />
       {bar.unique === 0 ? (
         <p className="text-[13px] text-aida-muted">
           Every item was a duplicate, so nothing was judged.
@@ -371,6 +382,7 @@ export function Outcomes({
             <Panel
               key={bar.kind}
               bar={bar}
+              nested={insights?.nestedEmails ?? 0}
               onOpen={onOpen}
               onOpenRules={() => onOpenRules(bar.kind)}
             />
