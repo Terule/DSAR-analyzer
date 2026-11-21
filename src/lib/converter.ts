@@ -19,6 +19,7 @@ import {
 } from "./exclusions";
 import { listHumanReviewDeliverables } from "./files-ai-apply";
 import { archiveCompletedCase } from "./history";
+import { convertImageToPng, convertibleImageExtension } from "./image-convert";
 import {
   countImageRecurrence,
   imageHash,
@@ -1253,8 +1254,9 @@ export async function renderEmailAttachments(input: {
   const imageAttachments: Array<{
     filename: string;
     content: Buffer;
-    /** A BMP, TIFF or HEIC: kept as the original for a person. */
+    /** A BMP, TIFF or HEIC: converted to PNG, or kept as the original for a person. */
     unrenderable?: boolean;
+    convertExt?: string | null;
   }> = [];
   const documentAttachments: typeof input.attachments = [];
   for (const attachment of input.attachments) {
@@ -1281,6 +1283,10 @@ export async function renderEmailAttachments(input: {
           ? attachment.content
           : Buffer.from(attachment.content),
         unrenderable: isUnrenderableImage(attachment),
+        convertExt: convertibleImageExtension(
+          name,
+          (attachment as { contentType?: string }).contentType,
+        ),
       });
     } else {
       documentAttachments.push(attachment);
@@ -1289,6 +1295,15 @@ export async function renderEmailAttachments(input: {
   const imagesForReview: typeof imageAttachments = [];
   const imageVisionOn = imageAttachments.length > 0 && (await visionEnabled());
   for (const image of imageAttachments) {
+    if (image.unrenderable && image.convertExt) {
+      // BMP, TIFF and HEIC become a PNG and meet the same rules as any picture.
+      // If the conversion fails, the original still goes to a person.
+      const png = await convertImageToPng(image.content, image.convertExt);
+      if (png) {
+        image.content = png;
+        image.unrenderable = false;
+      }
+    }
     const facts = readImageFacts(image.content);
     if (!facts) {
       if (image.unrenderable) {
@@ -1512,7 +1527,7 @@ export async function renderEmailAttachments(input: {
             image.filename,
             "review",
             "image_review",
-            "An image format the pipeline cannot render (BMP, TIFF or HEIC): the original is sent for a person to look at.",
+            "An image format that could not be converted (BMP, TIFF or HEIC): the original is sent for a person to look at.",
           );
           fs.writeFileSync(
             path.join(

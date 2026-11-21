@@ -7,6 +7,8 @@ RUN apt-get update \
     ca-certificates \
     pst-utils \
     weasyprint \
+    python3-pil \
+    libheif-examples \
     unzip \
   && rm -rf /var/lib/apt/lists/*
 

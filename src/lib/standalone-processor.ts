@@ -19,7 +19,13 @@ import {
   hasPrivilegedKeywordInDocument,
   hasPrivilegedKeywordInFileName,
 } from "./exclusions";
-import { classifyImage, IMAGE_EXTENSIONS, readImageFacts } from "./image-rules";
+import { convertImageToPng } from "./image-convert";
+import {
+  classifyImage,
+  IMAGE_EXTENSIONS,
+  readImageFacts,
+  UNRENDERABLE_IMAGE_EXTENSIONS,
+} from "./image-rules";
 import { judgeImageWithVision, visionEnabled } from "./image-vision";
 import type { ChildItemDecision } from "./items";
 import { fileDiscardRule } from "./items";
@@ -1554,12 +1560,21 @@ export async function runStandaloneBatch(
       // A signature or decoration is dropped with the signal that decided; any
       // other image becomes a PDF without text, which the screening step sends
       // to a person (nothing reads images automatically yet).
-      else if (IMAGE_EXTENSIONS.has(ext)) {
-        const imageBuffer = await withTimeout(
+      else if (
+        IMAGE_EXTENSIONS.has(ext) ||
+        UNRENDERABLE_IMAGE_EXTENSIONS.has(ext)
+      ) {
+        let imageBuffer: Buffer = await withTimeout(
           fs.promises.readFile(filePath),
           `${file} read`,
           60_000,
         );
+        if (UNRENDERABLE_IMAGE_EXTENSIONS.has(ext)) {
+          // BMP, TIFF and HEIC become a PNG first; one that cannot be
+          // converted is unreadable, like any other broken image.
+          imageBuffer =
+            (await convertImageToPng(imageBuffer, ext)) ?? Buffer.alloc(0);
+        }
         const facts = readImageFacts(imageBuffer);
         if (!facts) {
           recordDiscard(
