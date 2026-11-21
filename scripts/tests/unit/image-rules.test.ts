@@ -166,6 +166,51 @@ describe("images attached to emails", () => {
     assert.deepEqual(result.drops, []);
   });
 
+  it("delivers an image the AI keeps, drops one it discards, and reviews the rest", async () => {
+    const verdicts: Record<string, "keep" | "discard" | "review"> = {};
+    const run = async (
+      name: string,
+      verdict: "keep" | "discard" | "review",
+    ) => {
+      verdicts[name] = verdict;
+      const outputDir = fs.mkdtempSync(path.join(work, "out-"));
+      const reviewDir = fs.mkdtempSync(path.join(work, "review-"));
+      const drops: { filename: string; rule: string; decidedBy: string }[] = [];
+      const keeps: { filename: string; rule: string; decidedBy: string }[] = [];
+      await renderEmailAttachments({
+        attachments: [attachment(name, png(300, 300, true))],
+        currentBaseName: "Email 0001",
+        outputDir,
+        reviewDir,
+        criteria: ["jonathan wheeler"],
+        judgeImage: async () => ({ verdict: verdicts[name], reason: "r" }),
+        onDrop: (d) => drops.push(d),
+        onKeep: (k) => keeps.push(k),
+      });
+      return {
+        delivered: fs.readdirSync(outputDir).sort(),
+        review: fs.readdirSync(reviewDir).sort(),
+        drops,
+        keeps,
+      };
+    };
+    const kept = await run("scan.png", "keep");
+    assert.deepEqual(kept.delivered, ["Email 0001 Attachment 1.pdf"]);
+    assert.deepEqual(kept.review, []);
+    assert.equal(kept.keeps[0].rule, "ai_image");
+    assert.equal(kept.keeps[0].decidedBy, "ai");
+
+    const dropped = await run("scan.png", "discard");
+    assert.deepEqual(dropped.delivered, []);
+    assert.deepEqual(dropped.review, []);
+    assert.equal(dropped.drops[0].rule, "ai_file");
+    assert.equal(dropped.drops[0].decidedBy, "ai");
+
+    const doubtful = await run("scan.png", "review");
+    assert.deepEqual(doubtful.delivered, []);
+    assert.deepEqual(doubtful.review, ["Email 0001 Image 1.pdf"]);
+  });
+
   it("meets the image rules even with no file name or extension", async () => {
     const result = await render([
       {
@@ -234,6 +279,43 @@ describe("images in a Files folder", () => {
     const documents = fs.readdirSync(path.join(out, "Documents"));
     assert.equal(documents.length, 1);
     assert.match(documents[0], /\.pdf$/);
+  });
+});
+
+describe("images in a Files folder read by the AI", () => {
+  it("discards what the AI discards, with the AI as decider, and renders the rest", async () => {
+    const input = fs.mkdtempSync(path.join(os.tmpdir(), "img-ai-in-"));
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), "img-ai-out-"));
+    const payslip = path.join(input, "payslip.png");
+    const holiday = path.join(input, "holiday.png");
+    fs.writeFileSync(payslip, png(300, 300, true));
+    fs.writeFileSync(holiday, png(310, 310, true));
+    const decisions: FileDecision[] = [];
+    const original = console.log;
+    console.log = () => {};
+    try {
+      await runStandaloneBatch({
+        inputDir: input,
+        filePaths: [payslip, holiday],
+        messagesDir: path.join(out, "Messages"),
+        documentsDir: path.join(out, "Documents"),
+        subjectCriteria: { name: "Maria Souza", email: "maria.souza@corp.com" },
+        judgeImage: async (content) =>
+          content.length === fs.statSync(payslip).size
+            ? { verdict: "discard", reason: "a payslip" }
+            : { verdict: "review", reason: "unclear" },
+        onDecision: (d) => {
+          if (d.state === "discarded") decisions.push(d);
+        },
+      });
+    } finally {
+      console.log = original;
+    }
+    assert.deepEqual(
+      decisions.map((d) => [path.basename(d.filePath), d.rule, d.decidedBy]),
+      [["payslip.png", "ai_file", "ai"]],
+    );
+    assert.equal(fs.readdirSync(path.join(out, "Documents")).length, 1);
   });
 });
 

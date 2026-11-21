@@ -13,6 +13,14 @@ import { defaultProvider } from "@aws-sdk/credential-provider-node";
 import { CONVERSE_MODEL } from "./bedrock/config";
 import { awsBedrockDeps } from "./bedrock/files-ai-client";
 import type { ParsedRequest } from "./bedrock/translate";
+import {
+  buildFilesAiSystemPrompt,
+  decideFilesAi,
+  type FilesAiCriteria,
+  type FilesAiMode,
+  parseFilesAiJudgement,
+  SENSITIVITY_CATEGORIES,
+} from "./files-ai-prompt";
 import { getAiBatchSettings } from "./pipeline-settings";
 
 export type VisionConverse = (
@@ -147,9 +155,163 @@ export async function judgeImageWithVision(
   return verdict;
 }
 
+export interface ImageContentVerdict {
+  verdict: "keep" | "discard" | "review";
+  reason: string;
+}
+
+export type ImageContentJudge = (
+  content: Buffer,
+) => Promise<ImageContentVerdict>;
+
+const IMAGE_RULES = `
+The file is ONE image (a photo, scan or screenshot) that came with an email or was found in a folder. Read any text in it. You cannot see the email or the folder.
+- A photo of a document, ID, payslip, bank statement, contract, medical or legal paper follows the confidentiality rules above as if it were that document.
+- An image with no readable text and nothing that links it to the data subject (an ordinary photo, a meme, a product or place picture) is "relevant": it came with an email that is already about the subject. Answer "irrelevant" only when you can read that it is clearly about something unrelated (another person's document, an unrelated invoice).
+- Never identify a person from their face. Do not describe people.
+- "has_readable_text" is true only when the image holds text you can actually read (a document, screenshot, sign or label). A photograph, drawing or pattern without readable text is false.
+- "confident" is true only when you are sure of the whole judgement; when it is not true, a person will look at the image.`;
+
+const CONTENT_SCHEMA = {
+  type: "object",
+  properties: {
+    relevance: { type: "string", enum: ["relevant", "irrelevant"] },
+    sensitivity: { type: "string", enum: [...SENSITIVITY_CATEGORIES] },
+    has_readable_text: { type: "boolean" },
+    confident: { type: "boolean" },
+    reason: { type: "string" },
+  },
+  required: [
+    "relevance",
+    "sensitivity",
+    "has_readable_text",
+    "confident",
+    "reason",
+  ],
+  additionalProperties: false,
+};
+
+const contentCache = new Map<string, ImageContentVerdict>();
+
+const toReview = (reason: string): ImageContentVerdict => ({
+  verdict: "review",
+  reason,
+});
+
+/**
+ * Judges what an image shows, with the same policy as a document
+ * (`decideFilesAi`): confidential -> discard, irrelevant -> discard (employee
+ * cases only), otherwise keep. A discard the model is not confident about, any
+ * doubt, and any failure -> review, a person decides.
+ */
+export async function judgeImageContent(
+  content: Buffer,
+  options: {
+    enabled: boolean;
+    criteria: FilesAiCriteria;
+    mode: FilesAiMode;
+  },
+): Promise<ImageContentVerdict> {
+  if (!options.enabled) return toReview("AI screening is off.");
+  const format = FORMATS.find((entry) => entry.matches(content))?.format;
+  if (!format) return toReview("Image format is not readable by the model.");
+  if (content.length > MAX_BYTES) {
+    return toReview("Image is too large for the model.");
+  }
+  const key = createHash("sha256")
+    .update(content)
+    .update(`|${options.mode}|${options.criteria.name}`)
+    .digest("hex");
+  const cached = contentCache.get(key);
+  if (cached) return cached;
+
+  const converse = await resolveConverse();
+  if (!converse) return toReview("No AWS credentials for the vision model.");
+  let verdict: ImageContentVerdict;
+  try {
+    const raw = (await converse(
+      {
+        customId: `img-${key.slice(0, 12)}`,
+        system:
+          buildFilesAiSystemPrompt(options.criteria, options.mode) +
+          IMAGE_RULES,
+        user: "Judge this image.",
+        toolName: "image_judgement",
+        schema: CONTENT_SCHEMA,
+        maxTokens: 250,
+        image: { format, bytes: new Uint8Array(content) },
+      },
+      CONVERSE_MODEL,
+    )) as
+      | {
+          relevance?: string;
+          sensitivity?: string;
+          confident?: boolean;
+          has_readable_text?: boolean;
+          reason?: string;
+        }
+      | undefined;
+    const judgement = parseFilesAiJudgement(
+      JSON.stringify({
+        relevance: raw?.relevance,
+        sensitivity: raw?.sensitivity,
+        reason: raw?.reason ?? "",
+      }),
+    );
+    const decided = decideFilesAi({
+      judgement,
+      mode: options.mode,
+      largeFile: false,
+      subjectInvolved: false,
+    });
+    // Irrelevance can only be read from text. A picture without readable text
+    // is never discarded as "unrelated": it came with an email about the
+    // subject, so a person decides. Confidentiality still discards.
+    const byIrrelevance =
+      judgement.sensitivity === "none" && decided.verdict === "discard";
+    if (decided.verdict === "discard" && raw?.confident !== true) {
+      verdict = toReview(
+        `Not sure enough to discard: ${decided.reason}`.slice(0, 240),
+      );
+    } else if (byIrrelevance && raw?.has_readable_text !== true) {
+      verdict = toReview(
+        `No readable text to show it is unrelated: ${decided.reason}`.slice(
+          0,
+          240,
+        ),
+      );
+    } else {
+      verdict = { verdict: decided.verdict, reason: decided.reason };
+    }
+  } catch (error) {
+    console.error(
+      "[Image content] Call failed:",
+      (error as { name?: string }).name,
+    );
+    return toReview("The vision model could not be reached.");
+  }
+  if (contentCache.size >= CACHE_LIMIT) contentCache.clear();
+  contentCache.set(key, verdict);
+  return verdict;
+}
+
+/** A judge bound to one subject and case type; reads the AI screening switch itself. */
+export function imageContentJudge(
+  criteria: FilesAiCriteria,
+  mode: FilesAiMode,
+): ImageContentJudge {
+  return async (content) =>
+    judgeImageContent(content, {
+      enabled: await visionEnabled(),
+      criteria,
+      mode,
+    });
+}
+
 /** For tests: forget what was judged. */
 export function clearImageVisionCache(): void {
   cache.clear();
+  contentCache.clear();
 }
 
 let enabledAt = 0;

@@ -26,6 +26,7 @@ import {
   readImageFacts,
   UNRENDERABLE_IMAGE_EXTENSIONS,
 } from "./image-rules";
+import type { ImageContentJudge } from "./image-vision";
 import { judgeImageWithVision, visionEnabled } from "./image-vision";
 import type { ChildItemDecision } from "./items";
 import { fileDiscardRule } from "./items";
@@ -79,6 +80,12 @@ export interface StandaloneBatchParams {
   clientMode?: boolean;
   /** Audit trail: called for every file the filters discard, with the rule and reason. */
   onDecision?: (decision: FileDecision) => void;
+  /**
+   * Reads what an image shows (same policy as a document). Only a discard is
+   * acted on here: a kept or doubtful image still becomes a PDF, and the Files
+   * AI gate (which cannot read a picture) sends it to a person.
+   */
+  judgeImage?: ImageContentJudge;
 }
 
 export interface FileDecision {
@@ -86,6 +93,8 @@ export interface FileDecision {
   state: "discarded" | "kept";
   rule: string;
   reason: string;
+  /** Who decided, when it was not a fixed rule (`ai` for an image the AI read). */
+  decidedBy?: string;
   /** For a kept file: where it was delivered, as `Documents/<name>` or `Messages/<name>`. */
   deliveredRel?: string;
   /** For a chat export: what happened to each message that cites the subject. */
@@ -887,13 +896,18 @@ export async function runStandaloneBatch(
   // Per-message decisions of the chat export being judged, handed to the next
   // decision reported for that file.
   let chatMessageDecisions: ChildItemDecision[] | undefined;
-  const recordDiscard = (filePath: string, text: string) => {
+  const recordDiscard = (
+    filePath: string,
+    text: string,
+    by?: { rule: string; decidedBy: string },
+  ) => {
     console.log(`[Standalone Filter] ${text}`);
     try {
       params.onDecision?.({
         filePath,
         state: "discarded",
-        rule: fileDiscardRule(text),
+        rule: by?.rule ?? fileDiscardRule(text),
+        ...(by ? { decidedBy: by.decidedBy } : {}),
         reason: text.replace(/^Discarded\s+/, ""),
         ...(chatMessageDecisions?.length
           ? { messages: chatMessageDecisions }
@@ -1601,6 +1615,18 @@ export async function runStandaloneBatch(
             recordDiscard(
               filePath,
               `Discarded ${ext.toUpperCase()} ${file}: signature image (vision model, ${vision.reason}).`,
+            );
+            skippedCount++;
+            continue;
+          }
+        }
+        if (params.judgeImage) {
+          const judged = await params.judgeImage(imageBuffer);
+          if (judged.verdict === "discard") {
+            recordDiscard(
+              filePath,
+              `Discarded ${ext.toUpperCase()} ${file}: image read by the AI (${judged.reason}).`,
+              { rule: "ai_file", decidedBy: "ai" },
             );
             skippedCount++;
             continue;

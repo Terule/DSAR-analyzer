@@ -4,6 +4,7 @@ import type { ParsedRequest } from "../../../src/lib/bedrock/translate";
 import {
   clearImageVisionCache,
   imageVisionTestOverride,
+  judgeImageContent,
   judgeImageWithVision,
 } from "../../../src/lib/image-vision";
 
@@ -102,6 +103,120 @@ describe("image vision check", () => {
     });
     await judgeImageWithVision(PNG, { enabled: true });
     await judgeImageWithVision(Buffer.from(PNG), { enabled: true });
+    assert.equal(calls.length, 1);
+  });
+});
+
+describe("image content judgement", () => {
+  const criteria = {
+    name: "Jonathan Wheeler",
+    email: "jw@corp.com",
+    aliases: [],
+  };
+  const judge = (mode: "employee" | "client" = "employee", enabled = true) =>
+    judgeImageContent(PNG, { enabled, criteria, mode });
+
+  beforeEach(() => {
+    clearImageVisionCache();
+    imageVisionTestOverride.converse = undefined;
+  });
+
+  it("keeps a relevant, harmless image and tells the model who the subject is", async () => {
+    const calls = fake({
+      relevance: "relevant",
+      sensitivity: "none",
+      confident: true,
+      reason: "screenshot of a rota",
+    });
+    const result = await judge();
+    assert.equal(result.verdict, "keep");
+    assert.match(calls[0].system, /Jonathan Wheeler/);
+    assert.match(calls[0].system, /Never identify a person from their face/);
+    assert.ok(calls[0].image);
+  });
+
+  it("discards a confident confidential image, in every case type", async () => {
+    fake({
+      relevance: "relevant",
+      sensitivity: "payroll_compensation",
+      confident: true,
+      reason: "a payslip",
+    });
+    assert.equal((await judge("employee")).verdict, "discard");
+    clearImageVisionCache();
+    assert.equal((await judge("client")).verdict, "discard");
+  });
+
+  it("discards an irrelevant image in employee cases only", async () => {
+    fake({
+      relevance: "irrelevant",
+      sensitivity: "none",
+      confident: true,
+      has_readable_text: true,
+      reason: "another person's invoice",
+    });
+    assert.equal((await judge("employee")).verdict, "discard");
+    clearImageVisionCache();
+    assert.equal((await judge("client")).verdict, "keep");
+  });
+
+  it("never discards a picture without readable text as unrelated", async () => {
+    fake({
+      relevance: "irrelevant",
+      sensitivity: "none",
+      confident: true,
+      has_readable_text: false,
+      reason: "a plain photo",
+    });
+    const result = await judge();
+    assert.equal(result.verdict, "review");
+    assert.match(result.reason, /No readable text/);
+  });
+
+  it("still discards confidential content without a readable-text flag", async () => {
+    fake({
+      relevance: "relevant",
+      sensitivity: "legal_privileged",
+      confident: true,
+      has_readable_text: false,
+      reason: "legal paper",
+    });
+    assert.equal((await judge()).verdict, "discard");
+  });
+
+  it("sends a discard it is not confident about to a person", async () => {
+    fake({
+      relevance: "irrelevant",
+      sensitivity: "none",
+      confident: false,
+      reason: "maybe unrelated",
+    });
+    const result = await judge();
+    assert.equal(result.verdict, "review");
+    assert.match(result.reason, /Not sure enough to discard/);
+  });
+
+  it("sends doubt, failure, a switched-off screening and a bad answer to a person", async () => {
+    fake(new Error("boom"));
+    assert.equal((await judge()).verdict, "review");
+    clearImageVisionCache();
+    fake({ relevance: "maybe", sensitivity: "none", confident: true });
+    assert.equal((await judge()).verdict, "review");
+    clearImageVisionCache();
+    const calls = fake({});
+    assert.equal((await judge("employee", false)).verdict, "review");
+    assert.equal(calls.length, 0);
+  });
+
+  it("judges the same image once per case", async () => {
+    const calls = fake({
+      relevance: "relevant",
+      sensitivity: "none",
+      confident: true,
+      reason: "ok",
+    });
+    await judge();
+    await judge();
     assert.equal(calls.length, 1);
   });
 });

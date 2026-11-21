@@ -30,6 +30,8 @@ import {
   listStandaloneInputFiles,
   runStandaloneBatch,
 } from "@/lib/standalone-processor";
+import type { FilesAiCriteria } from "../files-ai-prompt";
+import { imageContentJudge } from "../image-vision";
 import type { ControlJobRecord } from "./types";
 
 const LARGE_OFFICE_EXTENSIONS = new Set([".doc", ".docx", ".xls", ".xlsx"]);
@@ -635,6 +637,14 @@ export async function runPhaseJob(
       ? Number(row.files_started_at)
       : Date.now();
   const auditDecisions: FileDecision[] = [];
+  const isClientRow = row.case_request_id
+    ? (
+        await prisma.caseRequest.findUnique({
+          where: { id: row.case_request_id },
+          select: { case: { select: { case_type: true } } },
+        })
+      )?.case.case_type === "client"
+    : false;
   const result = await runStandaloneBatch(
     {
       inputDir: row.filepath,
@@ -648,14 +658,16 @@ export async function runPhaseJob(
         personalEmail: subjectPersonalEmail || undefined,
         aliases: aliases(subjectAliases),
       },
-      clientMode: row.case_request_id
-        ? (
-            await prisma.caseRequest.findUnique({
-              where: { id: row.case_request_id },
-              select: { case: { select: { case_type: true } } },
-            })
-          )?.case.case_type === "client"
-        : false,
+      clientMode: isClientRow,
+      judgeImage: imageContentJudge(
+        {
+          name: subjectName,
+          email: subjectEmail || "",
+          personalEmail: subjectPersonalEmail || undefined,
+          aliases: aliases(subjectAliases),
+        } satisfies FilesAiCriteria,
+        isClientRow ? "client" : "employee",
+      ),
     },
     () => {
       // Final batch totals are persisted exactly once below. Per-file writes

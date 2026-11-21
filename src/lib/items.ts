@@ -227,6 +227,7 @@ export function fileDecisionToItem(
     state: "discarded" | "kept";
     rule: string;
     reason: string;
+    decidedBy?: string;
     deliveredRel?: string;
     messages?: ChildItemDecision[];
   },
@@ -238,7 +239,7 @@ export function fileDecisionToItem(
     state: decision.state,
     rule: decision.rule,
     reason: decision.reason,
-    decidedBy: "rule",
+    decidedBy: decision.decidedBy ?? "rule",
     ...(decision.messages?.length ? { children: decision.messages } : {}),
   };
 }

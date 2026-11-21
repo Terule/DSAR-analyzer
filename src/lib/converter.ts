@@ -17,6 +17,7 @@ import {
   hasPrivilegedKeywordInDocument,
   hasPrivilegedKeywordInFileName,
 } from "./exclusions";
+import { filesAiModeFor } from "./files-ai";
 import { listHumanReviewDeliverables } from "./files-ai-apply";
 import { archiveCompletedCase } from "./history";
 import { convertImageToPng, convertibleImageExtension } from "./image-convert";
@@ -32,7 +33,12 @@ import {
   isUnrenderableImage,
   readImageFacts,
 } from "./image-rules";
-import { judgeImageWithVision, visionEnabled } from "./image-vision";
+import {
+  type ImageContentJudge,
+  imageContentJudge,
+  judgeImageWithVision,
+  visionEnabled,
+} from "./image-vision";
 import {
   type AttachmentDecision,
   exportAuditTrail,
@@ -1205,6 +1211,12 @@ export async function renderEmailAttachments(input: {
   bodyHtml?: string;
   /** Image hash -> number of emails carrying it (see image-recurrence.ts). */
   imageRecurrence?: Map<string, number>;
+  /**
+   * Reads what an image shows (same policy as a document): keep delivers it as
+   * a PDF with the email, discard drops it, review (or no judge) sends it to a
+   * person.
+   */
+  judgeImage?: ImageContentJudge;
   /** Images already sent for review in this Render run, so a repeat is not sent again. */
   seenImages?: Set<string>;
   /** Audit trail: told about every attachment that is not delivered, and why. */
@@ -1242,9 +1254,10 @@ export async function renderEmailAttachments(input: {
     state: "kept" | "review",
     rule: string,
     reason: string,
+    decidedBy = "rule",
   ) => {
     try {
-      input.onKeep?.({ filename, state, rule, reason, decidedBy: "rule" });
+      input.onKeep?.({ filename, state, rule, reason, decidedBy });
     } catch (error) {
       console.warn("[Attachments] Audit trail callback failed:", error);
     }
@@ -1293,6 +1306,10 @@ export async function renderEmailAttachments(input: {
     }
   }
   const imagesForReview: typeof imageAttachments = [];
+  const imagesKept: Array<{
+    image: (typeof imageAttachments)[number];
+    reason: string;
+  }> = [];
   const imageVisionOn = imageAttachments.length > 0 && (await visionEnabled());
   for (const image of imageAttachments) {
     if (image.unrenderable && image.convertExt) {
@@ -1366,6 +1383,17 @@ export async function renderEmailAttachments(input: {
           continue;
         }
       }
+      if (input.judgeImage) {
+        const judged = await input.judgeImage(image.content);
+        if (judged.verdict === "discard") {
+          drop(image.filename, "ai_file", judged.reason, "ai");
+          continue;
+        }
+        if (judged.verdict === "keep") {
+          imagesKept.push({ image, reason: judged.reason });
+          continue;
+        }
+      }
       input.seenImages?.add(hash);
       imagesForReview.push(image);
     }
@@ -1400,6 +1428,14 @@ export async function renderEmailAttachments(input: {
     } else review.push(file);
   }
 
+  // Images the AI kept are delivered as PDFs in the same numbering as documents.
+  const keptImageReason = new Map<(typeof files)[number], string>();
+  for (const { image, reason } of imagesKept) {
+    const file = { filename: image.filename, content: image.content };
+    keptImageReason.set(file, reason);
+    deliver.push(file);
+  }
+
   const renderInto = async (batch: typeof files, directory: string) => {
     fs.mkdirSync(directory, { recursive: true });
     const padLen = String(Math.max(1, batch.length)).length;
@@ -1424,7 +1460,17 @@ export async function renderEmailAttachments(input: {
       const onReject = (reason: DocumentRejection) => {
         rejection = reason;
       };
-      if (ext === ".docx" || ext === ".doc") {
+      if (keptImageReason.has(file)) {
+        try {
+          await processImageToPdf(
+            file.content,
+            path.join(directory, `${attSeqName}.pdf`),
+            attSeqName,
+          );
+        } catch {
+          delivered = false;
+        }
+      } else if (ext === ".docx" || ext === ".doc") {
         delivered = await processDocxToPdf(
           file.content,
           path.join(directory, `${attSeqName}.pdf`),
@@ -1489,11 +1535,15 @@ export async function renderEmailAttachments(input: {
         drop(file.filename, why.rule, why.reason);
       } else if (delivered) {
         // A delivered attachment is a kept item in the audit trail too.
+        const imageReason = keptImageReason.get(file);
         keep(
           file.filename,
           "kept",
-          "attachment_delivered",
-          "Delivered as a PDF with its email.",
+          imageReason === undefined ? "attachment_delivered" : "ai_image",
+          imageReason === undefined
+            ? "Delivered as a PDF with its email."
+            : `Image read by the AI and kept: ${imageReason}`,
+          imageReason === undefined ? "rule" : "ai",
         );
       }
     }
@@ -1687,6 +1737,19 @@ export async function convertToPdfBatch(
     const subjectPersonalEmail = (row.subject_personal_email || "")
       .trim()
       .toLowerCase();
+    // Reads what an image shows, with the same policy as a document.
+    const judgeImage = imageContentJudge(
+      {
+        name: row.subject_name || "",
+        email: row.subject_email || "",
+        personalEmail: row.subject_personal_email || "",
+        aliases: (row.subject_aliases || "")
+          .split(",")
+          .map((alias) => alias.trim())
+          .filter(Boolean),
+      },
+      await filesAiModeFor(fileId),
+    );
 
     // Shared attachment renderer — used for both normal and warning emails.
     // What the pre-Render screening decided about each attachment (null when the
@@ -1710,6 +1773,7 @@ export async function convertToPdfBatch(
         bodyHtml,
         imageRecurrence,
         seenImages,
+        judgeImage,
         onDrop: (d) =>
           drops.push({
             filename: d.filename,
@@ -2030,6 +2094,7 @@ export async function convertToPdfBatch(
                   bodyHtml: parsed.html || "",
                   imageRecurrence,
                   seenImages,
+                  judgeImage,
                 });
               }
               rendered =
