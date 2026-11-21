@@ -115,3 +115,23 @@ describe("subjectClearlyInvolved", () => {
     assert.equal(subjectClearlyInvolved("", criteria), false);
   });
 });
+
+describe("subjectClearlyInvolved in a Teams excerpt", () => {
+  it("is never decided by who wrote the messages", () => {
+    const criteria = {
+      name: "Maria Souza",
+      email: "maria.souza@corp.com",
+      aliases: [],
+    };
+    const text =
+      "Excerpts of a Teams conversation of 12 messages.\nMaria Souza 10:02\nplease redraft the letter";
+    assert.equal(subjectClearlyInvolved(text, criteria), false);
+    assert.equal(
+      subjectClearlyInvolved(
+        "Maria Souza 10:02\nplease redraft the letter",
+        criteria,
+      ),
+      true,
+    );
+  });
+});

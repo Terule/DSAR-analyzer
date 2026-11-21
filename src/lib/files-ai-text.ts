@@ -1,4 +1,5 @@
 import type { FilesAiCriteria } from "./files-ai-prompt";
+import { isTeamsExcerptText } from "./teams-chat";
 
 export interface SampleLimits {
   maxChars: number;
@@ -67,6 +68,9 @@ export function subjectClearlyInvolved(
   text: string,
   criteria: FilesAiCriteria,
 ): boolean {
+  // A chat excerpt is judged by what it is about: the subject having written
+  // the work messages in it must not override an "irrelevant" answer.
+  if (isTeamsExcerptText(text)) return false;
   const lower = text.toLowerCase();
   for (const email of [criteria.email, criteria.personalEmail ?? ""]) {
     const token = email.trim().toLowerCase();

@@ -39,6 +39,13 @@ export function chatLargeMessages(): number {
 
 export const LARGE_CHAT_MARKER = "LARGE CONVERSATION";
 
+/** The phrase the rendered excerpt file carries (see `renderExcerptsHtml`). */
+export const TEAMS_EXCERPT_MARKER = "Excerpts of a Teams conversation";
+
+export function isTeamsExcerptText(text: string): boolean {
+  return text.includes(TEAMS_EXCERPT_MARKER);
+}
+
 export function isLargeChat(totalMessages: number): boolean {
   return totalMessages >= chatLargeMessages();
 }

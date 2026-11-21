@@ -249,6 +249,10 @@ describe("Teams chat rules", () => {
       assert.match(prompt, /even when the participants are lawyers/);
       assert.match(prompt, /still "payroll_compensation"/);
       assert.match(prompt, /treat it as personal/);
+      assert.match(
+        prompt,
+        /answer relevance "irrelevant" even when the subject wrote/,
+      );
     }
   });
 });
