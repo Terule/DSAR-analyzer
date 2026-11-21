@@ -317,6 +317,43 @@ describe("images in a Files folder read by the AI", () => {
     );
     assert.equal(fs.readdirSync(path.join(out, "Documents")).length, 1);
   });
+
+  it("reports an image the AI keeps, so the gate (which cannot read a picture) leaves it alone", async () => {
+    const input = fs.mkdtempSync(path.join(os.tmpdir(), "img-ai-keep-in-"));
+    const out = fs.mkdtempSync(path.join(os.tmpdir(), "img-ai-keep-out-"));
+    const rota = path.join(input, "rota.png");
+    const unsure = path.join(input, "unsure.png");
+    fs.writeFileSync(rota, png(300, 300, true));
+    fs.writeFileSync(unsure, png(310, 310, true));
+    const kept: FileDecision[] = [];
+    const original = console.log;
+    console.log = () => {};
+    try {
+      await runStandaloneBatch({
+        inputDir: input,
+        filePaths: [rota, unsure],
+        messagesDir: path.join(out, "Messages"),
+        documentsDir: path.join(out, "Documents"),
+        subjectCriteria: { name: "Maria Souza", email: "maria.souza@corp.com" },
+        judgeImage: async (content) =>
+          content.length === fs.statSync(rota).size
+            ? { verdict: "keep", reason: "a rota" }
+            : { verdict: "review", reason: "unclear" },
+        onDecision: (d) => {
+          if (d.state === "kept") kept.push(d);
+        },
+      });
+    } finally {
+      console.log = original;
+    }
+    const byName = new Map(kept.map((d) => [path.basename(d.filePath), d]));
+    assert.deepEqual(byName.get("rota.png")?.aiVerdict, {
+      verdict: "keep",
+      reason: "a rota",
+    });
+    assert.match(byName.get("rota.png")?.deliveredRel ?? "", /^Documents\//);
+    assert.equal(byName.get("unsure.png")?.aiVerdict, undefined);
+  });
 });
 
 describe("embedded, recurring and repeated images", () => {

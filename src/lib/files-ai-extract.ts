@@ -50,7 +50,6 @@ export function listFilesAiCandidates(dirs: {
   ];
 }
 
-/** Text of the first pages of a PDF plus its total page count. */
 /**
  * pdf-parse writes `-- 1 of 3 --` between pages. A PDF made from a picture has
  * no other text, so the markers alone made it look like a document with
@@ -63,6 +62,7 @@ export function stripPageMarkers(text: string): string {
     .trim();
 }
 
+/** Text of the first pages of a PDF plus its total page count. */
 export async function readPdfSample(
   absPath: string,
   maxPages = 12,

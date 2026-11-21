@@ -30,6 +30,7 @@ import {
   listStandaloneInputFiles,
   runStandaloneBatch,
 } from "@/lib/standalone-processor";
+import { verdictId } from "../files-ai";
 import type { FilesAiCriteria } from "../files-ai-prompt";
 import { imageContentJudge } from "../image-vision";
 import type { ControlJobRecord } from "./types";
@@ -681,6 +682,29 @@ export async function runPhaseJob(
       fileDecisionToItem(row.filepath ?? "", decision),
     ),
   );
+  // An image the AI read and kept: the gate cannot read a picture, so its
+  // verdict is recorded here and the gate leaves the image alone.
+  const imagesKept = auditDecisions.flatMap((decision) =>
+    decision.aiVerdict && decision.deliveredRel
+      ? [{ rel: decision.deliveredRel, reason: decision.aiVerdict.reason }]
+      : [],
+  );
+  if (imagesKept.length > 0) {
+    await prisma.filesAiVerdict.createMany({
+      skipDuplicates: true,
+      data: imagesKept.map((image) => ({
+        id: verdictId(fileId, image.rel),
+        file_id: fileId,
+        rel_path: image.rel,
+        verdict: "keep",
+        reason: `Image read by the AI and kept: ${image.reason}`.slice(0, 240),
+        relevance: "relevant",
+        sensitivity: "none",
+        reviewed_by_model: "haiku-5.5",
+        resolved_at: new Date(),
+      })),
+    });
+  }
   const totals = await recordFilesBatchResult({
     jobId: job.id,
     fileId,

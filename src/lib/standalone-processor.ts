@@ -93,6 +93,11 @@ export interface FileDecision {
   state: "discarded" | "kept";
   rule: string;
   reason: string;
+  /**
+   * An image the AI read and kept: the Files AI gate cannot read a picture, so
+   * this verdict is recorded for it and the image is delivered as judged.
+   */
+  aiVerdict?: { verdict: "keep"; reason: string };
   /** Who decided, when it was not a fixed rule (`ai` for an image the AI read). */
   decidedBy?: string;
   /** For a kept file: where it was delivered, as `Documents/<name>` or `Messages/<name>`. */
@@ -896,6 +901,7 @@ export async function runStandaloneBatch(
   // Per-message decisions of the chat export being judged, handed to the next
   // decision reported for that file.
   let chatMessageDecisions: ChildItemDecision[] | undefined;
+  let imageKeepReason: string | undefined;
   const recordDiscard = (
     filePath: string,
     text: string,
@@ -961,6 +967,7 @@ export async function runStandaloneBatch(
     fileIndex++;
     const file = path.basename(filePath);
     chatMessageDecisions = undefined;
+    imageKeepReason = undefined;
 
     // Skip hidden system files and JSON metadata files
     if (file.startsWith(".") || file.toLowerCase().endsWith(".json")) continue;
@@ -1631,6 +1638,7 @@ export async function runStandaloneBatch(
             skippedCount++;
             continue;
           }
+          if (judged.verdict === "keep") imageKeepReason = judged.reason;
         }
         await withTimeout(
           processImageToPdf(imageBuffer, pdfOutputPath, seqName),
@@ -1732,6 +1740,14 @@ export async function runStandaloneBatch(
               rule: "files_filter",
               reason: "Passed the file filters.",
               deliveredRel: `${path.basename(path.dirname(producedPath))}/${path.basename(producedPath)}`,
+              ...(imageKeepReason
+                ? {
+                    aiVerdict: {
+                      verdict: "keep" as const,
+                      reason: imageKeepReason,
+                    },
+                  }
+                : {}),
               ...(chatMessageDecisions?.length
                 ? { messages: chatMessageDecisions }
                 : {}),

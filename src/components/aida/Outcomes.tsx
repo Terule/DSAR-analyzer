@@ -13,8 +13,8 @@ import { Card } from "./ui";
 import type { Insights } from "./use-insights";
 
 /**
- * Four colours: the fixed rules that removed an item (red), the AI that
- * discarded it (dark red), a person who must look (amber) and what was kept
+ * Four colours: the fixed rules that removed an item (dark red), the AI that
+ * discarded it (light red), a person who must look (amber) and what was kept
  * (green). Grey is only for what still waits for the AI.
  */
 export type Group = "rules" | "ai" | "review" | "kept" | "waiting";
@@ -30,11 +30,13 @@ const GROUP_OF: Record<OutcomeKey, Group> = {
   waiting: "waiting",
 };
 
-const GROUP_ORDER: Group[] = ["rules", "ai", "review", "kept", "waiting"];
+// What was kept comes first, as in the cards above, then what was removed
+// (the darker red first), then what needs a person, then what still waits.
+const GROUP_ORDER: Group[] = ["kept", "rules", "ai", "review", "waiting"];
 
 export const GROUP_TONE: Record<Group, string> = {
-  rules: "bg-[#e0605f]",
-  ai: "bg-[#a53b3a]",
+  rules: "bg-[#a53b3a]",
+  ai: "bg-[#e0605f]",
   review: "bg-aida-amber",
   kept: "bg-aida-green",
   waiting: "bg-[#2a3a66]",

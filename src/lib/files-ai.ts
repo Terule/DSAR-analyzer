@@ -101,7 +101,7 @@ interface QueuedRequest {
   tokens: number;
 }
 
-function verdictId(fileId: string, relPath: string): string {
+export function verdictId(fileId: string, relPath: string): string {
   return `${fileId}:${relPath}`;
 }
 
