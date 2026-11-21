@@ -186,10 +186,21 @@ async function main() {
     }
     console.log(`settled after ${Math.round((Date.now() - started) / 1000)}s`);
 
-    const rows = await prisma.email.findMany({
-      where: { file_id: fileId },
-      select: { email_hash: true, ai_decision: true, ai_reason: true },
-    });
+    const verdict = {
+      kept: "keep",
+      discarded: "discard",
+      review: "review",
+    } as Record<string, string>;
+    const rows = (
+      await prisma.item.findMany({
+        where: { file_id: fileId, kind: "email" },
+        select: { id: true, state: true, reason: true },
+      })
+    ).map((item) => ({
+      email_hash: item.id,
+      ai_decision: verdict[item.state] ?? null,
+      ai_reason: item.reason,
+    }));
     const reviewed = rows.filter((r) =>
       /second review/i.test(r.ai_reason ?? ""),
     );

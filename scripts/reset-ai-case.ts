@@ -92,19 +92,12 @@ async function main() {
 
   // These decisions are made before AI payload generation, and some have no
   // JSON payload to re-audit. Keep them intact when restarting AI.
-  const extractionExclusions = {
-    OR: [
-      { ai_reason: { startsWith: "Pre-filter:" } },
-      { ai_reason: { startsWith: "System Discard: Draft" } },
-      { ai_reason: { startsWith: "Self-forward:" } },
-    ],
-  };
-  const retainedDiscards = await prisma.email.count({
+  const retainedDiscards = await prisma.item.count({
     where: {
       file_id: { in: targetPstIds },
-      is_duplicate: 0,
-      ai_decision: "discard",
-      ...extractionExclusions,
+      kind: "email",
+      state: "discarded",
+      decision_rule: { in: ["subject_absent", "draft", "self_forward"] },
     },
   });
 
@@ -179,14 +172,6 @@ async function main() {
         pdf_status: "pending",
         pdf_duration_ms: 0,
       },
-    }),
-    // Keep extraction-time exclusions; clear all decisions made by the AI pass.
-    prisma.email.updateMany({
-      where: {
-        file_id: { in: targetPstIds },
-        NOT: extractionExclusions,
-      },
-      data: { ai_decision: null, ai_reason: null },
     }),
     prisma.processedFile.update({
       where: { id: coordinator },
