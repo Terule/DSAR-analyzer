@@ -51,6 +51,18 @@ export function listFilesAiCandidates(dirs: {
 }
 
 /** Text of the first pages of a PDF plus its total page count. */
+/**
+ * pdf-parse writes `-- 1 of 3 --` between pages. A PDF made from a picture has
+ * no other text, so the markers alone made it look like a document with
+ * content, and the model discarded it as "empty" instead of it going to a
+ * person. Strip them before anything asks whether there is text.
+ */
+export function stripPageMarkers(text: string): string {
+  return text
+    .replace(/^[ \t]*--[ \t]*\d+[ \t]*(?:of[ \t]*)?\d*[ \t]*--[ \t]*$/gim, "")
+    .trim();
+}
+
 export async function readPdfSample(
   absPath: string,
   maxPages = 12,
@@ -61,7 +73,7 @@ export async function readPdfSample(
     try {
       const result = await parser.getText({ first: maxPages });
       return {
-        text: (result.text ?? "").trim(),
+        text: stripPageMarkers(result.text ?? ""),
         totalPages: result.total ?? 0,
       };
     } finally {

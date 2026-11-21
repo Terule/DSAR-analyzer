@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
   listFilesAiCandidates,
   readPdfText,
+  stripPageMarkers,
 } from "../../../src/lib/files-ai-extract";
 
 function tmp() {
@@ -95,5 +96,21 @@ describe("readPdfText", () => {
 
   it("returns empty text for a missing file", async () => {
     assert.equal(await readPdfText("/definitely/not/here.pdf"), "");
+  });
+});
+
+describe("stripPageMarkers", () => {
+  it("leaves nothing of a picture-only PDF", () => {
+    assert.equal(stripPageMarkers("-- 1 of 1 --"), "");
+    assert.equal(stripPageMarkers("\n-- 1 of 2 --\n\n-- 2 of 2 --\n"), "");
+  });
+
+  it("keeps the real text between markers", () => {
+    assert.equal(
+      stripPageMarkers(
+        "Hello\n\n-- 1 of 2 --\nWorld -- not a marker\n-- 2 of 2 --",
+      ),
+      "Hello\n\n\nWorld -- not a marker",
+    );
   });
 });
