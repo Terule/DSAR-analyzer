@@ -22,7 +22,11 @@ import {
 } from "./files-ai-apply";
 import type { FilesAiCriteria } from "./files-ai-prompt";
 import { configuredFilesAiClient } from "./files-ai-provider";
-import { exportAuditTrail, recordFileItems } from "./items";
+import {
+  cascadeDiscardedChats,
+  exportAuditTrail,
+  recordFileItems,
+} from "./items";
 import { getAiBatchSettings } from "./pipeline-settings";
 import { prisma } from "./prisma";
 
@@ -183,6 +187,13 @@ export async function applyFilesAiVerdicts(input: {
       decidedBy: v.reviewed_by_model ?? "ai",
     })),
   );
+
+  // The chat messages inside a chat the AI discarded are discarded with it.
+  if (owner?.case_request_id) {
+    await cascadeDiscardedChats(owner.case_request_id).catch((error) =>
+      console.warn(`[Files AI] Could not cascade chat discards: ${error}`),
+    );
+  }
 
   await exportAuditTrail(owner?.case_request_id, input.requestOutputDir);
 

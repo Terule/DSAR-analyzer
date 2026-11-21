@@ -347,7 +347,6 @@ async function main() {
     filesRow.id,
     flipped.map((o) => ({
       relPath: o.relPath,
-      label: o.relPath,
       state: "kept" as const,
       rule: "ai_file",
       reason: `Re-judged with the Teams chat rule: ${o.reason}`.slice(0, 240),

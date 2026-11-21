@@ -219,6 +219,84 @@ async function recordChildItems(
   }
 }
 
+/**
+ * The chat messages inside a chat follow their chat: when the chat is
+ * discarded, a message still marked kept goes with it. The AI gate records the
+ * chat only, so without this the messages of every chat it discarded stayed
+ * "kept" in the trail. Idempotent; returns how many messages changed.
+ */
+export async function cascadeDiscardedChats(
+  caseRequestId: string,
+): Promise<number> {
+  const kept = await prisma.item.findMany({
+    where: {
+      case_request_id: caseRequestId,
+      kind: "chat_message",
+      state: "kept",
+      parent_id: { not: null },
+    },
+    select: { id: true, parent_id: true },
+  });
+  if (kept.length === 0) return 0;
+  const parentIds = [...new Set(kept.map((item) => item.parent_id as string))];
+  const discarded = new Map<
+    string,
+    { rule: string | null; decidedBy: string | null }
+  >();
+  for (let start = 0; start < parentIds.length; start += 1_000) {
+    const parents = await prisma.item.findMany({
+      where: {
+        id: { in: parentIds.slice(start, start + 1_000) },
+        state: "discarded",
+      },
+      select: { id: true, decision_rule: true, decided_by: true },
+    });
+    for (const parent of parents) {
+      discarded.set(parent.id, {
+        rule: parent.decision_rule,
+        decidedBy: parent.decided_by,
+      });
+    }
+  }
+  const moving = kept.filter((item) => discarded.has(item.parent_id as string));
+  const reason = "The whole chat was discarded.";
+  for (let start = 0; start < moving.length; start += 5_000) {
+    const chunk = moving.slice(start, start + 5_000);
+    await prisma.$transaction([
+      prisma.itemEvent.createMany({
+        data: chunk.map((item) => {
+          const parent = discarded.get(item.parent_id as string);
+          return {
+            item_id: item.id,
+            state: "discarded",
+            decision_rule: parent?.rule ?? null,
+            reason,
+            decided_by: parent?.decidedBy ?? "rule",
+          };
+        }),
+      }),
+      ...[...new Set(chunk.map((item) => item.parent_id as string))].map(
+        (parentId) => {
+          const parent = discarded.get(parentId);
+          return prisma.item.updateMany({
+            where: {
+              id: { in: chunk.map((i) => i.id) },
+              parent_id: parentId,
+            },
+            data: {
+              state: "discarded",
+              decision_rule: parent?.rule ?? null,
+              reason,
+              decided_by: parent?.decidedBy ?? "rule",
+            },
+          });
+        },
+      ),
+    ]);
+  }
+  return moving.length;
+}
+
 /** Convenience for the Files engine: its decisions carry absolute paths. */
 export function fileDecisionToItem(
   inputDir: string,
