@@ -265,3 +265,108 @@ export function buildActivity(input: {
   }
   return events;
 }
+
+/* ---------- Outcomes: where every item went ---------- */
+
+export type OutcomeKey =
+  | "type"
+  | "keyword"
+  | "other"
+  | "subject"
+  | "ai_discarded"
+  | "review"
+  | "kept"
+  | "waiting";
+
+export interface OutcomeSegment {
+  key: OutcomeKey;
+  count: number;
+  /** Funnel step to open in the decisions panel, when there is a list behind it. */
+  step: string | null;
+}
+
+export interface OutcomeBar {
+  kind: "emails" | "files";
+  received: number;
+  duplicates: number;
+  /** received minus duplicates: the items that were actually judged. */
+  unique: number;
+  /** In pipeline order; only segments with items. They add up to `unique`. */
+  segments: OutcomeSegment[];
+}
+
+const ORDER: OutcomeKey[] = [
+  "type",
+  "keyword",
+  "other",
+  "subject",
+  "ai_discarded",
+  "review",
+  "kept",
+  "waiting",
+];
+
+const STEP_OF: Record<OutcomeKey, string | null> = {
+  type: "type",
+  keyword: "keyword",
+  other: "other",
+  subject: "subject",
+  ai_discarded: "ai",
+  review: "ai",
+  kept: "ai",
+  waiting: null,
+};
+
+function outcomeOf(group: RuleGroup): OutcomeKey | "duplicate" {
+  if (group.state === "kept") return "kept";
+  if (group.state === "review") return "review";
+  if (group.state === "pending") return "waiting";
+  const rule = group.rule;
+  if (rule !== null && FUNNEL_RULES.duplicates.includes(rule))
+    return "duplicate";
+  if (rule !== null && FUNNEL_RULES.type.includes(rule)) return "type";
+  if (rule !== null && FUNNEL_RULES.keyword.includes(rule)) return "keyword";
+  if (rule !== null && FUNNEL_RULES.subject.includes(rule)) return "subject";
+  if (rule !== null && AI_RULES.includes(rule)) return "ai_discarded";
+  // Every other fixed rule (draft, signature image, ...) and any rule not
+  // listed: removed before a person or the AI looked at it.
+  return "other";
+}
+
+/**
+ * One bar per kind of item (emails, files), each over the items that were
+ * actually judged: duplicates are counted apart because they are repetition,
+ * not a decision, and at 60%+ of a request they would flatten every other step.
+ * Every segment is a share of `unique`, so the bar and its legend always agree.
+ */
+export function buildOutcomes(
+  groups: Array<RuleGroup & { kind: "emails" | "files" }>,
+): OutcomeBar[] {
+  const bars: OutcomeBar[] = [];
+  for (const kind of ["emails", "files"] as const) {
+    const mine = groups.filter((group) => group.kind === kind);
+    const received = mine.reduce((sum, group) => sum + group.count, 0);
+    if (received === 0) continue;
+    const counts = new Map<OutcomeKey, number>();
+    let duplicates = 0;
+    for (const group of mine) {
+      const outcome = outcomeOf(group);
+      if (outcome === "duplicate") duplicates += group.count;
+      else counts.set(outcome, (counts.get(outcome) ?? 0) + group.count);
+    }
+    bars.push({
+      kind,
+      received,
+      duplicates,
+      unique: received - duplicates,
+      segments: ORDER.filter((key) => (counts.get(key) ?? 0) > 0).map(
+        (key) => ({
+          key,
+          count: counts.get(key) ?? 0,
+          step: STEP_OF[key],
+        }),
+      ),
+    });
+  }
+  return bars;
+}

@@ -1,11 +1,12 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import type { ActivityEvent, Funnel } from "@/lib/request-insights";
+import type { ActivityEvent, Funnel, OutcomeBar } from "@/lib/request-insights";
 
 export interface Insights {
   caseType: "employee" | "client";
   funnel: Funnel;
+  outcomes: OutcomeBar[];
   reanalysing: number;
   pst: Array<{
     id: string;

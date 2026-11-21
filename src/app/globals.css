@@ -148,3 +148,82 @@
 body {
   font-feature-settings: "cv11", "ss01";
 }
+
+/* Views sliding inside an open drawer (SlideStack). */
+@keyframes aida-slide-in-right {
+  from {
+    translate: 100% 0;
+  }
+  to {
+    translate: 0 0;
+  }
+}
+@keyframes aida-slide-in-left {
+  from {
+    translate: -100% 0;
+  }
+  to {
+    translate: 0 0;
+  }
+}
+@keyframes aida-slide-out-left {
+  from {
+    translate: 0 0;
+  }
+  to {
+    translate: -100% 0;
+  }
+}
+@keyframes aida-slide-out-right {
+  from {
+    translate: 0 0;
+  }
+  to {
+    translate: 100% 0;
+  }
+}
+/* The drawer itself: in from the right, out to the right, the dark side fading with it. */
+@keyframes aida-drawer-in {
+  from {
+    translate: 100% 0;
+  }
+  to {
+    translate: 0 0;
+  }
+}
+@keyframes aida-drawer-out {
+  from {
+    translate: 0 0;
+  }
+  to {
+    translate: 100% 0;
+  }
+}
+@keyframes aida-fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+@keyframes aida-fade-out {
+  from {
+    opacity: 1;
+  }
+  to {
+    opacity: 0;
+  }
+}
+:root {
+  --aida-slide-duration: 450ms;
+  --aida-drawer-in: 550ms;
+  --aida-drawer-out: 400ms;
+}
+@media (prefers-reduced-motion: reduce) {
+  :root {
+    --aida-slide-duration: 1ms;
+    --aida-drawer-in: 1ms;
+    --aida-drawer-out: 1ms;
+  }
+}

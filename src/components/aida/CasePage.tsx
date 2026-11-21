@@ -16,8 +16,9 @@ import {
 import { count, formatClock, isConfigured, requestStage } from "./case-view";
 import { useCases } from "./cases-context";
 import { DecisionsPanel } from "./DecisionsPanel";
-import { Drawer, DrawerHeader } from "./Drawer";
+import { Drawer, DrawerHeader, SlideStack } from "./Drawer";
 import { ItemPanel } from "./ItemPanel";
+import { Outcomes, RulesPanel } from "./Outcomes";
 import {
   ContinueWaveModal,
   DeleteRequestModal,
@@ -337,176 +338,6 @@ function Banner({ spec }: { spec: BannerSpec }) {
 
 /* ---------- Funnel ---------- */
 
-const STEP_LABEL: Record<string, string> = {
-  received: "Received",
-  duplicates: "No duplicates",
-  type: "Accepted type, no password",
-  keyword: "No confidential keyword",
-  other: "Other fixed filters",
-};
-const STEP_REMOVED: Record<string, (n: number, who: string) => string> = {
-  duplicates: (n) => `−${count(n)} duplicates`,
-  type: (n) => `−${count(n)} unsupported`,
-  keyword: (n) => `−${count(n)} confidential`,
-  other: (n) => `−${count(n)} removed`,
-  subject: (n, who) => `−${count(n)} do not mention ${who}`,
-};
-
-function Funnel({
-  insights,
-  subjectName,
-  client,
-  aiSelected,
-  onOpen,
-}: {
-  insights: Insights | null;
-  subjectName: string;
-  client: boolean;
-  aiSelected: boolean;
-  onOpen: (step: string) => void;
-}) {
-  const funnel = insights?.funnel;
-  const max = funnel?.total || 1;
-  const rows = (funnel?.rows ?? []).filter(
-    (row) => !(client && row.key === "subject"),
-  );
-  return (
-    <Card className="flex flex-col gap-3.5 p-4 md:p-6">
-      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between md:gap-6">
-        <div className="flex flex-col gap-1">
-          <h2 className="text-[17px] font-semibold text-aida-text">
-            From what came in to what will be delivered
-          </h2>
-          <p className="text-[13px] text-aida-muted">
-            Emails and files together. Click a step to see the items that left
-            it.
-          </p>
-        </div>
-        {funnel && funnel.total > 0 ? (
-          <div className="flex items-center gap-3">
-            <span className="text-[40px] font-bold leading-[48px] text-aida-text">
-              {funnel.removedPercent}%
-            </span>
-            <span className="max-w-[160px] text-xs leading-[15px] text-aida-muted">
-              removed by fixed filters, before the AI review
-            </span>
-          </div>
-        ) : null}
-      </div>
-      {!funnel || funnel.total === 0 ? (
-        <p className="py-6 text-sm text-aida-muted">
-          {insights
-            ? "Nothing has been counted yet. The steps appear as the request is read."
-            : "Loading…"}
-        </p>
-      ) : (
-        rows.map((row) => {
-          const width = Math.max(
-            row.value > 0 ? 0.6 : 0,
-            (row.value / max) * 100,
-          );
-          const ai = row.key === "ai";
-          const clickable = row.key !== "received";
-          const label = ai
-            ? "AI verdict"
-            : row.key === "subject"
-              ? `Mentions ${subjectName || "the subject"}`
-              : STEP_LABEL[row.key];
-          const who = subjectName ? "them" : "it";
-          const split = funnel.ai;
-          const total = Math.max(
-            1,
-            split.kept + split.discarded + split.review + split.waiting,
-          );
-          return (
-            <button
-              type="button"
-              key={row.key}
-              disabled={!clickable}
-              onClick={() => onOpen(row.key)}
-              className={cn(
-                "group grid grid-cols-[110px_minmax(0,1fr)_56px] items-center gap-x-3 gap-y-0.5 text-left md:grid-cols-[190px_minmax(0,1fr)_80px_200px_14px] md:gap-4",
-                clickable ? "cursor-pointer" : "cursor-default",
-              )}
-            >
-              <span
-                className={cn(
-                  "text-[13px]",
-                  ai
-                    ? "font-semibold text-aida-primary-text"
-                    : "font-medium text-aida-text-2",
-                )}
-              >
-                {label}
-              </span>
-              <span className="relative h-[22px] rounded-[5px] bg-aida-surface-2">
-                {ai ? (
-                  <span
-                    className="absolute inset-y-0 left-0 flex gap-0.5"
-                    style={{ width: `${Math.max(width, 6)}%` }}
-                  >
-                    {(
-                      [
-                        [split.kept + split.review, "bg-aida-green"],
-                        [split.discarded, "bg-[#e2706f]"],
-                        [split.waiting, "bg-[#2a3a66]"],
-                      ] as const
-                    )
-                      .filter(([value]) => value > 0)
-                      .map(([value, tone]) => (
-                        <span
-                          key={tone}
-                          style={{ flex: value / total }}
-                          className={cn("rounded-[5px]", tone)}
-                        />
-                      ))}
-                  </span>
-                ) : (
-                  <span
-                    className="absolute inset-y-0 left-0 rounded-[5px] bg-[#4f7cff] transition group-hover:brightness-125"
-                    style={{ width: `${width}%` }}
-                  />
-                )}
-              </span>
-              <span
-                className={cn(
-                  "text-[15px] font-bold",
-                  ai && aiSelected ? "text-white" : "text-aida-text",
-                )}
-              >
-                {count(row.value)}
-              </span>
-              <span
-                className={cn(
-                  "text-[12.5px]",
-                  ai ? "text-aida-primary-text" : "text-aida-muted",
-                )}
-              >
-                {row.key === "received"
-                  ? "emails and files"
-                  : ai
-                    ? `${funnel.ai.keptPercent}% kept`
-                    : (STEP_REMOVED[row.key]?.(row.removed, who) ?? "")}
-              </span>
-              {clickable ? (
-                <ChevronRight
-                  className={cn(
-                    "size-3",
-                    ai ? "text-aida-primary-text" : "text-aida-dim",
-                  )}
-                  strokeWidth={1.5}
-                />
-              ) : (
-                <span />
-              )}
-            </button>
-          );
-        })
-      )}
-    </Card>
-  );
-}
-
 /* ---------- Activity ---------- */
 
 function Activity({ insights }: { insights: Insights | null }) {
@@ -695,7 +526,15 @@ function HeaderButton({
 /* ---------- Page ---------- */
 
 type PanelKind =
-  | { kind: "decisions"; step: string | null }
+  | {
+      kind: "decisions";
+      step: string | null;
+      tab?: "emails" | "files";
+      state?: string;
+      /** Opened from the reasons of this kind, so the panel can go back to them. */
+      from?: "emails" | "files";
+    }
+  | { kind: "reasons"; tab: "emails" | "files" }
   | { kind: "stage"; stage: string }
   | null;
 
@@ -1077,7 +916,12 @@ export function CasePage({ caseId }: { caseId: string }) {
 
   const stages = request ? buildStages(request, insights, client) : [];
   const panelStep = panel?.kind === "decisions" ? panel.step : null;
-  const decisionsOpen = panel?.kind === "decisions";
+  const reasonsBar =
+    panel?.kind === "reasons"
+      ? (insights?.outcomes.find((entry) => entry.kind === panel.tab) ?? null)
+      : null;
+  const decisionsOpen =
+    panel?.kind === "decisions" || panel?.kind === "reasons";
 
   return (
     <Page className="pb-12">
@@ -1194,12 +1038,12 @@ export function CasePage({ caseId }: { caseId: string }) {
 
       {request && configured && stage?.tone !== "idle" ? (
         <>
-          <Funnel
+          <Outcomes
             insights={insights}
-            subjectName={item.subject_name}
-            client={client}
-            aiSelected={decisionsOpen && panelStep === "ai"}
-            onOpen={(step) => setPanel({ kind: "decisions", step })}
+            onOpen={({ step, tab, state }) =>
+              setPanel({ kind: "decisions", step, tab, state })
+            }
+            onOpenRules={(tab) => setPanel({ kind: "reasons", tab })}
           />
           <Activity insights={insights} />
         </>
@@ -1211,26 +1055,67 @@ export function CasePage({ caseId }: { caseId: string }) {
         onClose={closePanel}
         width={decisionsOpen ? 740 : 560}
       >
-        {request && panel?.kind === "decisions" ? (
-          itemId ? (
-            <ItemPanel
-              itemId={itemId}
-              backLabel={
-                panel.step === "review" ? "Human review" : "AI decisions"
-              }
-              onBack={() => setItemId(null)}
-              onClose={closePanel}
-            />
-          ) : (
-            <DecisionsPanel
-              requestId={request.id}
-              title={`${caseName} · ${request.name}`}
-              step={panel.step === "review" ? null : panel.step}
-              review={panel.step === "review"}
-              onClose={closePanel}
-              onOpenItem={setItemId}
-            />
-          )
+        {request &&
+        (panel?.kind === "decisions" ||
+          (panel?.kind === "reasons" && reasonsBar)) ? (
+          <SlideStack
+            viewKey={
+              panel.kind === "reasons"
+                ? `reasons-${panel.tab}`
+                : itemId
+                  ? `item-${itemId}`
+                  : `decisions-${panel.step}-${panel.tab}-${panel.state}-${panel.from}`
+            }
+            depth={
+              panel.kind === "reasons"
+                ? 0
+                : (panel.from ? 1 : 0) + (itemId ? 1 : 0)
+            }
+          >
+            {panel.kind === "reasons" && reasonsBar ? (
+              <RulesPanel
+                bar={reasonsBar}
+                subjectName={item.subject_name}
+                title={`${caseName} · ${request.name}`}
+                onClose={closePanel}
+                onPick={({ step, tab, state }) =>
+                  setPanel({ kind: "decisions", step, tab, state, from: tab })
+                }
+              />
+            ) : panel.kind === "decisions" && itemId ? (
+              <ItemPanel
+                itemId={itemId}
+                backLabel={
+                  panel.step === "review" ? "Human review" : "AI decisions"
+                }
+                onBack={() => setItemId(null)}
+                onClose={closePanel}
+              />
+            ) : panel.kind === "decisions" ? (
+              <DecisionsPanel
+                requestId={request.id}
+                title={`${caseName} · ${request.name}`}
+                back={
+                  panel.from
+                    ? {
+                        label: "Removed by fixed rules",
+                        onClick: () =>
+                          setPanel({
+                            kind: "reasons",
+                            tab: panel.from ?? "emails",
+                          }),
+                      }
+                    : undefined
+                }
+                step={panel.step === "review" ? null : panel.step}
+                initialTab={panel.tab}
+                initialState={panel.state}
+                review={panel.step === "review"}
+                onClose={closePanel}
+                onOpenItem={setItemId}
+              />
+            ) : null}
+          </SlideStack>
         ) : null}
         {request && panel?.kind === "stage" ? (
           <StageDrawer

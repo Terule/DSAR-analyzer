@@ -88,6 +88,8 @@ export function DecisionsPanel({
   onClose,
   onOpenItem,
   initialTab = "emails",
+  initialState = "",
+  back,
   review = false,
 }: {
   requestId: string;
@@ -98,11 +100,15 @@ export function DecisionsPanel({
   onClose: () => void;
   onOpenItem: (id: string) => void;
   initialTab?: ItemTab;
+  /** Opens already filtered to one state (kept, discarded). */
+  initialState?: string;
+  /** An arrow back to the list this one was opened from. */
+  back?: { label: string; onClick: () => void };
   /** The human review list: every item a person must check, no tabs. */
   review?: boolean;
 }) {
   const [tab, setTab] = useState<ItemTab>(initialTab);
-  const [state, setState] = useState<string>(review ? "review" : "");
+  const [state, setState] = useState<string>(review ? "review" : initialState);
   const [query, setQuery] = useState("");
   const [listing, setListing] = useState<Listing | null>(null);
   const [loading, setLoading] = useState(true);
@@ -292,6 +298,7 @@ export function DecisionsPanel({
         title={info.title}
         subtitle={`${title} · ${info.subtitle}`}
         onClose={onClose}
+        back={back}
         actions={
           <button
             type="button"

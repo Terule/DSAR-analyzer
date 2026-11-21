@@ -143,6 +143,54 @@ async function demoItems(requestId: string, total: number) {
   await prisma.itemEvent.createMany({ data: events });
 }
 
+/**
+ * Duplicates and Files-folder items, in the proportions of a real request
+ * (most of what comes in is repetition), so the outcome bars have both kinds.
+ */
+async function demoBulk(requestId: string) {
+  const rows: Array<Record<string, unknown>> = [];
+  const add = (
+    kind: "email" | "file",
+    origin: string,
+    state: string,
+    rule: string | null,
+    decidedBy: string | null,
+    total: number,
+  ) => {
+    for (let index = 0; index < total; index++) {
+      rows.push({
+        id: crypto
+          .createHash("sha256")
+          .update(`bulk:${requestId}:${kind}:${rule}:${state}:${decidedBy}:${index}`)
+          .digest("hex"),
+        case_request_id: requestId,
+        kind,
+        origin,
+        label: `${kind === "email" ? "Email" : "Document"} ${rule ?? state} ${index + 1}`,
+        state,
+        decision_rule: rule,
+        decided_by: decidedBy,
+      });
+    }
+  };
+  add("email", "pst", "discarded", "dup", "rule", 640);
+  add("file", "files_folder", "discarded", "dup", "rule", 7_000);
+  add("file", "files_folder", "discarded", "subject_absent", "rule", 11_600);
+  add("file", "files_folder", "discarded", "signature_image", "rule", 930);
+  add("file", "files_folder", "discarded", "keyword", "rule", 870);
+  add("file", "files_folder", "discarded", "unsupported_type", "rule", 710);
+  add("file", "files_folder", "discarded", "ai_file", "haiku-4.5", 150);
+  add("file", "files_folder", "discarded", "ai_file", "haiku-5.5", 380);
+  add("file", "files_folder", "kept", "ai_file", "haiku-4.5", 970);
+  add("file", "files_folder", "kept", "ai_file", "haiku-5.5", 245);
+  add("file", "files_folder", "review", "ai_file", "haiku-4.5", 3);
+  for (let start = 0; start < rows.length; start += 5_000) {
+    await prisma.item.createMany({
+      data: rows.slice(start, start + 5_000) as never,
+    });
+  }
+}
+
 async function main() {
   if ((await prisma.managedCase.count()) > 0) {
     throw new Error("Refusing to seed a database that already has cases.");
@@ -207,6 +255,7 @@ async function main() {
     ai_duration_ms: minutes(11),
   });
   await demoItems(acmR1.id, 220);
+  await demoBulk(acmR1.id);
 
   const done = {
     status: "completed",

@@ -1,6 +1,10 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import { buildActivity, buildFunnel } from "@/lib/request-insights";
+import {
+  buildActivity,
+  buildFunnel,
+  buildOutcomes,
+} from "@/lib/request-insights";
 
 export const dynamic = "force-dynamic";
 
@@ -48,7 +52,7 @@ export async function GET(
   // attachments of an email, so only top-level items count as "received".
   const [groups, reanalysing] = await Promise.all([
     prisma.item.groupBy({
-      by: ["state", "decision_rule"],
+      by: ["state", "decision_rule", "origin"],
       where: {
         case_request_id: requestId,
         origin: { in: ["pst", "files_folder"] },
@@ -69,6 +73,17 @@ export async function GET(
       state: group.state,
       rule: group.decision_rule,
       count: group._count._all,
+    })),
+  );
+  const outcomes = buildOutcomes(
+    groups.map((group) => ({
+      state: group.state,
+      rule: group.decision_rule,
+      count: group._count._all,
+      kind:
+        group.origin === "files_folder"
+          ? ("files" as const)
+          : ("emails" as const),
     })),
   );
   const pst = request.processed_files.filter((file) => file.kind === "pst");
@@ -117,6 +132,7 @@ export async function GET(
   return NextResponse.json({
     caseType: request.case.case_type,
     funnel,
+    outcomes,
     reanalysing,
     pst: pst.map((file) => ({
       id: file.id,
