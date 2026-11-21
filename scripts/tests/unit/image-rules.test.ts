@@ -166,6 +166,27 @@ describe("images attached to emails", () => {
     assert.deepEqual(result.drops, []);
   });
 
+  it("meets the image rules even with no file name or extension", async () => {
+    const result = await render([
+      {
+        content: png(16, 16),
+        contentType: "image/png",
+      } as unknown as Attachment,
+      attachment("image001", png(16, 20)),
+    ]);
+    assert.deepEqual(result.review, []);
+    assert.equal(result.drops.length, 2);
+    assert.ok(result.drops.every((d) => d.rule === "signature_image"));
+  });
+
+  it("sends a BMP, TIFF or HEIC to review as the original, never drops it", async () => {
+    const result = await render([
+      attachment("scan.tiff", Buffer.from("II*\0not-really-a-tiff")),
+    ]);
+    assert.deepEqual(result.drops, []);
+    assert.deepEqual(result.review, ["Email 0001 Image 1.tiff"]);
+  });
+
   it("ignores an image embedded in the message body", async () => {
     const result = await render([
       attachment("scan.png", png(300, 300, true), true),

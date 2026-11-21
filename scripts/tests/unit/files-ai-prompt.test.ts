@@ -227,3 +227,15 @@ describe("batch request", () => {
     assert.match(buildFilesAiSystemPrompt(criteria), /own payslip/);
   });
 });
+
+describe("large Teams conversations", () => {
+  it("are judged work-versus-personal in employee mode only", () => {
+    const employee = buildFilesAiSystemPrompt(criteria, "employee");
+    assert.match(employee, /LARGE CONVERSATION/);
+    assert.match(employee, /work talk/);
+    assert.doesNotMatch(
+      buildFilesAiSystemPrompt(criteria, "client"),
+      /LARGE CONVERSATION/,
+    );
+  });
+});

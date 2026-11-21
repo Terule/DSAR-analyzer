@@ -1,3 +1,4 @@
+import { LARGE_CHAT_MARKER } from "./teams-chat";
 export interface FilesAiCriteria {
   name: string;
   email: string;
@@ -72,6 +73,7 @@ You receive one file (or, when marked SAMPLE, the start of a large file plus lin
 Relevance: is the file about the Data Subject, written by them, sent to them, or does it contain their personal data in a way that matters to a subject access request.
 - Answer "irrelevant" ONLY when the file is clearly unrelated to the Data Subject (for example a coincidental name match, a generic template, a system export that merely lists many people).
 - When in doubt about relevance, answer "relevant". A SAMPLE that shows the subject in a meaningful context means "relevant" for the whole file.
+- Large Teams conversations: when the text says "${LARGE_CHAT_MARKER}", it holds only excerpts of a big chat, around the messages that cite the subject (the rest of the chat was already left out). Answer "irrelevant" when the excerpts are work talk (tasks, projects, clients, scheduling, operations, ordinary colleague chatter), even if they name the subject. Answer "relevant" only when they deal with a personal matter of the subject (their wellbeing, health, conduct, relationships, personal life, employment or pay situation, or something said to or about them as a person). When in doubt, answer "relevant".
 
 ${SENSITIVITY_RULES}
 

@@ -23,6 +23,55 @@ export const IMAGE_EXTENSIONS = new Set([
   ".webp",
 ]);
 
+/**
+ * Real image formats the pipeline cannot read or render. They are never
+ * dropped for that reason: the original goes to a person.
+ */
+export const UNRENDERABLE_IMAGE_EXTENSIONS = new Set([
+  ".bmp",
+  ".tif",
+  ".tiff",
+  ".heic",
+  ".heif",
+]);
+
+const UNRENDERABLE_IMAGE_TYPE_RE = /^image\/(bmp|x-ms-bmp|tiff|heic|heif)\b/i;
+
+/**
+ * An attachment is an image when its name, its declared type or its first bytes
+ * say so. The name alone is not enough: an image pasted into a message often
+ * arrives with no extension (or no name), and must still meet the image rules.
+ */
+export function isImageAttachment(attachment: {
+  filename?: string;
+  contentType?: string;
+  content?: Buffer | Uint8Array | string;
+}): boolean {
+  const name = attachment.filename || "";
+  if (isImageFilename(name) || isUnrenderableImage(attachment)) return true;
+  if ((attachment.contentType || "").toLowerCase().startsWith("image/")) {
+    return true;
+  }
+  return (
+    Buffer.isBuffer(attachment.content) &&
+    readImageFacts(attachment.content) !== null
+  );
+}
+
+/** A BMP, TIFF or HEIC: an image, but one the pipeline cannot render. */
+export function isUnrenderableImage(attachment: {
+  filename?: string;
+  contentType?: string;
+}): boolean {
+  const name = attachment.filename || "";
+  const dot = name.lastIndexOf(".");
+  return (
+    (dot >= 0 &&
+      UNRENDERABLE_IMAGE_EXTENSIONS.has(name.slice(dot).toLowerCase())) ||
+    UNRENDERABLE_IMAGE_TYPE_RE.test(attachment.contentType || "")
+  );
+}
+
 export interface ImageFacts {
   width: number;
   height: number;

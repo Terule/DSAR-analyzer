@@ -25,7 +25,12 @@ import {
   isEmbeddedInBody,
   RECURRENCE_MIN_EMAILS,
 } from "./image-recurrence";
-import { classifyImage, isImageFilename, readImageFacts } from "./image-rules";
+import {
+  classifyImage,
+  isImageAttachment,
+  isUnrenderableImage,
+  readImageFacts,
+} from "./image-rules";
 import { judgeImageWithVision, visionEnabled } from "./image-vision";
 import {
   type AttachmentDecision,
@@ -1245,11 +1250,16 @@ export async function renderEmailAttachments(input: {
   };
   // Images are judged on their own: a signature or decoration is dropped with
   // the signal that decided, anything else is rendered for a person to look at.
-  const imageAttachments: Array<{ filename: string; content: Buffer }> = [];
+  const imageAttachments: Array<{
+    filename: string;
+    content: Buffer;
+    /** A BMP, TIFF or HEIC: kept as the original for a person. */
+    unrenderable?: boolean;
+  }> = [];
   const documentAttachments: typeof input.attachments = [];
   for (const attachment of input.attachments) {
     const name = attachment?.filename || "attachment";
-    if (attachment?.content && isImageFilename(name)) {
+    if (attachment?.content && isImageAttachment(attachment)) {
       // An image embedded in the message body is already part of the email PDF.
       if (
         isEmbeddedInBody(
@@ -1270,6 +1280,7 @@ export async function renderEmailAttachments(input: {
         content: Buffer.isBuffer(attachment.content)
           ? attachment.content
           : Buffer.from(attachment.content),
+        unrenderable: isUnrenderableImage(attachment),
       });
     } else {
       documentAttachments.push(attachment);
@@ -1280,6 +1291,22 @@ export async function renderEmailAttachments(input: {
   for (const image of imageAttachments) {
     const facts = readImageFacts(image.content);
     if (!facts) {
+      if (image.unrenderable) {
+        // A real image the pipeline cannot read (BMP, TIFF, HEIC): never
+        // dropped for that, the original goes to a person.
+        const hash = imageHash(image.content);
+        if (input.seenImages?.has(hash)) {
+          drop(
+            image.filename,
+            "dup",
+            "The same image was already sent for review from another email.",
+          );
+        } else {
+          input.seenImages?.add(hash);
+          imagesForReview.push(image);
+        }
+        continue;
+      }
       drop(image.filename, "unreadable_image", "The image could not be read.");
       continue;
     }
@@ -1480,6 +1507,22 @@ export async function renderEmailAttachments(input: {
       let n = 1;
       for (const image of imagesForReview) {
         const imageName = `${currentBaseName} Image ${String(n++).padStart(pad, "0")}`;
+        if (image.unrenderable) {
+          keep(
+            image.filename,
+            "review",
+            "image_review",
+            "An image format the pipeline cannot render (BMP, TIFF or HEIC): the original is sent for a person to look at.",
+          );
+          fs.writeFileSync(
+            path.join(
+              input.reviewDir,
+              `${imageName}${path.extname(image.filename).toLowerCase() || ".img"}`,
+            ),
+            image.content,
+          );
+          continue;
+        }
         keep(
           image.filename,
           "review",

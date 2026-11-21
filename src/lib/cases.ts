@@ -1,8 +1,10 @@
 import crypto from "node:crypto";
 import { promises as fs } from "node:fs";
 import path from "node:path";
+import { hasActiveJobForFilePhase } from "./control-plane/job-store";
 import { isPstFilename } from "./file-types";
 import { prisma } from "./prisma";
+import { lifecycleRowsDone } from "./request-lifecycle";
 import {
   effectiveWaveScope,
   removeOutputAbove,
@@ -632,7 +634,9 @@ async function refreshRequestLifecycleNow(requestId?: string): Promise<void> {
   const requests = await prisma.caseRequest.findMany({
     where: requestId
       ? { id: requestId }
-      : { status: { in: ["running", "queued"] } },
+      : // Completed requests are looked at too, only to reopen one whose work
+        // came back (see lifecycleRowsDone); a finished one is left alone.
+        { status: { in: ["running", "queued", "completed"] } },
     select: {
       id: true,
       deliverable_path: true,
@@ -644,6 +648,7 @@ async function refreshRequestLifecycleNow(requestId?: string): Promise<void> {
     const rows = await prisma.processedFile.findMany({
       where: { case_request_id: request.id },
       select: {
+        id: true,
         kind: true,
         pdf_status: true,
         files_status: true,
@@ -652,11 +657,10 @@ async function refreshRequestLifecycleNow(requestId?: string): Promise<void> {
       },
     });
     if (rows.length === 0) continue;
-    const done = rows.every((row) =>
-      row.kind === "files"
-        ? ["completed", "failed"].includes(row.files_status)
-        : ["completed", "failed"].includes(row.pdf_status),
-    );
+    const done = await lifecycleRowsDone(rows, hasActiveJobForFilePhase);
+    // The poll leaves a finished request alone; only an explicit refresh
+    // recalculates its figures.
+    if (!requestId && request.status === "completed" && done) continue;
     // `Discarded/` holds files the AI relevance check removed and
     // `Unconverted/` fallback originals; neither is delivered or uploaded.
     // An output folder that was removed (archived or cleaned up) keeps the

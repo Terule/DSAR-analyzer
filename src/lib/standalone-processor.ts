@@ -23,6 +23,7 @@ import { classifyImage, IMAGE_EXTENSIONS, readImageFacts } from "./image-rules";
 import { judgeImageWithVision, visionEnabled } from "./image-vision";
 import type { ChildItemDecision } from "./items";
 import { fileDiscardRule } from "./items";
+import { mediaKind } from "./media-types";
 import {
   isPasswordProtectedFile,
   isPasswordProtectionError,
@@ -1603,7 +1604,7 @@ export async function runStandaloneBatch(
       else {
         recordDiscard(
           filePath,
-          `Discarded ${ext.toUpperCase() || "(no extension)"} ${file}: unsupported format.`,
+          `Discarded ${ext.toUpperCase() || "(no extension)"} ${file}: unsupported format${mediaKind(ext) ? ` (${mediaKind(ext)} is never delivered)` : ""}.`,
         );
         skippedCount++;
         continue;

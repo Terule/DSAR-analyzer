@@ -2,6 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { type ArchiveLimits, expandArchives } from "./archive-expander";
+import { mediaKind } from "./media-types";
 import { isPasswordProtectedBuffer } from "./password-protection";
 
 /** An attachment the pipeline did not deliver, with the rule that dropped it. */
@@ -80,7 +81,9 @@ export async function flattenAttachments(
       onDrop?.({
         filename,
         rule: "unsupported_type",
-        reason: `Unsupported attachment type ${extension || "(none)"}.`,
+        reason: mediaKind(extension)
+          ? `${mediaKind(extension) === "video" ? "Video" : "Audio"} attachment (${extension}) is never delivered.`
+          : `Unsupported attachment type ${extension || "(none)"}.`,
       });
       continue;
     }

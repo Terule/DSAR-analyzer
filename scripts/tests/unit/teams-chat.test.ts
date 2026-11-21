@@ -10,8 +10,11 @@ import {
 import { buildSubjectTokens } from "../../../src/lib/subject-rules";
 import {
   buildExcerpts,
+  isLargeChat,
+  LARGE_CHAT_MARKER,
   messageKey,
   parseChatMessages,
+  renderExcerptsHtml,
 } from "../../../src/lib/teams-chat";
 
 function message(
@@ -305,5 +308,23 @@ describe("per-message audit decisions", () => {
       if (previous === undefined) delete process.env.CHAT_CONTEXT_MESSAGES;
       else process.env.CHAT_CONTEXT_MESSAGES = previous;
     }
+  });
+});
+
+describe("large conversations", () => {
+  it("tell the screening when a chat is large", () => {
+    const html = (total: number) =>
+      renderExcerptsHtml(
+        "chat.html",
+        total,
+        buildExcerpts(
+          parseChatMessages(message(1, "Jon Wheeler", "hello")),
+          tokens,
+        ),
+      );
+    assert.ok(html(100).includes(LARGE_CHAT_MARKER));
+    assert.ok(!html(99).includes(LARGE_CHAT_MARKER));
+    assert.equal(isLargeChat(100), true);
+    assert.equal(isLargeChat(10), false);
   });
 });

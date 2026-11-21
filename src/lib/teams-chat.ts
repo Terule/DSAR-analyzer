@@ -25,6 +25,24 @@ export function chatContextMessages(): number {
 
 export const CHAT_CONTEXT_MESSAGES = chatContextMessages();
 
+/**
+ * A conversation with at least this many messages is a "large" chat: the AI
+ * screening drops it when the excerpts are about work and keeps it only when
+ * they deal with a personal matter of the subject. 100 by default, 2 or more
+ * through CHAT_LARGE_MESSAGES.
+ */
+export function chatLargeMessages(): number {
+  const value = Number(process.env.CHAT_LARGE_MESSAGES);
+  if (!Number.isFinite(value) || value < 2) return 100;
+  return Math.round(value);
+}
+
+export const LARGE_CHAT_MARKER = "LARGE CONVERSATION";
+
+export function isLargeChat(totalMessages: number): boolean {
+  return totalMessages >= chatLargeMessages();
+}
+
 export interface ChatMessage {
   id: string;
   author: string;
@@ -229,7 +247,7 @@ h2 { margin-bottom: 2pt; } .ref { color: #555; margin-bottom: 12pt; }
 hr.gap { border: 0; border-top: 1pt dashed #999; margin: 14pt 0; }
 </style></head><body>
 <h2>${escapeHtml(conversation)}</h2>
-<div class="ref">Excerpts of a Teams conversation of ${totalMessages} messages. Messages marked with a dark bar cite the data subject; the others are context.</div>
+<div class="ref">${isLargeChat(totalMessages) ? `${LARGE_CHAT_MARKER}: ` : ""}Excerpts of a Teams conversation of ${totalMessages} messages. Messages marked with a dark bar cite the data subject; the others are context.</div>
 ${blocks}
 </body></html>`;
 }
